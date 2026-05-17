@@ -22,12 +22,21 @@ ENV/
 *.swp
 *.swo
 
-# Data/checkpoints (optional - adjust as needed)
+# Data and checkpoints
 checkpoint.json
+checkpoints/
 batches/
 batch_*.txt
 2026*.txt
+data/
+*.parquet
+
+# Generated artifacts
+*.pptx
+sensor_buffer.db
+collector.log
 
 # OS
 .DS_Store
 Thumbs.db
+instruments_config.json
