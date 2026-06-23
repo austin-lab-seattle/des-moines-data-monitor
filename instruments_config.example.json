@@ -1,0 +1,47 @@
+{
+  "instruments": [
+    {
+      "id": "BC-MA200",
+      "display_name": "Black Carbon MA200",
+      "location": "Duwamish",
+      "ingestion_type": "growing_file",
+      "data_glob": "data/black_carbon/*MA200*.csv",
+      "active": true
+    },
+    {
+      "id": "CO2-LICOR",
+      "display_name": "CO2 Li-Cor",
+      "location": "Duwamish",
+      "ingestion_type": "growing_file",
+      "data_glob": "data/co2_li_cor/*CO2-*.txt",
+      "active": true
+    },
+    {
+      "id": "NEPH-PM25",
+      "display_name": "Nephelometer PM25",
+      "location": "Duwamish",
+      "ingestion_type": "growing_file",
+      "data_glob": "data/nephlometer/*Neph*.csv",
+      "active": true
+    },
+    {
+      "id": "NO2-CAPS",
+      "display_name": "NO2 CAPS",
+      "location": "Duwamish",
+      "ingestion_type": "growing_file",
+      "data_glob": "data/no2_caps/*NO2-CAPS*.dat",
+      "active": true
+    },
+    {
+      "id": "SMPS",
+      "display_name": "SMPS",
+      "location": "Duwamish",
+      "ingestion_type": "growing_file",
+      "data_glob": "data/smps/*SMPS*.csv",
+      "active": true
+    }
+  ],
+  "s3_bucket": "des-moines-data-pipeline-austinlab",
+  "aws_region": "us-west-2",
+  "pipeline_status_key": "pipeline_status.json"
+}

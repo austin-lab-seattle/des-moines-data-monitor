@@ -1,121 +1,140 @@
 import json
+import os
 import boto3
 from datetime import datetime, timedelta, timezone
 
-# Initialize boto3 clients (Lambda execution role provides credentials)
-cw = boto3.client('cloudwatch')
-s3 = boto3.client('s3')
+cloudwatch_client = boto3.client("cloudwatch")
+cost_explorer_client = boto3.client("ce", region_name="us-east-1")
+s3_client = boto3.client("s3")
 
+BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 CW_NAMESPACE = "AirQuality/Pipeline"
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
-BUCKET_NAME = "des-moines-data-pipeline"
 
-def get_cw_stat(metric, stat, dims=None, hours=1, period=300):
-    """Helper to fetch a single stat from CloudWatch."""
+
+def iter_s3_objects(prefix):
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+        for object_summary in page.get("Contents", []):
+            key = object_summary["Key"]
+            if key.endswith(".keep") or key.endswith("/"):
+                continue
+            yield object_summary
+
+
+def get_latest_cloudwatch_metric(metric_name, dimensions=None, hours=168):
+    """Fetch the latest datapoint for a CloudWatch metric over the past week."""
     try:
-        kw = {
+        request = {
             "Namespace": CW_NAMESPACE,
-            "MetricName": metric,
+            "MetricName": metric_name,
             "StartTime": datetime.now(timezone.utc) - timedelta(hours=hours),
             "EndTime": datetime.now(timezone.utc),
-            "Period": period,
-            "Statistics": [stat]
+            "Period": 3600,
+            "Statistics": ["Maximum"],
         }
-        if dims:
-            kw["Dimensions"] = dims
-        pts = cw.get_metric_statistics(**kw).get("Datapoints", [])
-        if not pts:
-            return 0
-        return sorted(pts, key=lambda p: p["Timestamp"])[-1].get(stat, 0)
-    except Exception as e:
-        print(f"Error fetching CW metric {metric}: {e}")
-        return 0
+        if dimensions:
+            request["Dimensions"] = dimensions
+        datapoints = cloudwatch_client.get_metric_statistics(**request).get("Datapoints", [])
+        if not datapoints:
+            return None
+        return sorted(datapoints, key=lambda point: point["Timestamp"])[-1]
+    except Exception as exc:
+        print(f"Error fetching CloudWatch metric {metric_name}: {exc}")
+        return None
+
+
+def get_s3_last_modified(instrument_id):
+    """
+    Scan the instrument's bronze prefix in S3 and return the exact
+    LastModified timestamp of the most recently uploaded file.
+    """
+    try:
+        prefix = f"{instrument_id}/bronze/"
+        latest = None
+        for object_summary in iter_s3_objects(prefix):
+            if latest is None or object_summary["LastModified"] > latest:
+                latest = object_summary["LastModified"]
+        return latest  # timezone-aware datetime or None
+    except Exception as exc:
+        print(f"S3 scan error for {instrument_id}: {exc}")
+        return None
+
+
+def get_month_to_date_cost():
+    try:
+        now = datetime.now(timezone.utc)
+        start_of_month = now.replace(day=1).strftime("%Y-%m-%d")
+        end_date = now.strftime("%Y-%m-%d")
+        if start_of_month == end_date:
+            return 0.00
+        response = cost_explorer_client.get_cost_and_usage(
+            TimePeriod={"Start": start_of_month, "End": end_date},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+        )
+        cost = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
+        return round(float(cost), 2)
+    except Exception as exc:
+        print(f"Cost Explorer error: {exc}")
+        return "N/A"
+
 
 def lambda_handler(event, context):
-    """
-    HTTP API Gateway entry point.
-    Returns JSON payload for the React dashboard.
-    """
-    now = datetime.now(timezone.utc)
-    
-    # 1. Pipeline Overview
-    lambda_sr = get_cw_stat("LambdaSuccess", "Average", hours=24, period=86400)
-    
-    # Cost metrics placeholder (if stored in S3)
-    mtd_cost = 0.00
-    try:
-        # Example: Read cost metrics stored as JSON in S3
-        # response = s3.get_object(Bucket=BUCKET_NAME, Key='metrics/cost_mtd.json')
-        # mtd_cost = json.loads(response['Body'].read().decode('utf-8')).get('total_cost', 0)
-        mtd_cost = 12.45 # Placeholder for demo
-    except Exception:
-        pass
+    month_to_date_cost = get_month_to_date_cost()
 
-    # 2. Instrument Inventory & Status
     instruments = []
-    total_volume = 0
-    total_files = 0
-    worst_freshness = 0
-    
-    for iid in INSTRUMENT_IDS:
-        dims = [{"Name": "Instrument", "Value": iid}]
-        
-        b_files = get_cw_stat("BronzeFiles", "Maximum", dims)
-        b_size = get_cw_stat("BronzeSize", "Maximum", dims)
-        s_files = get_cw_stat("SilverFiles", "Maximum", dims)
-        freshness = get_cw_stat("Freshness", "Maximum", dims)
-        
-        total_volume += b_size
-        total_files += b_files
-        if freshness > worst_freshness:
-            worst_freshness = freshness
-            
-        # Determine Status
-        status = "OK"
-        if freshness > 2.0:
-            status = "ERROR"
-        elif freshness > 0.5:
-            status = "DEGRADED"
-            
-        # Sync calculation
-        sync_pct = (s_files / b_files * 100) if b_files > 0 else 100
-        
+    latest_global_update = None
+    latest_global_instrument = "NONE"
+    any_data = False
+
+    for instrument_id in INSTRUMENT_IDS:
+        dimensions = [{"Name": "Instrument", "Value": instrument_id}]
+
+        size_datapoint = get_latest_cloudwatch_metric("BronzeSize", dimensions)
+        rows_datapoint = get_latest_cloudwatch_metric("BronzeRows", dimensions)
+
+        bronze_size = int(size_datapoint.get("Maximum", 0)) if size_datapoint else 0
+        bronze_rows = int(rows_datapoint.get("Maximum", 0)) if rows_datapoint else 0
+
+        last_modified = get_s3_last_modified(instrument_id)
+        last_update_iso = last_modified.isoformat() if last_modified else None
+
+        if last_modified:
+            any_data = True
+            if latest_global_update is None or last_modified > latest_global_update:
+                latest_global_update = last_modified
+                latest_global_instrument = instrument_id
+
         instruments.append({
-            "id": iid,
-            "name": iid.replace("-", " "),
-            "status": status,
-            "bronzeFiles": b_files,
-            "silverFiles": s_files,
-            "syncStatus": round(sync_pct, 1),
-            "freshnessLag": round(freshness, 2),
-            "bronzeSize": b_size
+            "id": instrument_id,
+            "name": instrument_id.replace("-", " "),
+            "bronzeSize": bronze_size,
+            "bronzeRows": bronze_rows,
+            "lastUpdate": last_update_iso,
         })
 
-    # Prepare final payload
+    refresh_time_iso = latest_global_update.isoformat() if latest_global_update else None
+    system_status = "ONLINE" if any_data else "DEGRADED"
+
     payload = {
-        "lastUpdated": now.isoformat(),
+        "refreshTime": refresh_time_iso,
+        "systemStatus": system_status,
         "kpis": {
-            "totalVolumeBytes": total_volume,
-            "totalBronzeFiles": total_files,
-            "maxFreshnessLag": round(worst_freshness, 2),
-            "lambdaSuccessRate": round(lambda_sr * 100, 1),
-            "mtdCost": mtd_cost
+            "mtdCost": month_to_date_cost,
+            "costScope": "AWS account MTD",
+            "lastUpdatedInstrument": latest_global_instrument,
+            "siteName": "Des Moines",
         },
         "instruments": instruments,
-        # Placeholder for 24h trend data for charts
-        "trends": {
-            "dates": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-            "cost": [1.2, 1.5, 1.3, 1.8, 1.4, 1.6, 2.0]
-        }
     }
 
     return {
         "statusCode": 200,
         "headers": {
-            # Required for CORS
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
-        "body": json.dumps(payload)
+        "body": json.dumps(payload),
     }

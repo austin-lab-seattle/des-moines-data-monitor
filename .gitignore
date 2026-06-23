@@ -1,6 +1,5 @@
 # Environment variables
 .env
-.streamlit/secrets.toml
 
 # AWS credentials
 aws_creds.json
@@ -16,9 +15,10 @@ env/
 venv/
 ENV/
 
-# IDE
+# IDE / agent tooling
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
@@ -27,16 +27,18 @@ checkpoint.json
 checkpoints/
 batches/
 batch_*.txt
-2026*.txt
 data/
 *.parquet
 
 # Generated artifacts
 *.pptx
+*.zip
 sensor_buffer.db
 collector.log
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Local instrument config (copy instruments_config.example.json and edit data_glob paths)
 instruments_config.json
