@@ -1,15 +1,22 @@
+import csv
 import json
 import os
-import boto3
-from datetime import datetime, timedelta, timezone
+import re
+import time
+from datetime import datetime, timezone
 
-cloudwatch_client = boto3.client("cloudwatch")
+import boto3
+
 cost_explorer_client = boto3.client("ce", region_name="us-east-1")
 s3_client = boto3.client("s3")
 
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
-CW_NAMESPACE = "AirQuality/Pipeline"
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
+
+# Cost Explorer is slow and the value moves slowly, so cache it in the warm
+# container. Every Refresh still recounts the rows live; only the cost tile is cached.
+COST_TTL_SECONDS = 3600
+_cost_cache = {"value": None, "ts": 0.0}
 
 
 def iter_s3_objects(prefix):
@@ -22,62 +29,118 @@ def iter_s3_objects(prefix):
             yield object_summary
 
 
-def get_latest_cloudwatch_metric(metric_name, dimensions=None, hours=168):
-    """Fetch the latest datapoint for a CloudWatch metric over the past week."""
+# --- Row detection: which lines are real data rows vs headers and comments ---
+
+def split_fields(line):
+    if "\t" in line:
+        return [field.strip().strip('"') for field in line.split("\t")]
     try:
-        request = {
-            "Namespace": CW_NAMESPACE,
-            "MetricName": metric_name,
-            "StartTime": datetime.now(timezone.utc) - timedelta(hours=hours),
-            "EndTime": datetime.now(timezone.utc),
-            "Period": 3600,
-            "Statistics": ["Maximum"],
-        }
-        if dimensions:
-            request["Dimensions"] = dimensions
-        datapoints = cloudwatch_client.get_metric_statistics(**request).get("Datapoints", [])
-        if not datapoints:
-            return None
-        return sorted(datapoints, key=lambda point: point["Timestamp"])[-1]
-    except Exception as exc:
-        print(f"Error fetching CloudWatch metric {metric_name}: {exc}")
-        return None
+        return [field.strip().strip('"') for field in next(csv.reader([line]))]
+    except csv.Error:
+        return []
 
 
-def get_s3_last_modified(instrument_id):
-    """
-    Scan the instrument's bronze prefix in S3 and return the exact
-    LastModified timestamp of the most recently uploaded file.
-    """
+def is_float(value):
     try:
-        prefix = f"{instrument_id}/bronze/"
-        latest = None
-        for object_summary in iter_s3_objects(prefix):
-            if latest is None or object_summary["LastModified"] > latest:
-                latest = object_summary["LastModified"]
-        return latest  # timezone-aware datetime or None
-    except Exception as exc:
-        print(f"S3 scan error for {instrument_id}: {exc}")
-        return None
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def is_data_row(instrument_id, line):
+    stripped = line.strip().lstrip("﻿")
+    if not stripped or stripped.startswith(('%', '#')):
+        return False
+
+    fields = split_fields(stripped)
+    if not fields or not any(fields):
+        return False
+
+    first = fields[0]
+    second = fields[1] if len(fields) > 1 else ""
+
+    if instrument_id == "BC-MA200":
+        return len(fields) > 10 and first.upper().startswith("MA") and second.isdigit()
+
+    if instrument_id == "CO2-LICOR":
+        return (
+            len(fields) >= 3
+            and re.match(r"^\d{4}-\d{2}-\d{2}$", first)
+            and re.match(r"^\d{2}:\d{2}:\d{2}$", second)
+        )
+
+    if instrument_id == "NEPH-PM25":
+        return (
+            len(fields) >= 3
+            and re.match(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}$", first)
+            and is_float(second)
+        )
+
+    if instrument_id == "NO2-CAPS":
+        return len(fields) >= 10 and re.match(r"^\d{6}$", first) and is_float(fields[3])
+
+    if instrument_id == "SMPS":
+        return (
+            len(fields) > 40
+            and first.isdigit()
+            and re.match(r"^\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}:\d{2}$", second)
+        )
+
+    return False
+
+
+def count_data_rows(instrument_id, s3_key):
+    obj = s3_client.get_object(Bucket=BUCKET, Key=s3_key)
+    raw = obj["Body"].read().decode("utf-8", errors="replace")
+    return sum(1 for line in raw.splitlines() if is_data_row(instrument_id, line))
+
+
+def scan_instrument(instrument_id):
+    """One live pass over an instrument's bronze prefix.
+
+    Returns (row_count, total_bytes, latest_modified). This runs on every API
+    call, so the dashboard's row count and size are always current when the user
+    hits Refresh, with no dependence on the hourly collector or CloudWatch.
+    """
+    rows = 0
+    size = 0
+    latest = None
+    for object_summary in iter_s3_objects(f"{instrument_id}/bronze/"):
+        size += object_summary["Size"]
+        if latest is None or object_summary["LastModified"] > latest:
+            latest = object_summary["LastModified"]
+        try:
+            rows += count_data_rows(instrument_id, object_summary["Key"])
+        except Exception as exc:
+            print(f"Could not count rows in {object_summary['Key']}: {exc}")
+    return rows, size, latest
 
 
 def get_month_to_date_cost():
+    now = time.time()
+    if _cost_cache["value"] is not None and now - _cost_cache["ts"] < COST_TTL_SECONDS:
+        return _cost_cache["value"]
     try:
-        now = datetime.now(timezone.utc)
-        start_of_month = now.replace(day=1).strftime("%Y-%m-%d")
-        end_date = now.strftime("%Y-%m-%d")
+        now_utc = datetime.now(timezone.utc)
+        start_of_month = now_utc.replace(day=1).strftime("%Y-%m-%d")
+        end_date = now_utc.strftime("%Y-%m-%d")
         if start_of_month == end_date:
-            return 0.00
-        response = cost_explorer_client.get_cost_and_usage(
-            TimePeriod={"Start": start_of_month, "End": end_date},
-            Granularity="MONTHLY",
-            Metrics=["UnblendedCost"],
-        )
-        cost = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
-        return round(float(cost), 2)
+            value = 0.00
+        else:
+            response = cost_explorer_client.get_cost_and_usage(
+                TimePeriod={"Start": start_of_month, "End": end_date},
+                Granularity="MONTHLY",
+                Metrics=["UnblendedCost"],
+            )
+            amount = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
+            value = round(float(amount), 2)
     except Exception as exc:
         print(f"Cost Explorer error: {exc}")
-        return "N/A"
+        value = "N/A"
+    _cost_cache["value"] = value
+    _cost_cache["ts"] = now
+    return value
 
 
 def lambda_handler(event, context):
@@ -89,15 +152,7 @@ def lambda_handler(event, context):
     any_data = False
 
     for instrument_id in INSTRUMENT_IDS:
-        dimensions = [{"Name": "Instrument", "Value": instrument_id}]
-
-        size_datapoint = get_latest_cloudwatch_metric("BronzeSize", dimensions)
-        rows_datapoint = get_latest_cloudwatch_metric("BronzeRows", dimensions)
-
-        bronze_size = int(size_datapoint.get("Maximum", 0)) if size_datapoint else 0
-        bronze_rows = int(rows_datapoint.get("Maximum", 0)) if rows_datapoint else 0
-
-        last_modified = get_s3_last_modified(instrument_id)
+        bronze_rows, bronze_size, last_modified = scan_instrument(instrument_id)
         last_update_iso = last_modified.isoformat() if last_modified else None
 
         if last_modified:

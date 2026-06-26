@@ -1,8 +1,9 @@
 # Des Moines Data Monitor
 
 Air quality data pipeline and monitoring dashboard for the DEOHS research project.
-The field laptop uploads instrument data to S3, AWS publishes pipeline metrics, and
-the Vercel React dashboard reads those metrics through an API Gateway endpoint.
+The field laptop uploads instrument data to S3, an API Lambda counts and serves the
+current data inventory on demand, and the Vercel React dashboard reads it through an
+API Gateway endpoint.
 
 ## Instruments
 
@@ -23,11 +24,8 @@ Instrument files (data_glob)            S3 bucket                         React 
      |                                  des-moines-data-pipeline-austinlab      |
 scripts/upload_instrument_data.py  -->  {instrument}/bronze/...                 |
      |                                       |                                   |
-per-file checkpoints + SQLite buffer    dq_collector Lambda, hourly             |
-                                             |                                   |
-                                        CloudWatch AirQuality/Pipeline           |
-                                             |                                   |
-                                        aq-dashboard-api Lambda                  |
+per-file checkpoints + SQLite buffer    aq-dashboard-api Lambda                 |
+                                        (counts rows live from S3)               |
                                              |                                   |
                                         API Gateway /metrics  ------------------+
 ```
@@ -36,8 +34,7 @@ per-file checkpoints + SQLite buffer    dq_collector Lambda, hourly             
 
 ```text
 .
-├── lambda_api.py               # dashboard API Lambda handler (deployed to AWS)
-├── lambda/dq_collector.py      # hourly data-quality collector Lambda handler
+├── lambda_api.py               # dashboard API Lambda: counts rows live + serves JSON
 ├── instruments_config.json     # local instrument config (gitignored)
 ├── instruments_config.example.json  # tracked template for the config above
 ├── aws_creds.json              # optional local credential fallback (gitignored)
@@ -59,15 +56,14 @@ per-file checkpoints + SQLite buffer    dq_collector Lambda, hourly             
   `instruments_config.json`, discovers source files with a **glob pattern**
   (`data_glob`), keeps a **byte offset per file**, buffers upload attempts in
   SQLite, and writes bronze batches to S3. Run it from the repository root.
-- `lambda/dq_collector.py` scans S3 once per hour and publishes file count, byte
-  size, freshness, and row-count metrics to CloudWatch namespace
-  `AirQuality/Pipeline`. Its per-instrument `is_data_row()` logic skips headers
-  and comment lines so only real data rows are counted.
 - `lambda_api.py` serves the dashboard JSON payload through API Gateway at
-  `/metrics`; it reads dashboard metrics from CloudWatch/S3 and reads
-  month-to-date AWS account cost from Cost Explorer.
-- `scripts/deploy_aws.py` creates or updates the bucket, Lambda role, both
-  Lambdas, API Gateway, and the hourly EventBridge rule.
+  `/metrics`. On every request it scans the bronze prefix and counts the real
+  data rows and bytes per instrument live (its `is_data_row()` logic skips
+  headers and comment lines), so the dashboard updates the moment you hit
+  Refresh. It also reads month-to-date AWS account cost from Cost Explorer,
+  cached for an hour because that call is slow.
+- `scripts/deploy_aws.py` creates or updates the bucket, Lambda role, the API
+  Lambda, and the API Gateway.
 - `frontend/` is the Vite React dashboard deployed through the existing Vercel
   project.
 
@@ -102,12 +98,9 @@ the next run.
 
 ## Scheduling
 
-There are two separate schedules:
-
-- Laptop upload schedule: runs on the field laptop because it reads local
-  instrument files and uploads new bytes to S3.
-- AWS collector schedule: runs in EventBridge and invokes `dq_collector` hourly
-  to summarize what is already in S3.
+There is one schedule: the laptop upload job. It runs on the field laptop
+because it reads local instrument files and uploads new bytes to S3. The cloud
+side has no schedule; the API counts rows live whenever the dashboard asks.
 
 Run one upload pass manually:
 
@@ -186,8 +179,9 @@ For Vercel, set `VITE_API_URL` to the API Gateway `/metrics` URL printed by
 ## Data layout (medallion)
 
 Today the pipeline is **Bronze only**. The uploader lands raw, unmodified
-instrument bytes; `dq_collector` only *reads* bronze to publish metrics — it does
-not transform data into silver or gold (those S3 prefixes are currently empty).
+instrument bytes. The API counts those bytes for the dashboard but does not
+transform them. There is no silver or gold layer yet (those S3 prefixes are
+currently empty).
 
 S3 layout:
 
@@ -205,11 +199,11 @@ To extend into a full medallion architecture later:
 | Silver | to build | a per-instrument transform (AWS Glue PySpark job, or Lambda for small volumes) that parses, types, dedupes, and normalizes timestamps to UTC, writing Parquet to `{id}/silver/`; register tables in the Glue Data Catalog |
 | Gold | to build | business aggregates (hourly/daily means, QA flags, cross-instrument joins) via Athena CTAS or a Glue job to `{id}/gold/`; the dashboard reads gold instead of recounting bronze |
 | Query/catalog | partial | Athena workgroup + Glue Catalog tables |
-| Orchestration | partial | Step Functions or Glue Workflow to chain bronze → silver → gold (currently only an hourly EventBridge rule drives `dq_collector`) |
+| Orchestration | to build | Step Functions or Glue Workflow to chain bronze, silver, gold (there is no cloud schedule today) |
 
 The real work in Silver is unifying five different raw schemas into one canonical
-schema per instrument; `dq_collector.is_data_row()` is a useful parsing head
-start.
+schema per instrument; the `is_data_row()` logic in `lambda_api.py` is a useful
+parsing head start.
 
 ## Cost tile
 
@@ -232,11 +226,10 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
 3. Confirm S3 has `{instrument_id}/bronze/...` files and
    `{instrument_id}/checkpoints/checkpoint.json`.
 4. Run `python3 scripts/deploy_aws.py` after Lambda/API changes.
-5. Wait for the hourly `dq_collector` run or invoke it manually in AWS Lambda.
-6. Open the API Gateway `/metrics` URL and confirm JSON contains `kpis`,
-   `refreshTime`, and all five instruments.
-7. Set Vercel `VITE_API_URL` to that `/metrics` URL and redeploy the frontend.
-8. Install the laptop scheduler only after a clean manual upload pass.
+5. Open the API Gateway `/metrics` URL and confirm JSON contains `kpis`,
+   `refreshTime`, and all five instruments with live row counts.
+6. Set Vercel `VITE_API_URL` to that `/metrics` URL and redeploy the frontend.
+7. Install the laptop scheduler only after a clean manual upload pass.
 
 ## Security notes
 
@@ -246,12 +239,12 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
   payload or put the API behind auth (API key / Cognito / signed requests).
 - Do not commit AWS credentials, Vercel tokens, sample data, checkpoint files,
   logs, SQLite buffers, or generated Lambda zips.
-- The Lambda execution role currently attaches the broad managed policies
-  `CloudWatchReadOnlyAccess` and `AmazonS3ReadOnlyAccess`; tighten to
-  bucket-scoped least privilege when convenient.
-- `dq_collector` re-downloads and recounts every bronze file each hour
-  (O(all data) per run). Replace full recounts with a manifest/table or
-  incremental approach once bronze grows large.
+- The Lambda execution role attaches the broad managed policy
+  `AmazonS3ReadOnlyAccess`; tighten to bucket-scoped least privilege when
+  convenient.
+- The API recounts every bronze file on each request. This is fine while the
+  data is small. Once bronze grows large, have the uploader maintain a running
+  count (written to a small file the API reads) instead of recounting live.
 
 ## Next steps
 

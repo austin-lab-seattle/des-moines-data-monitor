@@ -129,19 +129,23 @@ except iam_client.exceptions.NoSuchEntityException:
 
 for policy_arn in [
     "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-    "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
     "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess",
 ]:
     iam_client.attach_role_policy(RoleName=ROLE_NAME, PolicyArn=policy_arn)
 
+# CloudWatch is no longer used by the dashboard; detach the old read access.
+try:
+    iam_client.detach_role_policy(
+        RoleName=ROLE_NAME,
+        PolicyArn="arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
+    )
+    print("Detached CloudWatchReadOnlyAccess (no longer needed).")
+except Exception:
+    pass
+
 inline_policy = {
     "Version": "2012-10-17",
     "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": ["cloudwatch:PutMetricData"],
-            "Resource": "*"
-        },
         {
             "Effect": "Allow",
             "Action": ["ce:GetCostAndUsage"],
@@ -229,14 +233,10 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
     raise RuntimeError(f"Could not create Lambda {function_name}")
 
 
-print("\nPackaging Lambda functions...")
+print("\nPackaging the dashboard API Lambda...")
 api_zip_bytes = read_zip_bytes(
     str(REPO_ROOT / "lambda_api.zip"),
     [(REPO_ROOT / "lambda_api.py", "lambda_api.py")],
-)
-dq_zip_bytes = read_zip_bytes(
-    str(REPO_ROOT / "dq_collector.zip"),
-    [(REPO_ROOT / "lambda" / "dq_collector.py", "dq_collector.py")],
 )
 
 api_lambda_arn = create_or_update_lambda(
@@ -244,52 +244,28 @@ api_lambda_arn = create_or_update_lambda(
     "lambda_api.lambda_handler",
     "python3.11",
     api_zip_bytes,
-    10,
-)
-dq_lambda_arn = create_or_update_lambda(
-    DQ_LAMBDA_NAME,
-    "dq_collector.lambda_handler",
-    "python3.12",
-    dq_zip_bytes,
-    60,
+    30,
 )
 
-print("\nConfiguring EventBridge schedule...")
-rule = events_client.put_rule(
-    Name=DQ_RULE_NAME,
-    ScheduleExpression=DQ_SCHEDULE,
-    State="ENABLED",
-    Description="Runs the Des Moines data quality collector every hour.",
-)
-events_client.put_targets(
-    Rule=DQ_RULE_NAME,
-    Targets=[{"Id": DQ_LAMBDA_NAME, "Arn": dq_lambda_arn}],
-)
-try:
-    lambda_client.add_permission(
-        FunctionName=DQ_LAMBDA_NAME,
-        StatementId=f"eventbridge-{DQ_RULE_NAME}",
-        Action="lambda:InvokeFunction",
-        Principal="events.amazonaws.com",
-        SourceArn=rule["RuleArn"],
-    )
-except lambda_client.exceptions.ResourceConflictException:
-    pass
-print(f"EventBridge rule {DQ_RULE_NAME} configured.")
-
-for legacy_rule_name in LEGACY_DQ_RULE_NAMES:
-    if legacy_rule_name == DQ_RULE_NAME:
-        continue
+print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
+for rule_name in [DQ_RULE_NAME] + LEGACY_DQ_RULE_NAMES:
     try:
-        events_client.put_rule(
-            Name=legacy_rule_name,
-            ScheduleExpression=DQ_SCHEDULE,
-            State="DISABLED",
-            Description="Legacy 15-minute DQ collector rule disabled after hourly migration.",
-        )
-        print(f"Legacy EventBridge rule {legacy_rule_name} disabled.")
+        events_client.remove_targets(Rule=rule_name, Ids=[DQ_LAMBDA_NAME], Force=True)
+    except Exception:
+        pass
+    try:
+        events_client.delete_rule(Name=rule_name, Force=True)
+        print(f"Deleted EventBridge rule {rule_name}.")
     except Exception as e:
-        print(f"Could not disable legacy EventBridge rule {legacy_rule_name}; continuing: {e}")
+        print(f"No EventBridge rule {rule_name} to delete: {e}")
+
+try:
+    lambda_client.delete_function(FunctionName=DQ_LAMBDA_NAME)
+    print(f"Deleted Lambda {DQ_LAMBDA_NAME}.")
+except lambda_client.exceptions.ResourceNotFoundException:
+    print(f"Lambda {DQ_LAMBDA_NAME} already removed.")
+except Exception as e:
+    print(f"Could not delete Lambda {DQ_LAMBDA_NAME}; continuing: {e}")
 
 print("\nConfiguring API Gateway...")
 apis = api_gateway_client.get_apis()["Items"]
