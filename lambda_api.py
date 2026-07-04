@@ -74,10 +74,12 @@ def is_data_row(instrument_id, line):
         return len(fields) > 10 and first.upper().startswith("MA") and second.isdigit()
 
     if instrument_id == "CO2-LICOR":
+        # The Li-Cor does not zero-pad hours/minutes (e.g. 18:0:00), so accept
+        # 1- or 2-digit time components.
         return (
             len(fields) >= 3
-            and re.match(r"^\d{4}-\d{2}-\d{2}$", first)
-            and re.match(r"^\d{2}:\d{2}:\d{2}$", second)
+            and re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", first)
+            and re.match(r"^\d{1,2}:\d{1,2}:\d{1,2}$", second)
         )
 
     if instrument_id == "NEPH-PM25":

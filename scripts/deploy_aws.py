@@ -262,6 +262,30 @@ silver_lambda_arn = create_or_update_lambda(
     300,
 )
 
+print("\nScheduling the Silver builder (daily)...")
+SILVER_RULE_NAME = "silver-builder-daily"
+silver_rule = events_client.put_rule(
+    Name=SILVER_RULE_NAME,
+    ScheduleExpression="rate(1 day)",
+    State="ENABLED",
+    Description="Rebuilds the Silver layer from Bronze once a day.",
+)
+events_client.put_targets(
+    Rule=SILVER_RULE_NAME,
+    Targets=[{"Id": SILVER_LAMBDA_NAME, "Arn": silver_lambda_arn}],
+)
+try:
+    lambda_client.add_permission(
+        FunctionName=SILVER_LAMBDA_NAME,
+        StatementId=f"eventbridge-{SILVER_RULE_NAME}",
+        Action="lambda:InvokeFunction",
+        Principal="events.amazonaws.com",
+        SourceArn=silver_rule["RuleArn"],
+    )
+except lambda_client.exceptions.ResourceConflictException:
+    pass
+print(f"EventBridge rule {SILVER_RULE_NAME} configured (daily).")
+
 print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
 for rule_name in [DQ_RULE_NAME] + LEGACY_DQ_RULE_NAMES:
     try:
