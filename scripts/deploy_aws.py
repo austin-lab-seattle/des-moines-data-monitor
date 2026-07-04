@@ -51,6 +51,7 @@ region = session.region_name
 
 ROLE_NAME = "AQDashboardBackendRole"
 API_LAMBDA_NAME = "aq-dashboard-api"
+SILVER_LAMBDA_NAME = "aq-silver-builder"
 DQ_LAMBDA_NAME = "dq_collector"
 API_NAME = "AQDashboardAPI"
 BUCKET_NAME = "des-moines-data-pipeline-austinlab"
@@ -153,7 +154,7 @@ inline_policy = {
         },
         {
             "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:ListBucket"],
+            "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
             "Resource": [
                 f"arn:aws:s3:::{BUCKET_NAME}",
                 f"arn:aws:s3:::{BUCKET_NAME}/*"
@@ -247,6 +248,18 @@ api_lambda_arn = create_or_update_lambda(
     "python3.11",
     api_zip_bytes,
     30,
+)
+
+silver_zip_bytes = read_zip_bytes(
+    str(REPO_ROOT / "silver_builder.zip"),
+    [(REPO_ROOT / "lambda" / "silver_builder.py", "silver_builder.py")],
+)
+silver_lambda_arn = create_or_update_lambda(
+    SILVER_LAMBDA_NAME,
+    "silver_builder.lambda_handler",
+    "python3.12",
+    silver_zip_bytes,
+    300,
 )
 
 print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
