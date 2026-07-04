@@ -6,8 +6,7 @@ semantics (idempotency / exactly-once vs at-least-once), concurrency, failure
 isolation, and every edge case we could think of.
 
 This document describes the code in
-[`scripts/upload_instrument_data.py`](../scripts/upload_instrument_data.py),
-[`lambda/dq_collector.py`](../lambda/dq_collector.py), and
+[`scripts/upload_instrument_data.py`](../scripts/upload_instrument_data.py) and
 [`lambda_api.py`](../lambda_api.py).
 
 ---
@@ -27,7 +26,7 @@ This document describes the code in
 11. [Concurrency and failure isolation](#11-concurrency-and-failure-isolation)
 12. [Pipeline status and S3 layout](#12-pipeline-status-and-s3-layout)
 13. [Credentials resolution](#13-credentials-resolution)
-14. [The AWS side: dq_collector and lambda_api](#14-the-aws-side-dq_collector-and-lambda_api)
+14. [The AWS side: the dashboard API](#14-the-aws-side-the-dashboard-api)
 15. [Per-instrument formats and row detection](#15-per-instrument-formats-and-row-detection)
 16. [Edge cases and failure modes](#16-edge-cases-and-failure-modes)
 17. [Operational runbook](#17-operational-runbook)
@@ -50,26 +49,24 @@ The pipeline has three stages across two machines and the cloud:
        │                                    │
  upload_instrument_data.py  ─PUT──►  {instrument}/bronze/year=/month=/...
        │                                    │
- per-file checkpoints                 dq_collector  (Lambda, hourly via EventBridge)
- + SQLite buffer                        • scans bronze, counts rows/bytes/freshness
-       │                                • publishes to CloudWatch AirQuality/Pipeline
- checkpoint mirror  ◄────────────►          │
- {instrument}/checkpoints/            lambda_api  (Lambda, behind API Gateway /metrics)
-   checkpoint.json                      • reads CloudWatch + S3 + Cost Explorer
-                                        • returns dashboard JSON ──────────►  GET /metrics
+ per-file checkpoints                 lambda_api  (Lambda, behind API Gateway /metrics)
+ + SQLite buffer                        • on each request, counts rows/bytes live
+       │                                  from bronze (parallel scan, 30s cache)
+ checkpoint mirror  ◄────────────►        • reads month-to-date cost (Cost Explorer)
+ {instrument}/checkpoints/                • returns dashboard JSON ──────►  GET /metrics
+   checkpoint.json
 ```
 
 **Responsibility split:**
 
 | Component | Where | Cadence | Job |
 |---|---|---|---|
-| `upload_instrument_data.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
-| `dq_collector` | AWS Lambda | hourly (EventBridge) | summarize what is in bronze → CloudWatch metrics |
-| `lambda_api` | AWS Lambda | on request | assemble dashboard JSON from CloudWatch + S3 + Cost Explorer |
+| `upload_instrument_data.py` | laptop | every 5 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
+| `lambda_api` | AWS Lambda | on request | count rows/bytes live from bronze and assemble the dashboard JSON (plus Cost Explorer) |
 | `frontend` | Vercel | browser | render the dashboard, poll `/metrics` |
 
-The two schedules are **independent**: the laptop pushes data; the cloud
-summarizes it. Neither blocks the other.
+There is one schedule, on the laptop. The cloud side does no scheduled work; the
+API counts live whenever the dashboard asks.
 
 ---
 
@@ -77,8 +74,7 @@ summarizes it. Neither blocks the other.
 
 ```text
 .
-├── lambda_api.py                    # dashboard API Lambda handler
-├── lambda/dq_collector.py           # hourly data-quality collector Lambda handler
+├── lambda_api.py                    # dashboard API Lambda: counts rows live + serves JSON
 ├── instruments_config.json          # LOCAL instrument config (gitignored)
 ├── instruments_config.example.json  # tracked template
 ├── aws_creds.json                   # OPTIONAL local credential fallback (gitignored)
@@ -128,7 +124,7 @@ summarizes it. Neither blocks the other.
 
 | Field | Meaning |
 |---|---|
-| `id` | Stable instrument key; also the top-level S3 prefix. Must match the IDs in `dq_collector.py` and `lambda_api.py`. |
+| `id` | Stable instrument key; also the top-level S3 prefix. Must match the `INSTRUMENT_IDS` list in `lambda_api.py`. |
 | `display_name` | Human label (dashboard). |
 | `location` | Site label, informational. |
 | `ingestion_type` | Only `growing_file` is implemented. Anything else returns an error for that instrument (others still run). |
@@ -497,9 +493,9 @@ Now consider a crash at each gap:
 
 So the only duplication window is the small gap between marking a batch uploaded
 and persisting its offset. Because the S3 key currently embeds a **timestamp**, a
-re-read produces a *different* key and therefore a *second* object. `dq_collector`
-would then count those rows twice until the duplicate is removed. **No data is
-ever lost** — at worst a batch is delivered twice.
+re-read produces a *different* key and therefore a *second* object. The API would
+then count those rows twice until the duplicate is removed. **No data is ever
+lost**; at worst a batch is delivered twice.
 
 ### How to make it exactly-once (recommended hardening)
 
@@ -543,9 +539,9 @@ results = await asyncio.gather(*coroutines, return_exceptions=True)
   - glob matches nothing → logged **warning** "No files matched", status `ok`,
     `rows_uploaded=0`.
 - **Nuance:** a silent instrument still reports `ok` (the warning is only in the
-  log); it is not escalated to `degraded` in `pipeline_status.json`. Staleness is
-  surfaced on the dashboard via the `Freshness` metric from `dq_collector`, not
-  via the pipeline status. If you want a disconnected instrument to *alarm*, add a
+  log); it is not escalated to `degraded` in `pipeline_status.json`. Staleness
+  shows on the dashboard as a stale `lastUpdate` timestamp (read live from S3),
+  not as an alert. If you want a disconnected instrument to *alarm*, add a
   `stale` status (e.g. when no file matched, or when freshness exceeds a
   threshold).
 - **No cross-process lock.** Two uploader processes running at once could
@@ -611,65 +607,56 @@ no static key ever has to live in the repo; the field laptop can still drop an
 
 ---
 
-## 14. The AWS side: dq_collector and lambda_api
+## 14. The AWS side: the dashboard API
 
-### `dq_collector` (hourly metrics producer)
+There is a single Lambda, `lambda_api`, behind API Gateway at `/metrics`. There
+is no separate collector and no CloudWatch metrics. An earlier `dq_collector`
+Lambda that published metrics hourly was removed because it added cost and made
+the dashboard lag behind the data.
 
-For each instrument and each tier (`bronze`, `silver`, `gold`):
+### `lambda_api` (on-demand, counts live)
 
-- list objects under `{id}/{tier}/`, count files and total bytes;
-- emit `{Tier}Files` and `{Tier}Size` to CloudWatch namespace
-  `AirQuality/Pipeline`, dimensioned by instrument;
-- for **bronze**: also compute `Freshness` (hours since latest object) and
-  `BronzeRows` — by **downloading every bronze object and counting data rows**
-  with the per-instrument `is_data_row()` parser.
+On every request the API does the following:
 
-It then emits `LambdaDuration` and `LambdaSuccess`, batching metric puts in groups
-of 20 (the CloudWatch limit). On any exception it emits `LambdaSuccess=0` and
-re-raises.
+1. lists each instrument's `{id}/bronze/` objects (sizes and `LastModified` come
+   straight from the listing, no download needed);
+2. counts the real data rows by downloading every bronze object and running the
+   per-instrument `is_data_row()` parser, fanned out across a thread pool so the
+   many small batch files are read in parallel;
+3. aggregates per instrument into `bronzeRows`, `bronzeSize`, and `lastUpdate`;
+4. reads month-to-date account cost from **Cost Explorer** (`us-east-1`).
 
-> **Cost/scale caveat:** `BronzeRows` re-downloads and re-counts **all** bronze
-> data every hour — O(total data) per run. Fine for now; replace with
-> push-from-uploader metrics or a manifest as bronze grows. Silver/Gold tiers are
-> always empty today, so their metrics are 0.
+Because counting is live, the dashboard updates the moment you hit Refresh. Two
+short caches keep it fast: the whole inventory is cached for 30 seconds (so a
+burst of refreshes does not re-scan S3 every time) and the cost value for an hour
+(that call is slow and barely moves). The Lambda runs with 1 GB of memory (more
+memory means more CPU) and a 30 second timeout. It computes `refreshTime`,
+`systemStatus` (`ONLINE` if any data exists else `DEGRADED`), and the KPI block.
+Response is JSON with permissive CORS.
 
-### `lambda_api` (on-demand dashboard JSON)
-
-For each instrument:
-
-- read latest `BronzeSize` and `BronzeRows` from CloudWatch (`Maximum` over the
-  last 168h) — these come **only** from `dq_collector`;
-- read the most recent bronze object's `LastModified` directly from S3 (this is
-  independent of `dq_collector`).
-
-Then it computes `refreshTime`, `systemStatus` (`ONLINE` if any data exists else
-`DEGRADED`), and the KPI block including `mtdCost` from **Cost Explorer**
-(`us-east-1`, account-level month-to-date unblended). Response is JSON with
-permissive CORS.
+> **Scale caveat:** the API recounts every bronze object on a cache miss. This is
+> fine at the current data size (a few seconds), but it grows with the data. The
+> durable fix, when needed, is to have the uploader keep a running count and write
+> it to a small file the API reads, instead of recounting live.
 
 > **Security caveat:** `/metrics` is public and unauthenticated and includes
-> `mtdCost` — your AWS bill is readable by anyone with the URL. Drop `mtdCost`
+> `mtdCost`, so your AWS bill is readable by anyone with the URL. Drop `mtdCost`
 > from the public payload or put the API behind auth before sharing widely.
 
-### Dependency summary
+### Flow
 
 ```text
-uploader ──► bronze objects ──► dq_collector ──► CloudWatch (rows/size/freshness)
-                   │                                   │
-                   └────────────► lambda_api ◄─────────┘ (+ S3 LastModified + Cost Explorer)
-                                       │
-                                       ▼  GET /metrics  → dashboard
+uploader ──► bronze objects ──► lambda_api ──► API Gateway /metrics ──► dashboard
+                                (counts rows/bytes live on request, + Cost Explorer)
 ```
-
-Kill `dq_collector` and the dashboard still shows last-update time, online status,
-and cost — but row/size tiles go to 0 (nothing else produces those metrics).
 
 ---
 
 ## 15. Per-instrument formats and row detection
 
-Each instrument has a different raw layout; `dq_collector.is_data_row()`
-recognizes a *data* row (vs header/comment) so counts are accurate. A line is a
+Each instrument has a different raw layout; the `is_data_row()` logic in
+`lambda_api.py` recognizes a *data* row (vs header/comment) so counts are
+accurate. A line is a
 data row only if it is non-empty, does not start with `%` or `#`, and matches the
 instrument's shape:
 
@@ -745,7 +732,7 @@ aws s3 cp s3://des-moines-data-pipeline-austinlab/CO2-LICOR/checkpoints/checkpoi
 |---|---|
 | Re-ingest a file from scratch | lower/remove its entry in `checkpoints/{id}.json` (and the S3 copy), then run |
 | Laptop reimaged | just run — offsets recover from the S3 checkpoint mirror |
-| Suspected duplicate batch | find duplicate-content objects under `bronze/`, delete the extra; counts self-correct next `dq_collector` run |
+| Suspected duplicate batch | find duplicate-content objects under `bronze/`, delete the extra; the live count self-corrects on the next refresh |
 | Stuck pending rows | inspect `sqlite3 sensor_buffer.db "SELECT id,instrument_id,s3_key,uploaded FROM buffer WHERE uploaded=0"` |
 | Bronze accidentally deleted | reset the affected offsets to 0 (or before the deleted range) and run |
 
@@ -817,7 +804,7 @@ each batch is a distinct, traceable bronze object.
 | File identity | by **filename**, not content/inode | also track inode + mtime, or a content hash |
 | Concurrency | no cross-process lock | lockfile / `flock` around a run |
 | Silent instrument | reports `ok`, not `degraded` | add a `stale` status + threshold |
-| dq_collector | re-counts all bronze hourly (O(data)) | push metrics from the uploader, or a manifest |
+| Live counting | API recounts all bronze per request, O(data) | uploader keeps a running count in a small file the API reads |
 | Buffer size | stores full `raw_data` | store metadata only, re-read on retry |
 | API | public, leaks `mtdCost` | drop the field or add auth |
 | Checkpoint growth | one entry per file ever seen | prune entries for files no longer matched |
@@ -853,10 +840,10 @@ Only in the narrow crash window in §10 (after a batch is marked uploaded but
 before its offset is persisted). No row is ever lost. Deterministic keys remove
 even that case.
 
-**Q: Do I need `dq_collector`?**
-It's required for the dashboard's row/size tiles (it's the only producer of those
-CloudWatch metrics). Last-update, status, and cost work without it. Its hourly
-full re-count is the weak point and a good candidate to replace.
+**Q: Where do the dashboard's row counts come from?**
+The API counts them live from S3 on each request (cached 30s), so they update on
+Refresh. There is no CloudWatch and no separate collector; an earlier hourly
+`dq_collector` was removed because it cost money and lagged behind the data.
 
 **Q: Is Athena used?**
 Not today. It only becomes useful once Silver/Gold Parquet exists to query.

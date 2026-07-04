@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import boto3
@@ -13,10 +14,19 @@ s3_client = boto3.client("s3")
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 
-# Cost Explorer is slow and the value moves slowly, so cache it in the warm
-# container. Every Refresh still recounts the rows live; only the cost tile is cached.
+# The cost tile changes slowly and the Cost Explorer call is slow; cache an hour.
 COST_TTL_SECONDS = 3600
 _cost_cache = {"value": None, "ts": 0.0}
+
+# Row/size counts are recomputed live from S3, but cached briefly so a burst of
+# refreshes does not each trigger a full scan. New data only lands every few
+# minutes, so a short cache still feels live on the dashboard.
+INVENTORY_TTL_SECONDS = 30
+_inventory_cache = {"data": None, "ts": 0.0}
+
+# Counting many small batch objects is dominated by per-object request latency,
+# so fan the downloads out across threads.
+MAX_WORKERS = 24
 
 
 def iter_s3_objects(prefix):
@@ -96,25 +106,73 @@ def count_data_rows(instrument_id, s3_key):
     return sum(1 for line in raw.splitlines() if is_data_row(instrument_id, line))
 
 
-def scan_instrument(instrument_id):
-    """One live pass over an instrument's bronze prefix.
+def _safe_count(task):
+    instrument_id, key = task
+    try:
+        return instrument_id, count_data_rows(instrument_id, key)
+    except Exception as exc:
+        print(f"Could not count rows in {key}: {exc}")
+        return instrument_id, 0
 
-    Returns (row_count, total_bytes, latest_modified). This runs on every API
-    call, so the dashboard's row count and size are always current when the user
-    hits Refresh, with no dependence on the hourly collector or CloudWatch.
-    """
-    rows = 0
-    size = 0
-    latest = None
-    for object_summary in iter_s3_objects(f"{instrument_id}/bronze/"):
-        size += object_summary["Size"]
-        if latest is None or object_summary["LastModified"] > latest:
-            latest = object_summary["LastModified"]
-        try:
-            rows += count_data_rows(instrument_id, object_summary["Key"])
-        except Exception as exc:
-            print(f"Could not count rows in {object_summary['Key']}: {exc}")
-    return rows, size, latest
+
+def compute_inventory():
+    """List every bronze object, count rows in parallel, aggregate per instrument."""
+    per_instrument_objects = {
+        instrument_id: list(iter_s3_objects(f"{instrument_id}/bronze/"))
+        for instrument_id in INSTRUMENT_IDS
+    }
+    tasks = [
+        (instrument_id, obj["Key"])
+        for instrument_id, objects in per_instrument_objects.items()
+        for obj in objects
+    ]
+
+    counts = {instrument_id: 0 for instrument_id in INSTRUMENT_IDS}
+    if tasks:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            for instrument_id, row_count in pool.map(_safe_count, tasks):
+                counts[instrument_id] += row_count
+
+    instruments = []
+    latest_global_update = None
+    latest_global_instrument = "NONE"
+    any_data = False
+
+    for instrument_id in INSTRUMENT_IDS:
+        objects = per_instrument_objects[instrument_id]
+        bronze_size = sum(obj["Size"] for obj in objects)
+        last_modified = max((obj["LastModified"] for obj in objects), default=None)
+
+        if last_modified:
+            any_data = True
+            if latest_global_update is None or last_modified > latest_global_update:
+                latest_global_update = last_modified
+                latest_global_instrument = instrument_id
+
+        instruments.append({
+            "id": instrument_id,
+            "name": instrument_id.replace("-", " "),
+            "bronzeSize": bronze_size,
+            "bronzeRows": counts[instrument_id],
+            "lastUpdate": last_modified.isoformat() if last_modified else None,
+        })
+
+    return {
+        "instruments": instruments,
+        "refreshTime": latest_global_update.isoformat() if latest_global_update else None,
+        "systemStatus": "ONLINE" if any_data else "DEGRADED",
+        "lastUpdatedInstrument": latest_global_instrument,
+    }
+
+
+def get_inventory():
+    now = time.time()
+    if _inventory_cache["data"] is not None and now - _inventory_cache["ts"] < INVENTORY_TTL_SECONDS:
+        return _inventory_cache["data"]
+    inventory = compute_inventory()
+    _inventory_cache["data"] = inventory
+    _inventory_cache["ts"] = now
+    return inventory
 
 
 def get_month_to_date_cost():
@@ -144,44 +202,19 @@ def get_month_to_date_cost():
 
 
 def lambda_handler(event, context):
+    inventory = get_inventory()
     month_to_date_cost = get_month_to_date_cost()
 
-    instruments = []
-    latest_global_update = None
-    latest_global_instrument = "NONE"
-    any_data = False
-
-    for instrument_id in INSTRUMENT_IDS:
-        bronze_rows, bronze_size, last_modified = scan_instrument(instrument_id)
-        last_update_iso = last_modified.isoformat() if last_modified else None
-
-        if last_modified:
-            any_data = True
-            if latest_global_update is None or last_modified > latest_global_update:
-                latest_global_update = last_modified
-                latest_global_instrument = instrument_id
-
-        instruments.append({
-            "id": instrument_id,
-            "name": instrument_id.replace("-", " "),
-            "bronzeSize": bronze_size,
-            "bronzeRows": bronze_rows,
-            "lastUpdate": last_update_iso,
-        })
-
-    refresh_time_iso = latest_global_update.isoformat() if latest_global_update else None
-    system_status = "ONLINE" if any_data else "DEGRADED"
-
     payload = {
-        "refreshTime": refresh_time_iso,
-        "systemStatus": system_status,
+        "refreshTime": inventory["refreshTime"],
+        "systemStatus": inventory["systemStatus"],
         "kpis": {
             "mtdCost": month_to_date_cost,
             "costScope": "AWS account MTD",
-            "lastUpdatedInstrument": latest_global_instrument,
+            "lastUpdatedInstrument": inventory["lastUpdatedInstrument"],
             "siteName": "Des Moines",
         },
-        "instruments": instruments,
+        "instruments": inventory["instruments"],
     }
 
     return {

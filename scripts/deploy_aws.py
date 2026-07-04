@@ -202,6 +202,7 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
                 Role=role_arn,
                 Handler=handler,
                 Timeout=timeout,
+                MemorySize=1024,
                 Environment={"Variables": {"S3_BUCKET": BUCKET_NAME}},
             ),
         )
@@ -220,6 +221,7 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
                 Handler=handler,
                 Code={"ZipFile": zip_bytes},
                 Timeout=timeout,
+                MemorySize=1024,
                 Environment={"Variables": {"S3_BUCKET": BUCKET_NAME}},
             )
             print(f"Lambda {function_name} created.")
