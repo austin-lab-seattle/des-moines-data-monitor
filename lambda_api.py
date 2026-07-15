@@ -117,6 +117,21 @@ def _safe_count(task):
         return instrument_id, 0
 
 
+def get_silver_rows(instrument_id):
+    """Read the consolidated row count from the silver metadata sidecar (cheap)."""
+    try:
+        body = s3_client.get_object(
+            Bucket=BUCKET,
+            Key=f"{instrument_id}/silver/{instrument_id}_metadata.txt",
+        )["Body"].read().decode("utf-8", errors="replace")
+        for line in body.splitlines():
+            if line.startswith("# data_rows_unique:"):
+                return int(line.split(":", 1)[1].strip())
+    except Exception:
+        return None
+    return None
+
+
 def compute_inventory():
     """List every bronze object, count rows in parallel, aggregate per instrument."""
     per_instrument_objects = {
@@ -156,6 +171,7 @@ def compute_inventory():
             "name": instrument_id.replace("-", " "),
             "bronzeSize": bronze_size,
             "bronzeRows": counts[instrument_id],
+            "silverRows": get_silver_rows(instrument_id),
             "lastUpdate": last_modified.isoformat() if last_modified else None,
         })
 

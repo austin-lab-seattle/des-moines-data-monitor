@@ -203,13 +203,13 @@ def lambda_handler(event, context):
         try:
             results[instrument_id] = build_instrument(instrument_id)
         except Exception as exc:
-            print(f"Silver build failed for {instrument_id}: {exc}")
             results[instrument_id] = {"error": str(exc)}
 
-    payload = {
-        "message": "Silver build complete",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "instruments": results,
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "message": "Silver build complete",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "instruments": results,
+        }),
     }
-    print(json.dumps(payload))
-    return {"statusCode": 200, "body": json.dumps(payload)}

@@ -52,6 +52,7 @@ region = session.region_name
 ROLE_NAME = "AQDashboardBackendRole"
 API_LAMBDA_NAME = "aq-dashboard-api"
 SILVER_LAMBDA_NAME = "aq-silver-builder"
+GOLD_LAMBDA_NAME = "aq-gold-builder"
 DQ_LAMBDA_NAME = "dq_collector"
 API_NAME = "AQDashboardAPI"
 BUCKET_NAME = "des-moines-data-pipeline-austinlab"
@@ -285,6 +286,42 @@ try:
 except lambda_client.exceptions.ResourceConflictException:
     pass
 print(f"EventBridge rule {SILVER_RULE_NAME} configured (daily).")
+
+gold_zip_bytes = read_zip_bytes(
+    str(REPO_ROOT / "gold_builder.zip"),
+    [(REPO_ROOT / "lambda" / "gold_builder.py", "gold_builder.py")],
+)
+gold_lambda_arn = create_or_update_lambda(
+    GOLD_LAMBDA_NAME,
+    "gold_builder.lambda_handler",
+    "python3.12",
+    gold_zip_bytes,
+    300,
+)
+
+print("\nScheduling the Gold builder (daily)...")
+GOLD_RULE_NAME = "gold-builder-daily"
+gold_rule = events_client.put_rule(
+    Name=GOLD_RULE_NAME,
+    ScheduleExpression="rate(1 day)",
+    State="ENABLED",
+    Description="Rebuilds the Gold layer (SMPS hourly summary) once a day.",
+)
+events_client.put_targets(
+    Rule=GOLD_RULE_NAME,
+    Targets=[{"Id": GOLD_LAMBDA_NAME, "Arn": gold_lambda_arn}],
+)
+try:
+    lambda_client.add_permission(
+        FunctionName=GOLD_LAMBDA_NAME,
+        StatementId=f"eventbridge-{GOLD_RULE_NAME}",
+        Action="lambda:InvokeFunction",
+        Principal="events.amazonaws.com",
+        SourceArn=gold_rule["RuleArn"],
+    )
+except lambda_client.exceptions.ResourceConflictException:
+    pass
+print(f"EventBridge rule {GOLD_RULE_NAME} configured (daily).")
 
 print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
 for rule_name in [DQ_RULE_NAME] + LEGACY_DQ_RULE_NAMES:

@@ -154,7 +154,8 @@ export default function Dashboard() {
             <thead>
               <tr>
                 <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50">Instrument</th>
-                <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Data Rows</th>
+                <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Bronze Rows</th>
+                <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Silver Rows</th>
                 <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Last Update Time (PST/PDT)</th>
               </tr>
             </thead>
@@ -176,6 +177,12 @@ export default function Dashboard() {
                     <td className="py-5 border-b border-gray-800/30 text-right">
                       <div className="text-white font-bold">{(instrument.bronzeRows || 0).toLocaleString()}</div>
                       <div className="text-gray-500 text-[0.6rem] tracking-wider uppercase">{formatBytes(instrument.bronzeSize)}</div>
+                    </td>
+                    <td className="py-5 border-b border-gray-800/30 text-right">
+                      <div className="text-cyan-300 font-bold">{instrument.silverRows != null ? instrument.silverRows.toLocaleString() : '—'}</div>
+                      {instrument.silverRows != null && instrument.bronzeRows > instrument.silverRows && (
+                        <div className="text-amber-400/70 text-[0.6rem] tracking-wider uppercase">-{(instrument.bronzeRows - instrument.silverRows).toLocaleString()} dupes</div>
+                      )}
                     </td>
                     <td className="py-5 border-b border-gray-800/30 text-right">
                       <div className="font-mono text-sm text-gray-300">{formatSeattleTime(instrument.lastUpdate)}</div>
