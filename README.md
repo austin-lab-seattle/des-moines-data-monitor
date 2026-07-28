@@ -1,9 +1,9 @@
 # Des Moines Data Monitor
 
 Air quality data pipeline and monitoring dashboard for the DEOHS research project.
-The field laptop uploads instrument data to S3, an API Lambda counts and serves the
-current data inventory on demand, and the Vercel React dashboard reads it through an
-API Gateway endpoint.
+The field laptop uploads instrument data to S3 Bronze, AWS builds a deduplicated
+Silver layer, an API Lambda serves metrics and review records, and the Vercel
+React dashboard reads it through API Gateway.
 
 ## Instruments
 
@@ -18,23 +18,29 @@ API Gateway endpoint.
 ## Architecture
 
 ```text
-Field laptop                            AWS Cloud                         Vercel
-------------                            ---------                         ------
-Instrument files (data_glob)            S3 bucket                         React dashboard
-     |                                  des-moines-data-pipeline-austinlab      |
-scripts/upload_instrument_data.py  -->  {instrument}/bronze/...                 |
-     |                                       |                                   |
-per-file checkpoints + SQLite buffer    aq-dashboard-api Lambda                 |
-                                        (counts rows live from S3)               |
-                                             |                                   |
-                                        API Gateway /metrics  ------------------+
+Field laptop                            AWS Cloud                              Vercel
+------------                            ---------                              ------
+Instrument files (data_glob)            S3 bucket                              React dashboard
+     |                                  des-moines-data-pipeline-austinlab           |
+scripts/upload_instrument_data.py  -->  {instrument}/bronze/...                      |
+     |                                       |                                        |
+per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                     |
+                                             |                                        |
+                                        {instrument}/silver/...                      |
+                                             |                                        |
+                                        aq-dashboard-api Lambda                      |
+                                        /metrics + review endpoints                  |
+                                             |                                        |
+                                        API Gateway  -------------------------------+
 ```
 
 ## Repository layout
 
 ```text
 .
-├── lambda_api.py               # dashboard API Lambda: counts rows live + serves JSON
+├── lambda_api.py               # dashboard API Lambda: metrics + silver review API
+├── lambda/
+│   └── silver_builder.py       # rebuilds deduplicated silver CSVs from bronze
 ├── instruments_config.json     # local instrument config (gitignored)
 ├── instruments_config.example.json  # tracked template for the config above
 ├── aws_creds.json              # optional local credential fallback (gitignored)
@@ -56,12 +62,15 @@ per-file checkpoints + SQLite buffer    aq-dashboard-api Lambda                 
   `instruments_config.json`, discovers source files with a **glob pattern**
   (`data_glob`), keeps a **byte offset per file**, buffers upload attempts in
   SQLite, and writes bronze batches to S3. Run it from the repository root.
+- `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
+  keeps only real data rows, removes duplicates, and writes a metadata sidecar
+  with the unique row count.
 - `lambda_api.py` serves the dashboard JSON payload through API Gateway at
   `/metrics`. On every request it scans the bronze prefix and counts the real
   data rows and bytes per instrument live (its `is_data_row()` logic skips
-  headers and comment lines), so the dashboard updates the moment you hit
-  Refresh. It also reads month-to-date AWS account cost from Cost Explorer,
-  cached for an hour because that call is slow.
+  headers and comment lines), reads Silver row counts from metadata, and reads
+  month-to-date AWS account cost from Cost Explorer. It also exposes Silver
+  record review endpoints for browsing, flagging, and correction notes.
 - `scripts/deploy_aws.py` creates or updates the bucket, Lambda role, the API
   Lambda, and the API Gateway.
 - `frontend/` is the Vite React dashboard deployed through the existing Vercel
@@ -98,9 +107,12 @@ the next run.
 
 ## Scheduling
 
-There is one schedule: the laptop upload job. It runs on the field laptop
-because it reads local instrument files and uploads new bytes to S3. The cloud
-side has no schedule; the API counts rows live whenever the dashboard asks.
+There are two schedules:
+
+- The laptop upload job runs on the field laptop because it reads local
+  instrument files and uploads new bytes to S3 Bronze.
+- The cloud Silver builder runs daily in EventBridge and rebuilds the
+  deduplicated Silver CSVs from Bronze.
 
 Run one upload pass manually:
 
@@ -162,7 +174,24 @@ Current AWS target:
 Region: us-west-2
 Bucket: des-moines-data-pipeline-austinlab
 API: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics
+API base: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com
 ```
+
+API routes configured by `scripts/deploy_aws.py`:
+
+```text
+GET  /metrics
+GET  /silver-records?instrument=NO2-CAPS&start=...&end=...
+GET  /record-flags?instrument=NO2-CAPS
+POST /record-flags?api_key=<review-api-key>
+GET  /record-corrections?instrument=NO2-CAPS
+POST /record-corrections?api_key=<review-api-key>
+```
+
+Write routes require the API Lambda environment variable `REVIEW_API_KEY`.
+For the current review flow, open the dashboard with `?api_key=<review-api-key>`.
+The dashboard then passes that key to the AWS write endpoints as a URL query
+parameter.
 
 ## Common commands
 
@@ -170,6 +199,7 @@ API: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics
 python3 -m pip install -r requirements.txt   # install deps
 python3 scripts/upload_instrument_data.py     # one upload pass
 python3 scripts/deploy_aws.py                 # deploy/update AWS resources
+python3 scripts/check_review_api.py --limit 5 # verify metrics + Silver review API
 cd frontend && npm install && npm run dev     # run the dashboard locally
 ```
 
@@ -178,32 +208,38 @@ For Vercel, set `VITE_API_URL` to the API Gateway `/metrics` URL printed by
 
 ## Data layout (medallion)
 
-Today the pipeline is **Bronze only**. The uploader lands raw, unmodified
-instrument bytes. The API counts those bytes for the dashboard but does not
-transform them. There is no silver or gold layer yet (those S3 prefixes are
-currently empty).
+Today the pipeline has Bronze and Silver. Bronze stores raw instrument batches.
+Silver stores one deduplicated CSV and metadata file per instrument. Review
+flags and corrections are saved as JSON sidecar records in S3, so we can mark
+bad time ranges or selected rows without rewriting the raw Bronze files.
 
 S3 layout:
 
 ```text
 {instrument_id}/bronze/year=YYYY/month=MM/{stem}__batch_YYYYMMDDTHHMMSS.txt
+{instrument_id}/silver/{instrument_id}_data.csv
+{instrument_id}/silver/{instrument_id}_metadata.txt
+{instrument_id}/flags/year=YYYY/month=MM/{flag_id}.json
+{instrument_id}/corrections/year=YYYY/month=MM/{correction_id}.json
 {instrument_id}/checkpoints/checkpoint.json
 pipeline_status.json
 ```
 
-To extend into a full medallion architecture later:
+Current layer status:
 
 | Layer | Status | What to add on the AWS side |
 |-------|--------|------------------------------|
 | Bronze | done | raw files, partitioned by year/month (optionally add an S3 lifecycle rule) |
-| Silver | to build | a per-instrument transform (AWS Glue PySpark job, or Lambda for small volumes) that parses, types, dedupes, and normalizes timestamps to UTC, writing Parquet to `{id}/silver/`; register tables in the Glue Data Catalog |
-| Gold | to build | business aggregates (hourly/daily means, QA flags, cross-instrument joins) via Athena CTAS or a Glue job to `{id}/gold/`; the dashboard reads gold instead of recounting bronze |
-| Query/catalog | partial | Athena workgroup + Glue Catalog tables |
-| Orchestration | to build | Step Functions or Glue Workflow to chain bronze, silver, gold (there is no cloud schedule today) |
+| Silver | done, CSV | daily Lambda rebuild that filters headers/comments, dedupes rows, and writes `{id}/silver/` |
+| Review sidecars | deployed | flags and corrections stored as JSON under `{id}/flags/` and `{id}/corrections/` through authenticated write routes |
+| Gold | partial | only SMPS hourly summary was seen in S3; decide the required aggregates before expanding |
+| Query/catalog | optional | Athena and Glue Catalog can be added later if querying large historical data becomes important |
+| Orchestration | partial | laptop scheduler for uploads, EventBridge daily schedule for Silver |
 
-The real work in Silver is unifying five different raw schemas into one canonical
-schema per instrument; the `is_data_row()` logic in `lambda_api.py` is a useful
-parsing head start.
+Delta Lake or Iceberg is not needed for the current review flow. S3 JSON
+sidecars are simpler and cheaper for the present data size. Revisit Iceberg only
+when many users need concurrent edits, versioned table history, or SQL updates
+over large Silver/Gold datasets.
 
 ## Cost tile
 
@@ -227,9 +263,11 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
    `{instrument_id}/checkpoints/checkpoint.json`.
 4. Run `python3 scripts/deploy_aws.py` after Lambda/API changes.
 5. Open the API Gateway `/metrics` URL and confirm JSON contains `kpis`,
-   `refreshTime`, and all five instruments with live row counts.
+   `refreshTime`, and all five instruments with Bronze and Silver row counts.
 6. Set Vercel `VITE_API_URL` to that `/metrics` URL and redeploy the frontend.
-7. Install the laptop scheduler only after a clean manual upload pass.
+7. If enabling Data Review writes, set `REVIEW_API_KEY` on the API Lambda before
+   deploying the new API routes.
+8. Install the laptop scheduler only after a clean manual upload pass.
 
 ## Security notes
 
@@ -237,6 +275,10 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
   month-to-date AWS account cost.** Anyone with the URL can read your billing
   number. Before this is widely shared, either drop `mtdCost` from the public
   payload or put the API behind auth (API key / Cognito / signed requests).
+- Review write endpoints require `REVIEW_API_KEY`. The current dashboard passes
+  this as `?api_key=...` in the URL for write actions. This is convenient for
+  review testing, but it can appear in browser history and shared links, so move
+  to proper user auth before broad access.
 - Do not commit AWS credentials, Vercel tokens, sample data, checkpoint files,
   logs, SQLite buffers, or generated Lambda zips.
 - The Lambda execution role attaches the broad managed policy
@@ -250,4 +292,7 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
 
 - Add an AWS Budget and project resource tags so billing can be separated.
 - Address the public cost endpoint (see Security notes).
-- Build the Silver layer once the raw upload path has been stable for several days.
+- Keep `REVIEW_API_KEY` configured in AWS Lambda.
+- Add a small audit view for flags/corrections once the team decides the exact
+  correction approval workflow.
+- Decide Gold requirements after Silver review usage is clear.

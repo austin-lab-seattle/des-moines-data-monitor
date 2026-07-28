@@ -52,11 +52,15 @@ def download_text(key):
 
 # --- Row detection: mirrors lambda_api.py ---------------------------------
 
+def clean_field(field):
+    return field.strip().lstrip("\ufeff").strip('"').strip()
+
+
 def split_fields(line):
     if "\t" in line:
-        return [field.strip().strip('"') for field in line.split("\t")]
+        return [clean_field(field) for field in line.split("\t")]
     try:
-        return [field.strip().strip('"') for field in next(csv.reader([line]))]
+        return [clean_field(field) for field in next(csv.reader([line]))]
     except csv.Error:
         return []
 
@@ -70,7 +74,7 @@ def is_float(value):
 
 
 def is_data_row(instrument_id, line):
-    stripped = line.strip().lstrip("﻿")
+    stripped = line.strip().lstrip("\ufeff")
     if not stripped or stripped.startswith(('%', '#')):
         return False
 

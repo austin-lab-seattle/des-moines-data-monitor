@@ -42,3 +42,4 @@ Thumbs.db
 
 # Local instrument config (copy instruments_config.example.json and edit data_glob paths)
 instruments_config.json
+.vercel

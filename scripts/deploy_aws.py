@@ -1,12 +1,17 @@
 import boto3
 import json
+import os
 import time
 import zipfile
 from pathlib import Path
 
+from botocore.exceptions import ClientError
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CREDS_FILE = REPO_ROOT / "aws_creds.json"
 DEFAULT_REGION = "us-west-2"
+DEPLOY_REGION = os.environ.get("DEPLOY_AWS_REGION", DEFAULT_REGION)
+USE_CREDS_FILE = os.environ.get("USE_AWS_CREDS_FILE") == "1"
 
 print("Starting AWS deployment script...")
 
@@ -18,11 +23,21 @@ def build_session():
     config/credentials, or an attached role). Falls back to aws_creds.json only
     when the chain finds nothing.
     """
-    session = boto3.Session()
+    if USE_CREDS_FILE and CREDS_FILE.exists():
+        with open(CREDS_FILE) as f:
+            creds = json.load(f)
+        print("Using AWS credentials from aws_creds.json.")
+        return boto3.Session(
+            aws_access_key_id=creds["aws_access_key_id"],
+            aws_secret_access_key=creds["aws_secret_access_key"],
+            region_name=DEPLOY_REGION,
+        )
+
+    session = boto3.Session(region_name=DEPLOY_REGION)
     if session.get_credentials() is not None:
-        region = session.region_name or DEFAULT_REGION
+        region = session.region_name or DEPLOY_REGION
         print(f"Using AWS credentials from the default provider chain (region {region}).")
-        return boto3.Session(region_name=region)
+        return session
 
     if CREDS_FILE.exists():
         with open(CREDS_FILE) as f:
@@ -31,7 +46,7 @@ def build_session():
         return boto3.Session(
             aws_access_key_id=creds["aws_access_key_id"],
             aws_secret_access_key=creds["aws_secret_access_key"],
-            region_name=creds.get("region", DEFAULT_REGION),
+            region_name=DEPLOY_REGION,
         )
 
     print("No AWS credentials found. Set env vars / an AWS profile, or create aws_creds.json.")
@@ -52,7 +67,6 @@ region = session.region_name
 ROLE_NAME = "AQDashboardBackendRole"
 API_LAMBDA_NAME = "aq-dashboard-api"
 SILVER_LAMBDA_NAME = "aq-silver-builder"
-GOLD_LAMBDA_NAME = "aq-gold-builder"
 DQ_LAMBDA_NAME = "dq_collector"
 API_NAME = "AQDashboardAPI"
 BUCKET_NAME = "des-moines-data-pipeline-austinlab"
@@ -74,7 +88,14 @@ def ensure_bucket():
     try:
         s3_client.head_bucket(Bucket=BUCKET_NAME)
         print(f"Bucket {BUCKET_NAME} already exists and is accessible.")
-    except Exception:
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        if error_code in {"403", "AccessDenied"}:
+            print(
+                f"Bucket {BUCKET_NAME} is not manageable by this identity; "
+                "assuming it already exists and continuing."
+            )
+            return
         print(f"Creating bucket {BUCKET_NAME} in {region}...")
         kwargs = {"Bucket": BUCKET_NAME}
         if region != "us-east-1":
@@ -191,6 +212,13 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
     try:
         response = lambda_client.get_function(FunctionName=function_name)
         lambda_arn = response["Configuration"]["FunctionArn"]
+        existing_env = (
+            response
+            .get("Configuration", {})
+            .get("Environment", {})
+            .get("Variables", {})
+        )
+        lambda_env = {**existing_env, "S3_BUCKET": BUCKET_NAME}
         run_lambda_update(
             f"{function_name} code update",
             lambda: lambda_client.update_function_code(FunctionName=function_name, ZipFile=zip_bytes),
@@ -205,7 +233,7 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
                 Handler=handler,
                 Timeout=timeout,
                 MemorySize=1024,
-                Environment={"Variables": {"S3_BUCKET": BUCKET_NAME}},
+                Environment={"Variables": lambda_env},
             ),
         )
         wait_for_lambda_update(function_name)
@@ -287,42 +315,6 @@ except lambda_client.exceptions.ResourceConflictException:
     pass
 print(f"EventBridge rule {SILVER_RULE_NAME} configured (daily).")
 
-gold_zip_bytes = read_zip_bytes(
-    str(REPO_ROOT / "gold_builder.zip"),
-    [(REPO_ROOT / "lambda" / "gold_builder.py", "gold_builder.py")],
-)
-gold_lambda_arn = create_or_update_lambda(
-    GOLD_LAMBDA_NAME,
-    "gold_builder.lambda_handler",
-    "python3.12",
-    gold_zip_bytes,
-    300,
-)
-
-print("\nScheduling the Gold builder (daily)...")
-GOLD_RULE_NAME = "gold-builder-daily"
-gold_rule = events_client.put_rule(
-    Name=GOLD_RULE_NAME,
-    ScheduleExpression="rate(1 day)",
-    State="ENABLED",
-    Description="Rebuilds the Gold layer (SMPS hourly summary) once a day.",
-)
-events_client.put_targets(
-    Rule=GOLD_RULE_NAME,
-    Targets=[{"Id": GOLD_LAMBDA_NAME, "Arn": gold_lambda_arn}],
-)
-try:
-    lambda_client.add_permission(
-        FunctionName=GOLD_LAMBDA_NAME,
-        StatementId=f"eventbridge-{GOLD_RULE_NAME}",
-        Action="lambda:InvokeFunction",
-        Principal="events.amazonaws.com",
-        SourceArn=gold_rule["RuleArn"],
-    )
-except lambda_client.exceptions.ResourceConflictException:
-    pass
-print(f"EventBridge rule {GOLD_RULE_NAME} configured (daily).")
-
 print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
 for rule_name in [DQ_RULE_NAME] + LEGACY_DQ_RULE_NAMES:
     try:
@@ -353,12 +345,17 @@ if api:
     print(f"API {API_NAME} already exists ({api_id}).")
 else:
     print(f"Creating HTTP API {API_NAME}...")
-    cors_config = {
-        "AllowOrigins": ["*"],
-        "AllowMethods": ["GET", "OPTIONS"],
-        "AllowHeaders": ["content-type"],
-        "MaxAge": 300,
-    }
+cors_config = {
+    "AllowOrigins": ["*"],
+    "AllowMethods": ["GET", "POST", "OPTIONS"],
+    "AllowHeaders": ["content-type", "x-api-key", "authorization"],
+    "MaxAge": 300,
+}
+
+if api:
+    api_gateway_client.update_api(ApiId=api_id, CorsConfiguration=cors_config)
+    print("API CORS configuration updated.")
+else:
     response = api_gateway_client.create_api(
         Name=API_NAME,
         ProtocolType="HTTP",
@@ -384,14 +381,24 @@ else:
     integration_id = integration["IntegrationId"]
 
 routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
-route_key = "GET /metrics"
-if not any(route["RouteKey"] == route_key for route in routes):
+route_keys = [
+    "GET /metrics",
+    "GET /silver-records",
+    "GET /record-flags",
+    "POST /record-flags",
+    "GET /record-corrections",
+    "POST /record-corrections",
+]
+existing_route_keys = {route["RouteKey"] for route in routes}
+for route_key in route_keys:
+    if route_key in existing_route_keys:
+        continue
     api_gateway_client.create_route(
         ApiId=api_id,
         RouteKey=route_key,
         Target=f"integrations/{integration_id}",
     )
-    print("Route 'GET /metrics' created.")
+    print(f"Route '{route_key}' created.")
 
 stages = api_gateway_client.get_stages(ApiId=api_id)["Items"]
 if not any(stage["StageName"] == "$default" for stage in stages):

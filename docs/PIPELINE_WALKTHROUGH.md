@@ -2,8 +2,9 @@
 
 A complete, deep walkthrough of the ingestion pipeline: every component, every
 function, the checkpoint model, the SQLite buffer, the retry logic, delivery
-semantics (idempotency / exactly-once vs at-least-once), concurrency, failure
-isolation, and every edge case we could think of.
+semantics (idempotency / exactly-once vs at-least-once), concurrency, Silver
+record generation, review sidecars, failure isolation, and every edge case we
+could think of.
 
 This document describes the code in
 [`scripts/upload_instrument_data.py`](../scripts/upload_instrument_data.py) and
@@ -26,7 +27,7 @@ This document describes the code in
 11. [Concurrency and failure isolation](#11-concurrency-and-failure-isolation)
 12. [Pipeline status and S3 layout](#12-pipeline-status-and-s3-layout)
 13. [Credentials resolution](#13-credentials-resolution)
-14. [The AWS side: the dashboard API](#14-the-aws-side-the-dashboard-api)
+14. [The AWS side: Silver builder and dashboard API](#14-the-aws-side-silver-builder-and-dashboard-api)
 15. [Per-instrument formats and row detection](#15-per-instrument-formats-and-row-detection)
 16. [Edge cases and failure modes](#16-edge-cases-and-failure-modes)
 17. [Operational runbook](#17-operational-runbook)
@@ -39,22 +40,27 @@ This document describes the code in
 
 ## 1. System overview
 
-The pipeline has three stages across two machines and the cloud:
+The pipeline has upload, storage, transformation, API, and dashboard stages
+across the field laptop, AWS, and Vercel:
 
 ```text
- FIELD LAPTOP                         AWS                                  VERCEL
- ────────────                         ───                                  ──────
- instrument files                     S3 bucket                            React dashboard
+ FIELD LAPTOP                         AWS                                      VERCEL
+ ────────────                         ───                                      ──────
+ instrument files                     S3 bucket                                React dashboard
    (data_glob)                        des-moines-data-pipeline-austinlab
        │                                    │
  upload_instrument_data.py  ─PUT──►  {instrument}/bronze/year=/month=/...
        │                                    │
- per-file checkpoints                 lambda_api  (Lambda, behind API Gateway /metrics)
- + SQLite buffer                        • on each request, counts rows/bytes live
-       │                                  from bronze (parallel scan, 30s cache)
- checkpoint mirror  ◄────────────►        • reads month-to-date cost (Cost Explorer)
- {instrument}/checkpoints/                • returns dashboard JSON ──────►  GET /metrics
-   checkpoint.json
+ per-file checkpoints                 aq-silver-builder Lambda
+ + SQLite buffer                      daily rebuild into {instrument}/silver/
+       │                                    │
+ checkpoint mirror  ◄────────────►    aq-dashboard-api Lambda
+ {instrument}/checkpoints/              • /metrics dashboard summary
+   checkpoint.json                       • /silver-records browser
+                                         • /record-flags and /record-corrections
+                                         • Cost Explorer tile
+                                              │
+                                         API Gateway ───────────────► dashboard
 ```
 
 **Responsibility split:**
@@ -62,11 +68,12 @@ The pipeline has three stages across two machines and the cloud:
 | Component | Where | Cadence | Job |
 |---|---|---|---|
 | `upload_instrument_data.py` | laptop | every 5 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
-| `lambda_api` | AWS Lambda | on request | count rows/bytes live from bronze and assemble the dashboard JSON (plus Cost Explorer) |
-| `frontend` | Vercel | browser | render the dashboard, poll `/metrics` |
+| `aq-silver-builder` | AWS Lambda | daily EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
+| `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve review APIs, and assemble dashboard JSON |
+| `frontend` | Vercel | browser | render the dashboard, poll `/metrics`, and provide the local Data Review UI after deployment |
 
-There is one schedule, on the laptop. The cloud side does no scheduled work; the
-API counts live whenever the dashboard asks.
+There are two schedules: the laptop upload schedule and the daily cloud Silver
+builder schedule. The API still counts Bronze live whenever the dashboard asks.
 
 ---
 
@@ -74,7 +81,9 @@ API counts live whenever the dashboard asks.
 
 ```text
 .
-├── lambda_api.py                    # dashboard API Lambda: counts rows live + serves JSON
+├── lambda_api.py                    # dashboard API Lambda: metrics + silver review API
+├── lambda/
+│   └── silver_builder.py            # deduplicates Bronze into Silver CSVs
 ├── instruments_config.json          # LOCAL instrument config (gitignored)
 ├── instruments_config.example.json  # tracked template
 ├── aws_creds.json                   # OPTIONAL local credential fallback (gitignored)
@@ -570,6 +579,10 @@ results = await asyncio.gather(*coroutines, return_exceptions=True)
 
 ```text
 {instrument_id}/bronze/year=YYYY/month=MM/{stem}__batch_YYYYMMDDTHHMMSS.txt
+{instrument_id}/silver/{instrument_id}_data.csv
+{instrument_id}/silver/{instrument_id}_metadata.txt
+{instrument_id}/flags/year=YYYY/month=MM/{flag_id}.json
+{instrument_id}/corrections/year=YYYY/month=MM/{correction_id}.json
 {instrument_id}/checkpoints/checkpoint.json
 pipeline_status.json
 ```
@@ -577,7 +590,9 @@ pipeline_status.json
 The batch name embeds the **source file stem** (sanitized to
 `[A-Za-z0-9._-]`) so every bronze object is traceable to the file it came from,
 and the `year=/month=` path is Hive-style partitioning that Athena/Glue can read
-directly when Silver/Gold are built.
+directly if we later add catalog tables. Silver is currently a consolidated CSV
+per instrument plus a metadata sidecar. Flags and corrections are sidecar JSON
+objects, so Bronze and Silver source files are not rewritten by the review UI.
 
 ---
 
@@ -607,12 +622,31 @@ no static key ever has to live in the repo; the field laptop can still drop an
 
 ---
 
-## 14. The AWS side: the dashboard API
+## 14. The AWS side: Silver builder and dashboard API
 
-There is a single Lambda, `lambda_api`, behind API Gateway at `/metrics`. There
-is no separate collector and no CloudWatch metrics. An earlier `dq_collector`
-Lambda that published metrics hourly was removed because it added cost and made
-the dashboard lag behind the data.
+There are two active AWS Lambdas for this pipeline:
+
+- `aq-silver-builder` rebuilds the Silver layer from Bronze daily.
+- `aq-dashboard-api` sits behind API Gateway and serves dashboard metrics and
+  review endpoints.
+
+There is no separate collector and no CloudWatch metrics. An earlier
+`dq_collector` Lambda that published metrics hourly was removed because it added
+cost and made the dashboard lag behind the data.
+
+### `aq-silver-builder` (scheduled, rebuilds Silver)
+
+The Silver builder lists every Bronze object for each instrument, downloads the
+text, keeps only real data rows using the same parser shape as the API, removes
+exact duplicate rows, and writes:
+
+```text
+{instrument}/silver/{instrument}_data.csv
+{instrument}/silver/{instrument}_metadata.txt
+```
+
+The metadata file includes `data_rows_unique`, which the dashboard API reads
+cheaply instead of recounting Silver content on every dashboard request.
 
 ### `lambda_api` (on-demand, counts live)
 
@@ -623,8 +657,10 @@ On every request the API does the following:
 2. counts the real data rows by downloading every bronze object and running the
    per-instrument `is_data_row()` parser, fanned out across a thread pool so the
    many small batch files are read in parallel;
-3. aggregates per instrument into `bronzeRows`, `bronzeSize`, and `lastUpdate`;
-4. reads month-to-date account cost from **Cost Explorer** (`us-east-1`).
+3. reads each instrument's Silver metadata sidecar for `silverRows`;
+4. aggregates per instrument into `bronzeRows`, `bronzeSize`, `silverRows`, and
+   `lastUpdate`;
+5. reads month-to-date account cost from **Cost Explorer** (`us-east-1`).
 
 Because counting is live, the dashboard updates the moment you hit Refresh. Two
 short caches keep it fast: the whole inventory is cached for 30 seconds (so a
@@ -633,6 +669,23 @@ burst of refreshes does not re-scan S3 every time) and the cost value for an hou
 memory means more CPU) and a 30 second timeout. It computes `refreshTime`,
 `systemStatus` (`ONLINE` if any data exists else `DEGRADED`), and the KPI block.
 Response is JSON with permissive CORS.
+
+### Review API routes
+
+`lambda_api.py` also supports these local code paths:
+
+| Route | Purpose |
+|---|---|
+| `GET /silver-records` | load Silver rows by instrument, time range, cursor, and limit |
+| `GET /record-flags` | list saved flag JSON objects for one instrument |
+| `POST /record-flags` | save a selected-row or time-range flag JSON object |
+| `GET /record-corrections` | list saved correction JSON objects for one instrument |
+| `POST /record-corrections` | save correction values for one selected Silver row |
+
+Write routes require the Lambda environment variable `REVIEW_API_KEY`; without
+it, writes return `503`. For the current review flow, the dashboard can be
+opened with `?api_key=<review-api-key>`, and it passes that key to the AWS write
+endpoints as a URL query parameter.
 
 > **Scale caveat:** the API recounts every bronze object on a cache miss. This is
 > fine at the current data size (a few seconds), but it grows with the data. The
@@ -646,8 +699,11 @@ Response is JSON with permissive CORS.
 ### Flow
 
 ```text
-uploader ──► bronze objects ──► lambda_api ──► API Gateway /metrics ──► dashboard
-                                (counts rows/bytes live on request, + Cost Explorer)
+uploader ──► bronze objects ──► silver_builder ──► silver objects
+                     │                                  │
+                     └──────────────► lambda_api ◄──────┘
+                                      │
+                                      └──► API Gateway (/metrics + review routes) ──► dashboard
 ```
 
 ---
@@ -668,8 +724,8 @@ instrument's shape:
 | NO2-CAPS | `.dat` | CSV | ≥10 fields, field0 = 6 digits, field3 numeric; `%` comments |
 | SMPS | `.csv` | CSV | >40 fields, field0 digits, field1 a date-time; huge metadata header |
 
-This parser is also a head start for a future Silver transform (it already knows
-how to find the real rows in each format).
+This parser is also used by the Silver builder, so both dashboard row counts and
+Silver generation agree on what is a real data row.
 
 ---
 
@@ -808,7 +864,8 @@ each batch is a distinct, traceable bronze object.
 | Buffer size | stores full `raw_data` | store metadata only, re-read on retry |
 | API | public, leaks `mtdCost` | drop the field or add auth |
 | Checkpoint growth | one entry per file ever seen | prune entries for files no longer matched |
-| Medallion | Bronze only | build Silver (Glue/Lambda → Parquet + Glue Catalog), then Gold |
+| Review writes | URL `api_key` is temporary and can appear in browser history or shared links | Cognito/API authorizer if many users need controlled access |
+| Medallion | Silver exists as CSV, Gold is only partial | define Gold aggregates, then consider Parquet + Glue Catalog if data grows |
 
 ---
 
@@ -816,8 +873,10 @@ each batch is a distinct, traceable bronze object.
 
 | Term | Meaning |
 |---|---|
-| **Bronze** | raw, unmodified instrument bytes landed in S3 (the only tier today) |
-| **Silver / Gold** | cleaned/typed (Silver) and aggregated/business-ready (Gold) tiers — not built yet |
+| **Bronze** | raw, unmodified instrument bytes landed in S3 |
+| **Silver** | deduplicated per-instrument CSVs built from Bronze |
+| **Gold** | aggregated/business-ready outputs; currently only partial |
+| **Review sidecar** | JSON flag or correction object stored beside Silver, without rewriting raw files |
 | **Checkpoint** | per-file byte offset recording how far a file has been uploaded |
 | **Buffer** | the SQLite write-ahead log of in-flight/failed batches |
 | **Batch** | one contiguous run of new complete lines uploaded as a single S3 object |
@@ -841,9 +900,10 @@ before its offset is persisted). No row is ever lost. Deterministic keys remove
 even that case.
 
 **Q: Where do the dashboard's row counts come from?**
-The API counts them live from S3 on each request (cached 30s), so they update on
-Refresh. There is no CloudWatch and no separate collector; an earlier hourly
-`dq_collector` was removed because it cost money and lagged behind the data.
+Bronze row counts are counted live from S3 on each request (cached 30s), so they
+update on Refresh. Silver row counts come from Silver metadata sidecars. There is
+no CloudWatch and no separate collector; an earlier hourly `dq_collector` was
+removed because it cost money and lagged behind the data.
 
 **Q: Is Athena used?**
 Not today. It only becomes useful once Silver/Gold Parquet exists to query.
