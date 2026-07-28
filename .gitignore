@@ -35,6 +35,9 @@ data/
 *.zip
 sensor_buffer.db
 collector.log
+docs/dashboard-review-screenshot-*.png
+docs/meeting-progress-*.html
+docs/team-email-update-*.md
 
 # OS
 .DS_Store
