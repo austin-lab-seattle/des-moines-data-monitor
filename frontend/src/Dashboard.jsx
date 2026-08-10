@@ -1,5 +1,6 @@
 import { useCallback, useState, useEffect } from 'react';
-import { Activity, AlertTriangle, CheckSquare, Clock, DollarSign, Edit3, MapPin, RefreshCw, Save, Search } from 'lucide-react';
+import { Activity, AlertTriangle, CheckSquare, Clock, Download, DollarSign, Edit3, MapPin, RefreshCw, Save, Search } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 const API_URL = import.meta.env.VITE_API_URL || 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics';
 const API_BASE_URL = API_URL.replace(/\/metrics\/?$/, '');
@@ -186,6 +187,8 @@ function Overview({ kpis, instruments, refreshTime, formatBytes, formatSeattleTi
         <KPICard title="LATEST UPLOAD" value={kpis.lastUpdatedInstrument} unit="INSTRUMENT" color="text-green-400" Icon={Activity} />
         <KPICard title="SITE NAME" value={kpis.siteName} unit="LOCATION" color="text-cyan-400" Icon={MapPin} />
       </div>
+
+      <TimeSeriesChart />
 
       <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-6 shadow-2xl">
         <div className="flex justify-between border-b border-gray-800/50 pb-3 mb-4">
@@ -526,6 +529,117 @@ function DataReview() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function TimeSeriesChart() {
+  const [instrument, setInstrument] = useState('SMPS');
+  const [measurement, setMeasurement] = useState('');
+  const [measurements, setMeasurements] = useState([]);
+  const [series, setSeries] = useState([]);
+  const [start, setStart] = useState('');
+  const [end, setEnd] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({ instrument: inst });
+      if (meas) params.set('measurement', meas);
+      if (s) params.set('start', toIso(s));
+      if (e) params.set('end', toIso(e));
+      const res = await fetch(`${API_BASE_URL}/series?${params.toString()}`);
+      const payload = await res.json();
+      if (res.ok) {
+        setMeasurements(payload.measurements || []);
+        setMeasurement(payload.measurement || '');
+        setSeries(payload.series || []);
+      }
+    } catch {
+      /* keep the last successful data on screen */
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchSeries({ inst: instrument }); }, [instrument, fetchSeries]);
+
+  const downloadCSV = () => {
+    if (!series.length) return;
+    const header = `time,${measurement || 'value'}`;
+    const body = series.map(point => `${point.t},${point.v}`).join('\n');
+    const url = URL.createObjectURL(new Blob([`${header}\n${body}\n`], { type: 'text/csv' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${instrument}_${(measurement || 'series').replace(/[^A-Za-z0-9]+/g, '_')}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const fmtTick = (value) => (value ? value.slice(5, 16).replace('T', ' ') : '');
+  const fmtLabel = (value) => (value ? value.slice(0, 16).replace('T', ' ') : '');
+
+  return (
+    <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-6 shadow-2xl mb-8">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-gray-800/50 pb-4 mb-5">
+        <div className="flex flex-wrap gap-3">
+          <Control label="Instrument">
+            <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
+            </select>
+          </Control>
+          <Control label="Measurement">
+            <select
+              value={measurement}
+              onChange={event => { setMeasurement(event.target.value); fetchSeries({ inst: instrument, meas: event.target.value, s: start, e: end }); }}
+              className="control-input min-w-[220px]"
+            >
+              {measurements.map(name => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </Control>
+          <Control label="Start">
+            <input type="datetime-local" value={start} onChange={event => setStart(event.target.value)} className="control-input" />
+          </Control>
+          <Control label="End">
+            <input type="datetime-local" value={end} onChange={event => setEnd(event.target.value)} className="control-input" />
+          </Control>
+          <div className="flex items-end">
+            <button onClick={() => fetchSeries({ inst: instrument, meas: measurement, s: start, e: end })} className="action-button">
+              <Search size={14} /> Apply
+            </button>
+          </div>
+        </div>
+        <button onClick={downloadCSV} disabled={!series.length} className="action-button">
+          <Download size={14} /> Download CSV
+        </button>
+      </div>
+
+      {loading ? (
+        <div className="text-gray-600 text-xs py-24 text-center tracking-widest uppercase">Loading&hellip;</div>
+      ) : series.length ? (
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
+            <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+            <XAxis dataKey="t" tickFormatter={fmtTick} tick={{ fill: '#6b7280', fontSize: 10 }} tickLine={false} axisLine={{ stroke: 'rgba(255,255,255,0.10)' }} minTickGap={48} />
+            <YAxis tick={{ fill: '#6b7280', fontSize: 10 }} tickLine={false} axisLine={false} width={56} />
+            <Tooltip
+              contentStyle={{ background: '#0a0a0a', border: '1px solid #374151', borderRadius: 8, fontSize: 12 }}
+              labelStyle={{ color: '#9ca3af' }}
+              itemStyle={{ color: '#22d3ee' }}
+              labelFormatter={fmtLabel}
+              formatter={value => [Number(value).toLocaleString(), measurement]}
+            />
+            <Line type="monotone" dataKey="v" stroke="#22d3ee" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#22d3ee' }} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      ) : (
+        <div className="text-gray-600 text-xs py-24 text-center tracking-widest uppercase">No data for this selection.</div>
+      )}
+
+      <div className="text-gray-600 text-[0.6rem] tracking-wider uppercase mt-3">
+        {measurement || 'no measurement'} &middot; hourly mean &middot; {series.length} points
+      </div>
     </div>
   );
 }

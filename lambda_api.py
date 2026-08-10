@@ -504,6 +504,93 @@ def write_review_item(event, review_type):
     return response(201, item)
 
 
+SERIES_DEFAULT_MEASUREMENT = {
+    "SMPS": "Total Concentration",
+    "NEPH-PM25": "Scat coefficient",
+    "CO2-LICOR": "CO2",
+    "NO2-CAPS": "NO2",
+    "BC-MA200": "BC",
+}
+
+
+def numeric_columns(columns, data_lines, sample=25):
+    counts = [0] * len(columns)
+    seen = 0
+    for raw_line in data_lines[:sample]:
+        fields = split_fields(raw_line)
+        for index in range(min(len(columns), len(fields))):
+            if is_float(fields[index]):
+                counts[index] += 1
+        seen += 1
+    if not seen:
+        return []
+    threshold = seen * 0.6
+    return [columns[index] for index in range(len(columns)) if counts[index] >= threshold]
+
+
+def pick_default_measurement(instrument_id, options):
+    hint = SERIES_DEFAULT_MEASUREMENT.get(instrument_id, "")
+    if hint:
+        for column in options:
+            if hint.lower() in column.lower():
+                return column
+    return options[0] if options else None
+
+
+def get_series(event):
+    """Hourly mean of one measurement over time, computed on demand from silver."""
+    params = query_params(event)
+    instrument_id = params.get("instrument") or params.get("instrument_id")
+    if not is_valid_instrument(instrument_id):
+        return response(400, {"error": "Invalid or missing instrument"})
+
+    try:
+        text = get_silver_text(instrument_id)
+    except s3_client.exceptions.NoSuchKey:
+        return response(404, {"error": "Silver data not found", "instrument_id": instrument_id})
+    except Exception as exc:
+        print(f"Series error: {exc}")
+        return response(500, {"error": "Could not read silver data"})
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return response(200, {"instrument_id": instrument_id, "measurement": None, "measurements": [], "series": []})
+
+    columns = split_fields(lines[0])
+    data_lines = lines[1:]
+    options = numeric_columns(columns, data_lines)
+    measurement = params.get("measurement")
+    if measurement not in options:
+        measurement = pick_default_measurement(instrument_id, options)
+    if measurement is None:
+        return response(200, {"instrument_id": instrument_id, "measurement": None, "measurements": options, "series": []})
+
+    col_index = columns.index(measurement)
+    start_time = datetime_for_compare(params.get("start"))
+    end_time = datetime_for_compare(params.get("end"))
+
+    buckets = {}
+    for raw_line in data_lines:
+        fields = split_fields(raw_line)
+        if col_index >= len(fields) or not is_float(fields[col_index]):
+            continue
+        moment = datetime_for_compare(record_timestamp(instrument_id, columns, fields))
+        if moment is None or not row_matches_time_range(moment, start_time, end_time):
+            continue
+        hour = moment.replace(minute=0, second=0, microsecond=0).isoformat()
+        agg = buckets.setdefault(hour, [0.0, 0])
+        agg[0] += float(fields[col_index])
+        agg[1] += 1
+
+    series = [{"t": hour, "v": round(total / count, 3)} for hour, (total, count) in sorted(buckets.items())]
+    return response(200, {
+        "instrument_id": instrument_id,
+        "measurement": measurement,
+        "measurements": options,
+        "series": series,
+    })
+
+
 def compute_inventory():
     """List every bronze object, count rows in parallel, aggregate per instrument."""
     per_instrument_objects = {
@@ -595,6 +682,9 @@ def lambda_handler(event, context):
     method, path = get_route(event)
     if method == "OPTIONS":
         return response(204)
+
+    if path.endswith("/series") and method == "GET":
+        return get_series(event)
 
     if path.endswith("/silver-records") and method == "GET":
         return get_silver_records(event)
