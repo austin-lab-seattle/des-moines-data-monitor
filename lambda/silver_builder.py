@@ -3,7 +3,7 @@
 Consolidates each instrument's many raw bronze batch files into a single clean
 file in the silver layer. For each instrument it:
 
-* merges every bronze object (in chronological order);
+* merges every bronze object except denied test/dev sources (chronological order);
 * keeps only real data rows (the same `is_data_row` logic the dashboard uses, so
   headers, comment lines, and the instrument metadata preamble are filtered out);
 * drops duplicate rows (the at-least-once duplicates and any re-uploads);
@@ -32,11 +32,21 @@ BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 MAX_WORKERS = 16
 
-# SMPS Bronze currently contains a clean Oct Duwamish export plus older June
-# test/dev exports. Only this approved source should feed Silver until the team
-# explicitly approves the later SMPS files.
-APPROVED_BRONZE_SOURCES = {
-    "SMPS": {"batch_20260603T175340.txt"},
+# Bronze currently holds a batch of June 2026 SMPS instrument test/dev runs
+# alongside the real Oct Duwamish export. Exclude those specific sources by name
+# so Silver stays clean. This is a denylist, not an allowlist, so automated
+# ingestion of new real data flows through with no per-file maintenance. Delete
+# these entries once the test objects are cleared out of Bronze.
+EXCLUDED_BRONZE_SOURCES = {
+    "SMPS": {
+        "2026-06-17_163506_SMPS",
+        "2026-06-22_100022_SMPS",
+        "2026-06-22_164514_SMPS",
+        "2026-06-23_102848_SMPS",
+        "SMPS_3082002215001_20260625_144825",
+        "SMPS_3082002215001_20260625_173616",
+        "SMPS_3082002215001_20260626_173616",
+    },
 }
 
 
@@ -45,9 +55,8 @@ def bronze_source_name(key):
     return filename.split("__batch_", 1)[0]
 
 
-def is_approved_bronze_key(instrument_id, key):
-    approved = APPROVED_BRONZE_SOURCES.get(instrument_id)
-    return approved is None or bronze_source_name(key) in approved
+def is_excluded_bronze_key(instrument_id, key):
+    return bronze_source_name(key) in EXCLUDED_BRONZE_SOURCES.get(instrument_id, set())
 
 
 def list_bronze_keys(instrument_id):
@@ -185,6 +194,8 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
         f"# duplicates_removed: {stats['duplicates']}",
         f"# expected_fields: {stats.get('expected_fields') or ''}",
         f"# schema_mismatches_skipped: {stats.get('schema_mismatches', 0)}",
+        f"# excluded_objects: {stats.get('excluded_objects', 0)}",
+        f"# excluded_sources: {', '.join(stats.get('excluded_sources') or []) or 'none'}",
         "# --- header / preamble lines from bronze ---",
     ] + metadata
     meta_body = "\n".join(meta_lines) + "\n"
@@ -205,8 +216,8 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
 
 def build_instrument(instrument_id):
     all_keys = list_bronze_keys(instrument_id)
-    keys = [key for key in all_keys if is_approved_bronze_key(instrument_id, key)]
-    skipped_sources = sorted({
+    keys = [key for key in all_keys if not is_excluded_bronze_key(instrument_id, key)]
+    excluded_sources = sorted({
         bronze_source_name(key)
         for key in all_keys
         if key not in keys
@@ -217,8 +228,8 @@ def build_instrument(instrument_id):
             "rows": 0,
             "unique": 0,
             "duplicates": 0,
-            "skipped_objects": len(all_keys),
-            "skipped_sources": skipped_sources,
+            "excluded_objects": len(all_keys),
+            "excluded_sources": excluded_sources,
             "written": False,
         }
 
@@ -234,8 +245,8 @@ def build_instrument(instrument_id):
         "duplicates": duplicates,
         "expected_fields": len(split_fields(header)) if header else None,
         "schema_mismatches": schema_mismatches,
-        "skipped_objects": len(all_keys) - len(keys),
-        "skipped_sources": skipped_sources,
+        "excluded_objects": len(all_keys) - len(keys),
+        "excluded_sources": excluded_sources,
     }
     write_silver(instrument_id, header, data_rows, metadata, stats)
     return {
@@ -244,8 +255,8 @@ def build_instrument(instrument_id):
         "unique": len(data_rows),
         "duplicates": duplicates,
         "schema_mismatches": schema_mismatches,
-        "skipped_objects": len(all_keys) - len(keys),
-        "skipped_sources": skipped_sources,
+        "excluded_objects": len(all_keys) - len(keys),
+        "excluded_sources": excluded_sources,
         "written": True,
     }
 
