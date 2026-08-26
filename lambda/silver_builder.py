@@ -32,6 +32,23 @@ BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 MAX_WORKERS = 16
 
+# SMPS Bronze currently contains a clean Oct Duwamish export plus older June
+# test/dev exports. Only this approved source should feed Silver until the team
+# explicitly approves the later SMPS files.
+APPROVED_BRONZE_SOURCES = {
+    "SMPS": {"batch_20260603T175340.txt"},
+}
+
+
+def bronze_source_name(key):
+    filename = key.rsplit("/", 1)[-1]
+    return filename.split("__batch_", 1)[0]
+
+
+def is_approved_bronze_key(instrument_id, key):
+    approved = APPROVED_BRONZE_SOURCES.get(instrument_id)
+    return approved is None or bronze_source_name(key) in approved
+
 
 def list_bronze_keys(instrument_id):
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -113,22 +130,31 @@ def is_data_row(instrument_id, line):
 
 
 def consolidate(instrument_id, ordered_texts):
-    """Return (header, data_rows, metadata_lines, total_rows, duplicates)."""
+    """Return (header, data_rows, metadata_lines, total_rows, duplicates, schema_mismatches)."""
     header = None
+    expected_fields = None
     data_rows = []
     seen_rows = set()
     metadata = []
     seen_meta = set()
     total = 0
     duplicates = 0
+    schema_mismatches = 0
 
     for _key, text in ordered_texts:
         last_nondata = None
         for raw in text.splitlines():
             line = raw.rstrip("\r")
             if is_data_row(instrument_id, line):
+                fields = split_fields(line)
                 if header is None and last_nondata is not None:
                     header = last_nondata
+                    expected_fields = len(split_fields(header))
+                if expected_fields is None:
+                    expected_fields = len(fields)
+                if len(fields) != expected_fields:
+                    schema_mismatches += 1
+                    continue
                 total += 1
                 if line in seen_rows:
                     duplicates += 1
@@ -141,7 +167,7 @@ def consolidate(instrument_id, ordered_texts):
                     seen_meta.add(line)
                     metadata.append(line)
 
-    return header, data_rows, metadata, total, duplicates
+    return header, data_rows, metadata, total, duplicates, schema_mismatches
 
 
 def write_silver(instrument_id, header, data_rows, metadata, stats):
@@ -157,6 +183,8 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
         f"# data_rows_total: {stats['total']}",
         f"# data_rows_unique: {stats['unique']}",
         f"# duplicates_removed: {stats['duplicates']}",
+        f"# expected_fields: {stats.get('expected_fields') or ''}",
+        f"# schema_mismatches_skipped: {stats.get('schema_mismatches', 0)}",
         "# --- header / preamble lines from bronze ---",
     ] + metadata
     meta_body = "\n".join(meta_lines) + "\n"
@@ -176,20 +204,38 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
 
 
 def build_instrument(instrument_id):
-    keys = list_bronze_keys(instrument_id)
+    all_keys = list_bronze_keys(instrument_id)
+    keys = [key for key in all_keys if is_approved_bronze_key(instrument_id, key)]
+    skipped_sources = sorted({
+        bronze_source_name(key)
+        for key in all_keys
+        if key not in keys
+    })
     if not keys:
-        return {"objects": 0, "rows": 0, "unique": 0, "duplicates": 0, "written": False}
+        return {
+            "objects": 0,
+            "rows": 0,
+            "unique": 0,
+            "duplicates": 0,
+            "skipped_objects": len(all_keys),
+            "skipped_sources": skipped_sources,
+            "written": False,
+        }
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         texts = list(pool.map(download_text, keys))
     texts.sort(key=lambda kt: kt[0])
 
-    header, data_rows, metadata, total, duplicates = consolidate(instrument_id, texts)
+    header, data_rows, metadata, total, duplicates, schema_mismatches = consolidate(instrument_id, texts)
     stats = {
         "objects": len(keys),
         "total": total,
         "unique": len(data_rows),
         "duplicates": duplicates,
+        "expected_fields": len(split_fields(header)) if header else None,
+        "schema_mismatches": schema_mismatches,
+        "skipped_objects": len(all_keys) - len(keys),
+        "skipped_sources": skipped_sources,
     }
     write_silver(instrument_id, header, data_rows, metadata, stats)
     return {
@@ -197,6 +243,9 @@ def build_instrument(instrument_id):
         "rows": total,
         "unique": len(data_rows),
         "duplicates": duplicates,
+        "schema_mismatches": schema_mismatches,
+        "skipped_objects": len(all_keys) - len(keys),
+        "skipped_sources": skipped_sources,
         "written": True,
     }
 

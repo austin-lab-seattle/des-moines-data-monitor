@@ -384,6 +384,7 @@ routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
 route_keys = [
     "GET /metrics",
     "GET /series",
+    "GET /silver-download",
     "GET /silver-records",
     "GET /record-flags",
     "POST /record-flags",

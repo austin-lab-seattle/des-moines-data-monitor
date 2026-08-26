@@ -171,7 +171,7 @@ def is_data_row(instrument_id, line):
     return False
 
 
-def parse_datetime_value(value):
+def parse_datetime_value(value, prefer_month_first=False):
     if value is None:
         return None
     cleaned = str(value).strip().strip('"')
@@ -184,18 +184,26 @@ def parse_datetime_value(value):
     except ValueError:
         pass
 
-    formats = [
+    base_formats = [
         "%Y-%m-%dT%H:%M:%S.%f",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M:%S.%f",
         "%Y-%m-%d %H:%M:%S",
         "%Y/%m/%d %H:%M:%S.%f",
         "%Y/%m/%d %H:%M:%S",
+    ]
+    slash_formats = [
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S.%f",
+        "%d/%m/%Y %H:%M:%S",
+    ] if prefer_month_first else [
         "%d/%m/%Y %H:%M:%S.%f",
         "%d/%m/%Y %H:%M:%S",
         "%m/%d/%Y %H:%M:%S",
         "%m/%d/%Y %H:%M",
     ]
+    formats = base_formats + slash_formats
     for fmt in formats:
         try:
             return datetime.strptime(cleaned, fmt)
@@ -204,13 +212,24 @@ def parse_datetime_value(value):
     return None
 
 
-def datetime_for_compare(value):
-    parsed = parse_datetime_value(value)
+def datetime_for_compare(value, prefer_month_first=False):
+    parsed = parse_datetime_value(value, prefer_month_first=prefer_month_first)
     if parsed is None:
         return None
     if parsed.tzinfo is not None:
         return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
+
+
+def instrument_prefers_month_first(instrument_id):
+    return instrument_id == "SMPS"
+
+
+def datetime_for_instrument(instrument_id, value):
+    return datetime_for_compare(
+        value,
+        prefer_month_first=instrument_prefers_month_first(instrument_id),
+    )
 
 
 def column_index(columns):
@@ -366,7 +385,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
     for source_index, raw_line in source_rows:
         fields = split_fields(raw_line)
         timestamp_raw = record_timestamp(instrument_id, columns, fields)
-        timestamp_compare = datetime_for_compare(timestamp_raw)
+        timestamp_compare = datetime_for_instrument(instrument_id, timestamp_raw)
         if (start_time or end_time) and not row_matches_time_range(timestamp_compare, start_time, end_time):
             continue
         if skipped < cursor:
@@ -381,7 +400,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
             "row_key": make_row_key(instrument_id, timestamp_raw, raw_line),
             "source_index": source_index,
             "timestamp": timestamp_raw,
-            "timestamp_iso": parse_datetime_value(timestamp_raw).isoformat() if parse_datetime_value(timestamp_raw) else None,
+            "timestamp_iso": timestamp_compare.isoformat() if timestamp_compare else None,
             "timestamp_compare": timestamp_compare,
             "values": values,
             "raw": raw_line,
@@ -401,11 +420,43 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
     return columns, rows, next_cursor, len(flags) + len(corrections)
 
 
+def count_silver_records(instrument_id, start_raw=None, end_raw=None):
+    """Count data rows in a time window without the heavier flag/correction join."""
+    text = get_silver_text(instrument_id)
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return 0
+    start_time = datetime_for_compare(start_raw)
+    end_time = datetime_for_compare(end_raw)
+    if not (start_time or end_time):
+        return len(lines) - 1
+    columns = split_fields(lines[0])
+    count = 0
+    for raw_line in lines[1:]:
+        fields = split_fields(raw_line)
+        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
+        if row_matches_time_range(moment, start_time, end_time):
+            count += 1
+    return count
+
+
 def get_silver_records(event):
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
     if not is_valid_instrument(instrument_id):
         return response(400, {"error": "Invalid or missing instrument"})
+
+    # The Flag Range dialog previews how many records a window covers before
+    # committing, so answer that cheaply without building full row objects.
+    if str(params.get("count_only", "")).lower() in ("1", "true", "yes"):
+        try:
+            count = count_silver_records(instrument_id, params.get("start"), params.get("end"))
+        except s3_client.exceptions.NoSuchKey:
+            return response(404, {"error": "Silver records not found", "instrument_id": instrument_id})
+        except Exception as exc:
+            print(f"Silver count error: {exc}")
+            return response(500, {"error": "Could not count silver records"})
+        return response(200, {"instrument_id": instrument_id, "count": count})
 
     try:
         columns, rows, next_cursor, review_count = parse_silver_records(
@@ -516,16 +567,41 @@ SERIES_DEFAULT_MEASUREMENT = {
 def numeric_columns(columns, data_lines, sample=25):
     counts = [0] * len(columns)
     seen = 0
-    for raw_line in data_lines[:sample]:
+    for raw_line in data_lines:
         fields = split_fields(raw_line)
+        if len(fields) != len(columns):
+            continue
         for index in range(min(len(columns), len(fields))):
             if is_float(fields[index]):
                 counts[index] += 1
         seen += 1
+        if seen >= sample:
+            break
     if not seen:
         return []
     threshold = seen * 0.6
     return [columns[index] for index in range(len(columns)) if counts[index] >= threshold]
+
+
+# Instrument-setting and diagnostic columns are numeric but not science
+# measurements, and the SMPS export carries ~100 particle-size bins whose headers
+# are bare diameters. Both only clutter the chart's measurement picker, so filter
+# them out and leave the meaningful quantities (concentrations, sizes, coefficients).
+MEASUREMENT_BLOCKLIST = (
+    "flow", "voltage", "temp", "pressure", "humidity", "viscosity", "free path",
+    "dma", "ramping", "transit", "adjustment", "dilution", "density", "sheath",
+    "impactor", "size", "scan", "polarity", "direction", "neutralizer",
+    "classifier", "detector", "communication", "status", "reserved", "d50",
+    "inlet", "counting", "channel", "retrace",
+)
+
+
+def is_measurement_column(name):
+    """True for real measurements; False for size-bin diameters and diagnostics."""
+    if is_float(name):  # a bare-number header is a particle-size bin, not a measurement
+        return False
+    lowered = name.lower()
+    return not any(term in lowered for term in MEASUREMENT_BLOCKLIST)
 
 
 def pick_default_measurement(instrument_id, options):
@@ -558,9 +634,12 @@ def get_series(event):
 
     columns = split_fields(lines[0])
     data_lines = lines[1:]
-    options = numeric_columns(columns, data_lines)
+    numeric = numeric_columns(columns, data_lines)
+    # The picker shows only meaningful measurements, but any numeric column can
+    # still be requested directly by name via ?measurement=.
+    options = [column for column in numeric if is_measurement_column(column)] or numeric
     measurement = params.get("measurement")
-    if measurement not in options:
+    if measurement not in numeric:
         measurement = pick_default_measurement(instrument_id, options)
     if measurement is None:
         return response(200, {"instrument_id": instrument_id, "measurement": None, "measurements": options, "series": []})
@@ -570,12 +649,22 @@ def get_series(event):
     end_time = datetime_for_compare(params.get("end"))
 
     buckets = {}
+    skipped_schema_mismatch = 0
+    skipped_invalid_measurement = 0
+    skipped_no_timestamp = 0
+    expected_fields = len(columns)
     for raw_line in data_lines:
         fields = split_fields(raw_line)
-        if col_index >= len(fields) or not is_float(fields[col_index]):
+        if len(fields) != expected_fields:
+            skipped_schema_mismatch += 1
             continue
-        moment = datetime_for_compare(record_timestamp(instrument_id, columns, fields))
+        if col_index >= len(fields) or not is_float(fields[col_index]):
+            skipped_invalid_measurement += 1
+            continue
+        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
         if moment is None or not row_matches_time_range(moment, start_time, end_time):
+            if moment is None:
+                skipped_no_timestamp += 1
             continue
         hour = moment.replace(minute=0, second=0, microsecond=0).isoformat()
         agg = buckets.setdefault(hour, [0.0, 0])
@@ -583,11 +672,53 @@ def get_series(event):
         agg[1] += 1
 
     series = [{"t": hour, "v": round(total / count, 3)} for hour, (total, count) in sorted(buckets.items())]
+    plotted_rows = sum(count for _total, count in buckets.values())
     return response(200, {
         "instrument_id": instrument_id,
         "measurement": measurement,
         "measurements": options,
         "series": series,
+        "source_rows": len(data_lines),
+        "plotted_rows": plotted_rows,
+        "skipped_schema_mismatch": skipped_schema_mismatch,
+        "skipped_invalid_measurement": skipped_invalid_measurement,
+        "skipped_no_timestamp": skipped_no_timestamp,
+    })
+
+
+def get_silver_download(event):
+    """Hand back a short-lived presigned URL for the full raw silver CSV.
+
+    The consolidated file can be tens of MB, past the Lambda response limit, so the
+    browser downloads it straight from S3 instead of through the API.
+    """
+    params = query_params(event)
+    instrument_id = params.get("instrument") or params.get("instrument_id")
+    if not is_valid_instrument(instrument_id):
+        return response(400, {"error": "Invalid or missing instrument"})
+
+    key = f"{instrument_id}/silver/{instrument_id}_data.csv"
+    try:
+        head = s3_client.head_object(Bucket=BUCKET, Key=key)
+    except Exception:
+        return response(404, {"error": "Silver data not found", "instrument_id": instrument_id})
+
+    filename = f"{instrument_id}_silver.csv"
+    url = s3_client.generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": BUCKET,
+            "Key": key,
+            "ResponseContentDisposition": f'attachment; filename="{filename}"',
+            "ResponseContentType": "text/csv",
+        },
+        ExpiresIn=300,
+    )
+    return response(200, {
+        "instrument_id": instrument_id,
+        "filename": filename,
+        "bytes": head.get("ContentLength"),
+        "url": url,
     })
 
 
@@ -685,6 +816,9 @@ def lambda_handler(event, context):
 
     if path.endswith("/series") and method == "GET":
         return get_series(event)
+
+    if path.endswith("/silver-download") and method == "GET":
+        return get_silver_download(event)
 
     if path.endswith("/silver-records") and method == "GET":
         return get_silver_records(event)
