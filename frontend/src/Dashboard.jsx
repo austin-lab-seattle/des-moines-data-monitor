@@ -1,15 +1,47 @@
 import { useCallback, useState, useEffect } from 'react';
-import { Activity, AlertTriangle, Check, CheckSquare, Clock, Code2, Copy, Download, DollarSign, Edit3, Lock, MapPin, RefreshCw, Save, Search, ShieldCheck, X } from 'lucide-react';
+import { Activity, AlertTriangle, Check, Clock, Copy, Database, DollarSign, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
-const API_URL = import.meta.env.VITE_API_URL || 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics';
-const API_BASE_URL = API_URL.replace(/\/metrics\/?$/, '');
+const DEFAULT_API_BASE_URL = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
+const API_ENTRY_URL = import.meta.env.VITE_API_URL || `${DEFAULT_API_BASE_URL}/air-quality/v1/summary`;
+const getApiBaseUrl = (value) => {
+  const trimmed = String(value || DEFAULT_API_BASE_URL).replace(/\/+$/, '');
+  const marker = '/air-quality/';
+  if (trimmed.includes(marker)) return trimmed.slice(0, trimmed.indexOf(marker));
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return DEFAULT_API_BASE_URL;
+  }
+};
+const API_BASE_URL = getApiBaseUrl(API_ENTRY_URL);
+const API_PATHS = {
+  summary: '/air-quality/v1/summary',
+  timeseries: '/air-quality/v1/timeseries',
+  observations: '/air-quality/v1/observations',
+  observationsExport: '/air-quality/v1/observations/export',
+  accessRequests: '/air-quality/v1/access-requests',
+};
+const apiUrl = (path) => import.meta.env.DEV ? path : `${API_BASE_URL}${path}`;
+const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
+const API_TIMEOUT_MS = 15000;
+const fetchApi = async (pathWithQuery, options = {}) => {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  try {
+    return await fetch(apiUrl(pathWithQuery), { ...options, signal: options.signal || controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
 const INSTRUMENT_IDS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
 const toIso = (value) => value ? new Date(value).toISOString() : '';
-const getReviewApiKey = () => {
-  if (typeof window === 'undefined') return '';
-  const params = new URLSearchParams(window.location.search);
-  return params.get('api_key') || params.get('review_key') || '';
+const formatScienceLabel = (value) => String(value || '').replaceAll('cm�', 'cm³');
+const getInitialTheme = () => {
+  if (typeof window === 'undefined') return 'light';
+  const saved = window.localStorage.getItem('aq-dashboard-theme');
+  if (saved === 'light' || saved === 'dark') return saved;
+  return 'light';
 };
 
 export default function Dashboard() {
@@ -18,11 +50,17 @@ export default function Dashboard() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [activeView, setActiveView] = useState('overview');
+  const [theme, setTheme] = useState(getInitialTheme);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem('aq-dashboard-theme', theme);
+  }, [theme]);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await fetch(API_URL);
+        const response = await fetchApi(API_PATHS.summary);
         if (!response.ok) {
           throw new Error(`API returned ${response.status}`);
         }
@@ -45,7 +83,7 @@ export default function Dashboard() {
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      const response = await fetch(API_URL);
+      const response = await fetchApi(API_PATHS.summary);
       if (!response.ok) {
         throw new Error(`API returned ${response.status}`);
       }
@@ -60,32 +98,7 @@ export default function Dashboard() {
     }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-black text-gray-400 font-mono">
-        INITIALIZING SENSORS...
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="flex flex-col gap-5 items-center justify-center min-h-screen bg-black text-gray-300 font-mono p-6">
-        <div className="text-sm tracking-widest text-red-400">API CONNECTION UNAVAILABLE</div>
-        <div className="max-w-xl text-center text-xs text-gray-500">{error || 'No metrics payload returned.'}</div>
-        <button
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className="inline-flex items-center gap-2 text-xs font-bold tracking-widest uppercase px-3 py-1.5 rounded border border-cyan-400 text-cyan-400 disabled:opacity-50"
-        >
-          <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  const { kpis, instruments, refreshTime, systemStatus } = data;
+  const { kpis = {}, instruments = [], refreshTime } = data || {};
 
   const formatBytes = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
@@ -109,59 +122,48 @@ export default function Dashboard() {
   };
 
   return (
-    <div
-      className="min-h-screen bg-black text-gray-300 font-sans p-6"
-      style={{
-        backgroundImage: 'linear-gradient(rgba(5, 5, 5, 0.85), rgba(5, 5, 5, 0.95)), url("/bg.png")',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundAttachment: 'fixed'
-      }}
-    >
-      <div className="max-w-6xl mx-auto">
-        <header className="flex justify-between items-baseline border-b border-gray-800/60 pb-3 mb-8">
-          <h1 className="text-xl font-black tracking-wider text-white">
-            AQ MONITOR <span className="text-gray-500">| <span className="text-cyan-400">SEATTLE</span></span>
-          </h1>
-          <div className="flex items-center gap-4">
-            <div className="flex rounded border border-gray-800/80 overflow-hidden">
-              {[
-                { id: 'overview', label: 'Overview' },
-                { id: 'review', label: 'Data Review' },
-                { id: 'api', label: 'API' },
-              ].map((tab, index) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveView(tab.id)}
-                  className={`text-[0.65rem] font-bold tracking-widest uppercase px-3 py-1.5 ${index > 0 ? 'border-l border-gray-800/80' : ''} ${activeView === tab.id ? 'bg-cyan-400 text-black' : 'text-gray-400 hover:text-cyan-300'}`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-            <div className="text-xs font-semibold text-gray-500 tracking-wider">
-              SYSTEM STATUS: <span className={systemStatus === 'ONLINE' ? 'text-green-400' : 'text-red-400'}>{systemStatus || 'CHECKING...'}</span>
-            </div>
-            <button
-              id="refresh-btn"
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="text-xs font-bold tracking-widest uppercase px-3 py-1.5 rounded border transition-all"
-              style={{
-                borderColor: refreshing ? '#374151' : '#22d3ee',
-                color: refreshing ? '#6b7280' : '#22d3ee',
-                background: 'transparent',
-                cursor: refreshing ? 'not-allowed' : 'pointer',
-                opacity: refreshing ? 0.5 : 1,
-              }}
-            >
-              <span className="inline-flex items-center gap-2">
-                <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
-                {refreshing ? 'REFRESHING...' : 'REFRESH'}
-              </span>
+    <div className={`app-shell ${theme === 'light' ? 'theme-light' : 'theme-dark'} ${activeView === 'api' ? 'api-shell' : ''}`}>
+      <div className={activeView === 'api' ? 'api-portal-root' : 'site-frame'}>
+        {activeView !== 'api' && <header className="site-header">
+          <button className="site-brand" type="button" onClick={() => setActiveView('overview')} aria-label="Open overview">
+            <span className="brand-mark"><Wind size={22} /></span>
+            <span><strong>Des Moines Air</strong><small>Environmental monitor</small></span>
+          </button>
+
+          <nav className="site-nav" aria-label="Main navigation">
+            {[
+              { id: 'overview', label: 'Conditions' },
+              { id: 'review', label: 'Observations' },
+              { id: 'api', label: 'Developers' },
+            ].map(tab => (
+              <button key={tab.id} onClick={() => setActiveView(tab.id)} className={activeView === tab.id ? 'site-nav-active' : ''}>
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+
+          <div className="site-actions">
+            <button className="icon-action" type="button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={`Use ${theme === 'light' ? 'dark' : 'light'} theme`} title={`Use ${theme === 'light' ? 'dark' : 'light'} theme`}>
+              {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+            </button>
+            <button className="refresh-action" type="button" onClick={handleRefresh} disabled={refreshing}>
+              <RefreshCw size={17} className={refreshing ? 'animate-spin' : ''} />
+              <span>{refreshing ? 'Refreshing' : 'Refresh'}</span>
             </button>
           </div>
-        </header>
+        </header>}
+
+        {loading && activeView !== 'api' && (
+          <div className="dashboard-api-notice dashboard-loading-notice" role="status">
+            Loading the latest research data. You can still use the navigation and filters.
+          </div>
+        )}
+
+        {!loading && error && activeView !== 'api' && (
+          <div className="dashboard-api-notice" role="status">
+            Live dashboard data is temporarily unavailable. API documentation and access requests remain available.
+          </div>
+        )}
 
         {activeView === 'overview' && (
           <Overview
@@ -170,107 +172,135 @@ export default function Dashboard() {
             refreshTime={refreshTime}
             formatBytes={formatBytes}
             formatSeattleTime={formatSeattleTime}
+            loading={loading}
           />
         )}
         {activeView === 'review' && <DataReview />}
-        {activeView === 'api' && <ApiSnippets />}
+        {activeView === 'api' && (
+          <ApiSnippets
+            theme={theme}
+            onThemeChange={setTheme}
+            onOpenDashboard={() => setActiveView('overview')}
+          />
+        )}
       </div>
     </div>
   );
 }
 
-function Overview({ kpis, instruments, refreshTime, formatBytes, formatSeattleTime }) {
+function Overview({ kpis, instruments, refreshTime, formatBytes, formatSeattleTime, loading }) {
+  const [referenceTime] = useState(Date.now);
+  const totalCleanedRows = instruments.reduce((total, instrument) => total + (instrument.silverRows || 0), 0);
+  const hasMtdCost = Number.isFinite(Number(kpis.mtdCost));
+  const mtdCost = hasMtdCost
+    ? Number(kpis.mtdCost).toLocaleString(undefined, {
+        style: 'currency',
+        currency: kpis.costCurrency || 'USD',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : null;
+  const ageDays = refreshTime
+    ? Math.max(0, Math.floor((referenceTime - new Date(refreshTime).getTime()) / 86400000))
+    : null;
+  const ageLabel = ageDays == null ? 'Not available' : ageDays === 0 ? 'Today' : `${ageDays} days ago`;
+
   return (
-    <>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5 mb-10">
-        <KPICard title="LAST UPLOAD" value={refreshTime ? formatSeattleTime(refreshTime).split(',')[1]?.trim() : 'NO DATA'} unit="SEATTLE TIME" color="text-cyan-400" Icon={Clock} />
-        <KPICard title="MTD COST" value={kpis.mtdCost === "N/A" ? "N/A" : `$${kpis.mtdCost}`} unit={kpis.costScope || "AWS ACCOUNT MTD"} color="text-pink-500" Icon={DollarSign} />
-        <KPICard title="LATEST UPLOAD" value={kpis.lastUpdatedInstrument} unit="INSTRUMENT" color="text-green-400" Icon={Activity} />
-        <KPICard title="SITE NAME" value={kpis.siteName} unit="LOCATION" color="text-cyan-400" Icon={MapPin} />
-      </div>
+    <main className="dashboard-page">
+      <section className="location-heading">
+        <div>
+          <div className="location-label"><MapPin size={15} /> Des Moines, Washington</div>
+          <h1>Air monitoring conditions</h1>
+          <p>Live field-instrument status and quality-checked environmental observations.</p>
+        </div>
+        <div className="updated-label"><span>Last network update</span><strong>{formatSeattleTime(refreshTime)}</strong></div>
+      </section>
+
+      <section className="network-hero">
+        <div className="network-hero-main">
+          <span className="hero-orbit"><Clock size={32} /></span>
+          <div>
+            <span className="hero-kicker">Latest completed upload</span>
+            <h2>{refreshTime ? formatSeattleTime(refreshTime) : loading ? 'Loading upload history…' : 'No upload timestamp available'}</h2>
+            <p>{ageDays != null && ageDays > 1 ? `The dataset is ${ageDays} days old. Check the field-laptop schedule if this is unexpected.` : 'Timestamp reported by the research data pipeline.'}</p>
+          </div>
+        </div>
+        <div className="network-hero-facts">
+          <div><span>Latest source</span><strong>{kpis.lastUpdatedInstrument || '—'}</strong></div>
+          <div><span>Clean observations</span><strong>{totalCleanedRows.toLocaleString()}</strong></div>
+          <div><span>Data age</span><strong>{ageLabel}</strong></div>
+        </div>
+      </section>
+
+      <section className="kpi-grid" aria-label="Monitoring summary">
+        <KPICard title="Last upload" value={refreshTime ? formatSeattleTime(refreshTime).split(',')[1]?.trim() : 'No data'} unit="Local time" color="blue" Icon={Clock} />
+        {hasMtdCost ? (
+          <KPICard title="Month to date" value={mtdCost} unit="Internal infrastructure" color="violet" Icon={DollarSign} />
+        ) : (
+          <KPICard title="Cleaned rows" value={totalCleanedRows.toLocaleString()} unit="Quality checked" color="violet" Icon={Check} />
+        )}
+        <KPICard title="Latest source" value={kpis.lastUpdatedInstrument || '—'} unit="Reporting instrument" color="green" Icon={Activity} />
+        <KPICard title="Instruments" value={instruments.length.toString()} unit="Connected sources" color="orange" Icon={Database} />
+      </section>
 
       <TimeSeriesChart />
 
-      <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-6 shadow-2xl">
-        <div className="flex justify-between border-b border-gray-800/50 pb-3 mb-4">
-          <h2 className="text-[0.70rem] font-extrabold text-gray-400 tracking-widest uppercase">INSTRUMENT DATA INVENTORY</h2>
+      <section className="surface-card inventory-card">
+        <div className="section-heading">
+          <div><span className="section-eyebrow">Network inventory</span><h2>Instrument activity</h2></div>
+          <span className="section-meta">{instruments.length} sources</span>
         </div>
 
-        <table className="w-full text-left border-collapse">
+        <div className="table-scroll"><table className="data-table">
           <thead>
             <tr>
-              <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50">Instrument</th>
-              <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Bronze Rows</th>
-              <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Silver Rows</th>
-              <th className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase py-3 border-b border-gray-800/50 text-right">Last Update Time (PST/PDT)</th>
+              <th>Instrument</th><th>Raw rows</th><th>Cleaned rows</th><th>Last update</th>
             </tr>
           </thead>
           <tbody>
             {instruments.map(instrument => {
-              const isActive = instrument.lastUpdate !== null;
-
               return (
-                <tr key={instrument.id} className="hover:bg-white/5 transition-colors group">
-                  <td className="py-5 border-b border-gray-800/30">
-                    <div className="flex items-center">
-                      <span className={`w-2 h-2 rounded-full mr-4 ${isActive ? 'bg-cyan-400 shadow-[0_0_8px_#22d3ee]' : 'bg-gray-700'}`}></span>
+                <tr key={instrument.id}>
+                  <td>
+                    <div className="instrument-name">
                       <div>
-                        <div className="font-bold text-gray-200 text-sm tracking-wide group-hover:text-cyan-300 transition-colors">{instrument.name}</div>
-                        <div className="font-mono text-gray-500 text-[0.65rem]">{instrument.id}</div>
+                        <strong>{instrument.name}</strong><small>{instrument.id}</small>
                       </div>
                     </div>
                   </td>
-                  <td className="py-5 border-b border-gray-800/30 text-right">
-                    <div className="text-white font-bold">{(instrument.bronzeRows || 0).toLocaleString()}</div>
-                    <div className="text-gray-500 text-[0.6rem] tracking-wider uppercase">{formatBytes(instrument.bronzeSize)}</div>
+                  <td><strong>{(instrument.bronzeRows || 0).toLocaleString()}</strong><small>{formatBytes(instrument.bronzeSize)}</small>
                   </td>
-                  <td className="py-5 border-b border-gray-800/30 text-right">
-                    <div className="text-cyan-300 font-bold">{instrument.silverRows != null ? instrument.silverRows.toLocaleString() : '-'}</div>
+                  <td><strong>{instrument.silverRows != null ? instrument.silverRows.toLocaleString() : '—'}</strong>
                     {instrument.silverRows != null && instrument.bronzeRows > instrument.silverRows && (
-                      <div
-                        className="text-amber-400/70 text-[0.6rem] tracking-wider uppercase"
-                        title="Bronze rows not carried into Silver: duplicates, schema mismatches, and non-approved source files"
+                      <small className="filtered-note"
+                        title="Raw rows not carried forward: duplicates, schema mismatches, and non-approved source files"
                       >
-                        -{(instrument.bronzeRows - instrument.silverRows).toLocaleString()} filtered
-                      </div>
+                        {(instrument.bronzeRows - instrument.silverRows).toLocaleString()} filtered
+                      </small>
                     )}
                   </td>
-                  <td className="py-5 border-b border-gray-800/30 text-right">
-                    <div className="font-mono text-sm text-gray-300">{formatSeattleTime(instrument.lastUpdate)}</div>
-                  </td>
+                  <td>{formatSeattleTime(instrument.lastUpdate)}</td>
                 </tr>
               );
             })}
           </tbody>
-        </table>
-      </div>
-    </>
+        </table></div>
+      </section>
+    </main>
   );
 }
 
 function DataReview() {
-  const reviewApiKey = getReviewApiKey();
   const [instrument, setInstrument] = useState('NO2-CAPS');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
-  const [reason, setReason] = useState('');
   const [columns, setColumns] = useState([]);
   const [rows, setRows] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
-  const [selectedKeys, setSelectedKeys] = useState(new Set());
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [editingRow, setEditingRow] = useState(null);
-  const [correctionValues, setCorrectionValues] = useState({});
-  const [flagMode, setFlagMode] = useState(null);        // 'selected' | 'range' | null
-  const [flagReason, setFlagReason] = useState('');
-  const [rangeStart, setRangeStart] = useState('');
-  const [rangeEnd, setRangeEnd] = useState('');
-  const [rangeCount, setRangeCount] = useState(null);
-  const [countLoading, setCountLoading] = useState(false);
 
-  const selectedRows = rows.filter(row => selectedKeys.has(row.row_key));
   const displayColumns = columns.slice(0, 8);
 
   const loadRecordsFor = useCallback(async ({
@@ -293,7 +323,7 @@ function DataReview() {
       if (selectedStart) params.set('start', toIso(selectedStart));
       if (selectedEnd) params.set('end', toIso(selectedEnd));
 
-      const response = await fetch(`${API_BASE_URL}/silver-records?${params.toString()}`);
+      const response = await fetchApi(`${API_PATHS.observations}?${params.toString()}`);
       const result = await response.json();
       if (!response.ok) {
         throw new Error(result.error || `API returned ${response.status}`);
@@ -301,12 +331,9 @@ function DataReview() {
       setColumns(result.columns || []);
       setRows(result.rows || []);
       setNextCursor(result.next_cursor ?? null);
-      setSelectedKeys(new Set());
-      setEditingRow(null);
-      setCorrectionValues({});
-      setMessage(`${auto ? 'Showing latest' : 'Loaded'} ${(result.rows || []).length} silver records.`);
+      setMessage(`${auto ? 'Showing latest' : 'Loaded'} ${(result.rows || []).length} cleaned records.`);
     } catch (err) {
-      setError(err.message || 'Could not load silver records');
+      setError(err.message || 'Could not load cleaned records');
     } finally {
       setLoading(false);
     }
@@ -329,170 +356,19 @@ function DataReview() {
     return () => clearTimeout(task);
   }, [instrument, loadRecordsFor]);
 
-  const toggleSelected = (rowKey) => {
-    const next = new Set(selectedKeys);
-    if (next.has(rowKey)) {
-      next.delete(rowKey);
-    } else {
-      next.add(rowKey);
-    }
-    setSelectedKeys(next);
-  };
-
-  const postReview = async (path, payload) => {
-    setError('');
-    setMessage('');
-    if (!reviewApiKey) {
-      throw new Error('Open the dashboard with ?api_key=... to save flags or corrections.');
-    }
-    const params = new URLSearchParams({ api_key: reviewApiKey });
-    const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-    const result = await response.json();
-    if (!response.ok) {
-      throw new Error(result.message || result.error || `API returned ${response.status}`);
-    }
-    return result;
-  };
-
-  const fmtLocal = (value) => (value ? value.replace('T', ' ') : '');
-
-  const openFlag = (mode) => {
-    setError('');
-    setMessage('');
-    if (mode === 'selected' && !selectedRows.length) {
-      setError('Select at least one row first.');
-      return;
-    }
-    if (mode === 'range') {
-      setRangeStart(startTime);
-      setRangeEnd(endTime);
-    }
-    setRangeCount(null);
-    setFlagReason('');
-    setFlagMode(mode);
-  };
-
-  // Preview how many records a time window covers so the range flag is never a
-  // blind commit. Re-runs whenever the window or instrument changes.
-  useEffect(() => {
-    if (flagMode !== 'range' || !rangeStart || !rangeEnd) {
-      return;
-    }
-    let cancelled = false;
-    const task = setTimeout(() => {
-      if (cancelled) return;
-      setCountLoading(true);
-      const params = new URLSearchParams({
-        instrument,
-        start: toIso(rangeStart),
-        end: toIso(rangeEnd),
-        count_only: 'true',
-      });
-      fetch(`${API_BASE_URL}/silver-records?${params.toString()}`)
-        .then(res => res.json())
-        .then(data => { if (!cancelled) setRangeCount(typeof data.count === 'number' ? data.count : null); })
-        .catch(() => { if (!cancelled) setRangeCount(null); })
-        .finally(() => { if (!cancelled) setCountLoading(false); });
-    }, 0);
-    return () => {
-      cancelled = true;
-      clearTimeout(task);
-    };
-  }, [flagMode, rangeStart, rangeEnd, instrument]);
-
-  const confirmFlag = async () => {
-    try {
-      if (flagMode === 'range') {
-        if (!rangeStart || !rangeEnd) {
-          setError('Pick a start and end time.');
-          return;
-        }
-        await postReview('/record-flags', {
-          instrument_id: instrument,
-          scope: 'time_range',
-          start_time: toIso(rangeStart),
-          end_time: toIso(rangeEnd),
-          reason: flagReason,
-        });
-        setMessage(`Flagged ${rangeCount != null ? rangeCount.toLocaleString() : 'all'} records from ${fmtLocal(rangeStart)} to ${fmtLocal(rangeEnd)}.`);
-      } else {
-        await postReview('/record-flags', {
-          instrument_id: instrument,
-          scope: 'selected_rows',
-          row_keys: selectedRows.map(row => row.row_key),
-          reason: flagReason,
-        });
-        setMessage(`Flagged ${selectedRows.length} selected record${selectedRows.length === 1 ? '' : 's'}.`);
-        setSelectedKeys(new Set());
-      }
-      setFlagMode(null);
-      await loadRecords();
-    } catch (err) {
-      setError(err.message || 'Could not save flag');
-    }
-  };
-
-  const startCorrection = () => {
-    if (selectedRows.length !== 1) {
-      setError('Select exactly one row to correct.');
-      return;
-    }
-    const row = selectedRows[0];
-    setEditingRow(row);
-    setCorrectionValues({ ...row.values });
-    setError('');
-  };
-
-  const saveCorrection = async () => {
-    if (!editingRow) return;
-    const changedValues = Object.fromEntries(
-      Object.entries(correctionValues).filter(([key, value]) => editingRow.values[key] !== value)
-    );
-    if (!Object.keys(changedValues).length) {
-      setError('Change at least one value before saving correction.');
-      return;
-    }
-    try {
-      await postReview('/record-corrections', {
-        instrument_id: instrument,
-        row_key: editingRow.row_key,
-        timestamp: editingRow.timestamp,
-        original_values: editingRow.values,
-        corrected_values: changedValues,
-        reason,
-      });
-      setMessage('Saved correction for selected record.');
-      setEditingRow(null);
-      setCorrectionValues({});
-      await loadRecords();
-    } catch (err) {
-      setError(err.message || 'Could not save correction');
-    }
-  };
-
-  const allSelected = rows.length > 0 && rows.every(row => selectedKeys.has(row.row_key));
-  const toggleAll = () => setSelectedKeys(allSelected ? new Set() : new Set(rows.map(row => row.row_key)));
-  const flagValid = flagMode === 'range'
-    ? Boolean(rangeStart && rangeEnd && flagReason.trim())
-    : Boolean(selectedRows.length && flagReason.trim());
-  const REASON_PRESETS = ['Instrument fault', 'Low flow', 'Calibration', 'Power loss', 'Maintenance', 'Out of range'];
-
   return (
-    <div className="grid gap-5">
-      {reviewApiKey ? (
-        <div className="auth-banner auth-on"><ShieldCheck size={15} /> Review mode active. Flags and corrections you make here are saved.</div>
-      ) : (
-        <div className="auth-banner auth-off"><Lock size={15} /> Read-only view. Add <code>?api_key=YOUR_KEY</code> to the dashboard URL to flag or correct records.</div>
-      )}
+    <main className="dashboard-page review-page">
+      <section className="location-heading compact-heading">
+        <div>
+          <div className="location-label"><Database size={15} /> Quality-checked data</div>
+          <h1>Observation explorer</h1>
+          <p>Browse recent cleaned records or focus on a specific time window.</p>
+        </div>
+        <div className="auth-banner auth-off"><Lock size={15} /> Public read-only view</div>
+      </section>
 
-      <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-5 shadow-2xl">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <section className="surface-card filter-card">
+        <div className="filter-grid">
           <Control label="Instrument">
             <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
@@ -504,8 +380,8 @@ function DataReview() {
           <Control label="End Time (filter)">
             <input type="datetime-local" value={endTime} onChange={event => setEndTime(event.target.value)} className="control-input" />
           </Control>
-          <div className="flex items-end">
-            <button onClick={() => loadRecords()} disabled={loading} className="action-button w-full">
+          <div className="control-action">
+            <button onClick={() => loadRecords()} disabled={loading} className="action-button">
               <Search size={14} />
               {loading ? 'Loading' : 'Load Records'}
             </button>
@@ -513,59 +389,31 @@ function DataReview() {
         </div>
 
         {(message || error) && (
-          <div className={`mt-4 flex items-start gap-2 text-xs font-semibold tracking-wide ${error ? 'text-red-400' : 'text-green-400'}`}>
-            {error ? <AlertTriangle size={14} className="mt-px shrink-0" /> : <Check size={14} className="mt-px shrink-0" />}
+          <div className={`filter-message ${error ? 'filter-message-error' : 'filter-message-success'}`}>
+            {error ? <AlertTriangle size={14} /> : <Check size={14} />}
             <span>{error || message}</span>
           </div>
         )}
-      </div>
+      </section>
 
-      <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-5 shadow-2xl">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800/50 pb-3 mb-4">
+      <section className="surface-card observation-card">
+        <div className="section-heading">
           <div>
-            <h2 className="text-[0.70rem] font-extrabold text-gray-400 tracking-widest uppercase">Silver Record Review</h2>
-            <div className="text-[0.65rem] text-gray-500 mt-1">
-              {rows.length} loaded{selectedRows.length ? ` · ${selectedRows.length} selected` : ''}
-            </div>
+            <span className="section-eyebrow">Cleaned records</span>
+            <h2>{instrument} observations</h2>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => openFlag('selected')}
-              disabled={!reviewApiKey || !selectedRows.length}
-              title={!reviewApiKey ? 'Add ?api_key= to enable' : !selectedRows.length ? 'Select rows first' : 'Flag the selected rows'}
-              className="action-button"
-            >
-              <CheckSquare size={14} /> Flag Selected
-            </button>
-            <button
-              onClick={() => openFlag('range')}
-              disabled={!reviewApiKey}
-              title={!reviewApiKey ? 'Add ?api_key= to enable' : 'Flag every record in a time window'}
-              className="action-button"
-            >
-              <AlertTriangle size={14} /> Flag Range
-            </button>
-            <button
-              onClick={startCorrection}
-              disabled={!reviewApiKey || selectedRows.length !== 1}
-              title={!reviewApiKey ? 'Add ?api_key= to enable' : selectedRows.length !== 1 ? 'Select exactly one row' : 'Correct this record'}
-              className="action-button"
-            >
-              <Edit3 size={14} /> Correct One
-            </button>
+          <div className="section-actions">
+            <span className="section-meta">{rows.length} loaded</span>
             {nextCursor !== null && (
               <button onClick={() => loadRecords(nextCursor)} className="action-button"><RefreshCw size={14} /> Next Page</button>
             )}
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse min-w-[980px]">
+        <div className="table-scroll">
+          <table className="data-table review-table">
             <thead>
               <tr>
-                <th className="review-th w-10">
-                  <input type="checkbox" checked={allSelected} onChange={toggleAll} disabled={!rows.length} aria-label="Select all rows" />
-                </th>
                 <th className="review-th">Status</th>
                 <th className="review-th">Timestamp</th>
                 {displayColumns.map(column => <th key={column} className="review-th">{column}</th>)}
@@ -573,14 +421,10 @@ function DataReview() {
             </thead>
             <tbody>
               {rows.map(row => {
-                const isSelected = selectedKeys.has(row.row_key);
                 const flagReasonText = (row.flags || []).map(flag => flag.reason).filter(Boolean).join('; ');
                 return (
-                  <tr key={row.row_key} className={`transition-colors ${isSelected ? 'bg-cyan-400/5' : 'hover:bg-white/5'}`}>
-                    <td className="review-td">
-                      <input type="checkbox" checked={isSelected} onChange={() => toggleSelected(row.row_key)} />
-                    </td>
-                    <td className="review-td">
+                  <tr key={row.row_key}>
+                    <td>
                       <span
                         title={flagReasonText || undefined}
                         className={`status-pill ${row.status === 'normal' ? 'status-normal' : row.status === 'flagged' ? 'status-flagged' : 'status-corrected'}`}
@@ -588,149 +432,23 @@ function DataReview() {
                         {row.status}
                       </span>
                     </td>
-                    <td className="review-td font-mono">{row.timestamp || 'NO TIME'}</td>
+                    <td className="mono-cell">{row.timestamp || 'No timestamp'}</td>
                     {displayColumns.map(column => (
-                      <td key={column} className="review-td font-mono">{row.values[column]}</td>
+                      <td key={column} className="mono-cell">{row.values[column]}</td>
                     ))}
                   </tr>
                 );
               })}
               {!rows.length && (
                 <tr>
-                  <td className="review-td text-center text-gray-500 py-8" colSpan={displayColumns.length + 3}>No records loaded.</td>
+                  <td className="empty-cell" colSpan={displayColumns.length + 2}>No observations match this selection.</td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-      </div>
-
-      {editingRow && (
-        <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-5 shadow-2xl">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-800/50 pb-3 mb-4">
-            <div>
-              <h2 className="text-[0.70rem] font-extrabold text-gray-400 tracking-widest uppercase">Correct Record</h2>
-              <div className="font-mono text-[0.65rem] text-gray-500 mt-1">{editingRow.timestamp} &middot; {editingRow.row_key}</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setEditingRow(null)} className="copy-btn">Cancel</button>
-              <button onClick={saveCorrection} className="action-button"><Save size={14} /> Save Correction</button>
-            </div>
-          </div>
-          <div className="mb-4 max-w-sm">
-            <Control label="Reason">
-              <input value={reason} onChange={event => setReason(event.target.value)} placeholder="Why is this being corrected?" className="control-input" />
-            </Control>
-          </div>
-          <div className="text-[0.6rem] text-gray-500 uppercase tracking-widest mb-3">Edit only the fields that need fixing (changed fields are outlined)</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 max-h-[460px] overflow-y-auto pr-2">
-            {Object.entries(correctionValues).map(([key, value]) => {
-              const changed = editingRow.values[key] !== value;
-              return (
-                <Control key={key} label={key}>
-                  <input
-                    value={value ?? ''}
-                    onChange={event => setCorrectionValues({ ...correctionValues, [key]: event.target.value })}
-                    className="control-input"
-                    style={changed ? { borderColor: '#22d3ee', boxShadow: '0 0 0 1px rgba(34,211,238,0.35)' } : undefined}
-                  />
-                </Control>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {flagMode && (
-        <Modal
-          title={flagMode === 'range' ? 'Flag a time range' : 'Flag selected records'}
-          subtitle={instrument}
-          onClose={() => setFlagMode(null)}
-          footer={(
-            <>
-              <button onClick={() => setFlagMode(null)} className="copy-btn">Cancel</button>
-              <button onClick={confirmFlag} disabled={!flagValid} className="action-button">
-                <AlertTriangle size={14} /> {flagMode === 'range' ? 'Flag this range' : `Flag ${selectedRows.length} record${selectedRows.length === 1 ? '' : 's'}`}
-              </button>
-            </>
-          )}
-        >
-          {flagMode === 'range' ? (
-            <div className="grid gap-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <Control label="Start Time">
-                  <input type="datetime-local" value={rangeStart} onChange={event => setRangeStart(event.target.value)} className="control-input" />
-                </Control>
-                <Control label="End Time">
-                  <input type="datetime-local" value={rangeEnd} onChange={event => setRangeEnd(event.target.value)} className="control-input" />
-                </Control>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-gray-500 uppercase tracking-widest text-[0.6rem]">Impact</span>
-                {!rangeStart || !rangeEnd ? (
-                  <span className="text-gray-500">Pick a start and end time</span>
-                ) : countLoading ? (
-                  <span className="text-gray-400">Counting&hellip;</span>
-                ) : rangeCount != null ? (
-                  <span className="text-amber-300 font-bold">{rangeCount.toLocaleString()} records will be flagged</span>
-                ) : (
-                  <span className="text-gray-500">Count unavailable</span>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="text-sm text-gray-300">
-              <span className="text-amber-300 font-bold">{selectedRows.length}</span> selected record{selectedRows.length === 1 ? '' : 's'} will be flagged.
-            </div>
-          )}
-
-          <div className="mt-5">
-            <div className="text-[0.6rem] text-gray-500 uppercase tracking-widest mb-2">Reason (required)</div>
-            <div className="flex flex-wrap gap-2 mb-3">
-              {REASON_PRESETS.map(preset => (
-                <button
-                  key={preset}
-                  onClick={() => setFlagReason(preset)}
-                  className={`reason-chip ${flagReason === preset ? 'reason-chip-active' : ''}`}
-                >
-                  {preset}
-                </button>
-              ))}
-            </div>
-            <input
-              value={flagReason}
-              onChange={event => setFlagReason(event.target.value)}
-              placeholder="Describe why these records are being flagged"
-              className="control-input"
-            />
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
-function Modal({ title, subtitle, onClose, children, footer }) {
-  useEffect(() => {
-    const onKey = (event) => { if (event.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-card" onClick={event => event.stopPropagation()}>
-        <div className="flex items-start justify-between border-b border-gray-800/60 pb-3 mb-4">
-          <div>
-            <h3 className="text-[0.72rem] font-extrabold text-gray-200 tracking-widest uppercase">{title}</h3>
-            {subtitle && <div className="text-[0.65rem] text-gray-500 mt-1 font-mono">{subtitle}</div>}
-          </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-200 transition-colors"><X size={18} /></button>
-        </div>
-        {children}
-        {footer && <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-gray-800/60">{footer}</div>}
-      </div>
-    </div>
+      </section>
+    </main>
   );
 }
 
@@ -751,15 +469,86 @@ function Segmented({ options, value, onChange }) {
 }
 
 const SNIPPET_TASKS = [
-  { value: 'raw', label: 'Raw CSV' },
+  { value: 'raw', label: 'CSV Export' },
   { value: 'series', label: 'Time Series' },
   { value: 'records', label: 'Records (JSON)' },
 ];
 
 const SNIPPET_LANGS = [
-  { value: 'r', label: 'R' },
   { value: 'python', label: 'Python' },
+  { value: 'r', label: 'R' },
   { value: 'curl', label: 'curl' },
+];
+
+const PUBLIC_ENDPOINTS = [
+  {
+    id: 'metrics',
+    method: 'GET',
+    path: API_PATHS.summary,
+    title: 'Dashboard Summary',
+    summary: 'Returns the public dashboard summary with upload freshness, instrument inventory, raw upload counts, cleaned row counts, and site status.',
+    access: 'Read',
+    apiCall: documentedApiUrl(API_PATHS.summary),
+    params: [
+      { name: 'None', required: '-', description: 'This endpoint does not require query parameters.' },
+    ],
+    responseFields: ['refreshTime', 'systemStatus', 'kpis', 'instruments'],
+  },
+  {
+    id: 'series',
+    method: 'GET',
+    path: API_PATHS.timeseries,
+    title: 'Hourly Time Series',
+    summary: 'Returns hourly mean values for one measurement from the cleaned records.',
+    access: 'Read',
+    apiCall: `${documentedApiUrl(API_PATHS.timeseries)}?instrument=SMPS&measurement=Total%20Concentration%20(%23/cm%C2%B3)`,
+    params: [
+      { name: 'instrument', required: 'Yes', description: 'Instrument ID such as SMPS, NO2-CAPS, CO2-LICOR, NEPH-PM25, or BC-MA200.' },
+      { name: 'measurement', required: 'No', description: 'Measurement column name. If omitted, the API chooses a default for the instrument.' },
+      { name: 'start', required: 'No', description: 'ISO timestamp. Records before this time are excluded.' },
+      { name: 'end', required: 'No', description: 'ISO timestamp. Records after this time are excluded.' },
+    ],
+    responseFields: ['instrument_id', 'measurement', 'measurements', 'series', 'plotted_rows'],
+  },
+  {
+    id: 'observations',
+    method: 'GET',
+    path: API_PATHS.observations,
+    title: 'Observations',
+    summary: 'Returns paginated row-level cleaned records with timestamp and measurement values.',
+    access: 'Read',
+    apiCall: `${documentedApiUrl(API_PATHS.observations)}?instrument=SMPS&limit=100&order=desc`,
+    params: [
+      { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
+      { name: 'start', required: 'No', description: 'ISO timestamp filter.' },
+      { name: 'end', required: 'No', description: 'ISO timestamp filter.' },
+      { name: 'limit', required: 'No', description: 'Number of records per page. The API caps the value.' },
+      { name: 'cursor', required: 'No', description: 'Pagination cursor returned by the previous response.' },
+      { name: 'order', required: 'No', description: 'Use asc or desc.' },
+    ],
+    responseFields: ['columns', 'rows', 'next_cursor'],
+  },
+  {
+    id: 'observations-export',
+    method: 'GET',
+    path: API_PATHS.observationsExport,
+    title: 'Observation Export',
+    summary: 'Returns metadata and a short-lived download URL for the full cleaned observation CSV.',
+    access: 'Read',
+    apiCall: `${documentedApiUrl(API_PATHS.observationsExport)}?instrument=SMPS`,
+    params: [
+      { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
+    ],
+    responseFields: ['instrument_id', 'filename', 'bytes', 'url'],
+  },
+];
+
+const DOC_NAV = [
+  { id: 'getting-started', label: 'Overview' },
+  { id: 'access', label: 'Authentication' },
+  { id: 'endpoints', label: 'Endpoint reference' },
+  { id: 'examples', label: 'Code examples' },
+  { id: 'limits', label: 'Usage limits' },
 ];
 
 function buildSnippet({ task, lang, instrument, measurement }) {
@@ -769,96 +558,226 @@ function buildSnippet({ task, lang, instrument, measurement }) {
   if (task === 'raw') {
     if (lang === 'r') {
       return `library(jsonlite)
+library(httr)
 
-# 1. Ask the API for a short-lived download link (valid ~5 min)
-meta <- fromJSON("${base}/silver-download?instrument=${instrument}")
+api_key <- Sys.getenv("AQ_API_KEY")
+headers <- c("x-api-key" = api_key)
 
-# 2. Download the full raw silver CSV and read it
-download.file(meta$url, "${instrument}_silver.csv", mode = "wb")
-df <- read.csv("${instrument}_silver.csv", check.names = FALSE)
+# 1. Ask the API for a short-lived export link (valid ~5 min)
+response <- GET("${base}${API_PATHS.observationsExport}?instrument=${instrument}",
+                add_headers(.headers = headers))
+stop_for_status(response)
+meta <- fromJSON(content(response, "text", encoding = "UTF-8"))
+
+# 2. Download the full cleaned observation CSV and read it
+download.file(meta$url, "${instrument}_observations.csv", mode = "wb")
+df <- read.csv("${instrument}_observations.csv", check.names = FALSE)
 
 nrow(df)`;
     }
     if (lang === 'python') {
-      return `import requests
+      return `import os
+import requests
 import pandas as pd
 
-# The API returns a short-lived S3 link; pandas reads it directly
+# The API returns a short-lived download link; pandas reads it directly
+headers = {"x-api-key": os.environ["AQ_API_KEY"]}
 url = requests.get(
-    "${base}/silver-download",
+    "${base}${API_PATHS.observationsExport}",
     params={"instrument": "${instrument}"},
+    headers=headers,
 ).json()["url"]
 
 df = pd.read_csv(url)
 print(df.shape)`;
     }
-    return `# 1. Get a short-lived download link
-curl "${base}/silver-download?instrument=${instrument}"
+    return `# 1. Get a short-lived export link
+curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.observationsExport}?instrument=${instrument}"
 
 # 2. Download using the "url" field from the JSON response
-curl -o ${instrument}_silver.csv "PASTE_URL_HERE"`;
+curl -o ${instrument}_observations.csv "PASTE_URL_HERE"`;
   }
 
   if (task === 'series') {
     if (lang === 'r') {
       return `library(jsonlite)
+library(httr)
+
+api_key <- Sys.getenv("AQ_API_KEY")
+headers <- c("x-api-key" = api_key)
 
 # Hourly mean of one measurement. res$measurements lists the choices.
-res <- fromJSON("${base}/series?instrument=${instrument}&measurement=${encodedMeasurement}")
+response <- GET("${base}${API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}",
+                add_headers(.headers = headers))
+stop_for_status(response)
+res <- fromJSON(content(response, "text", encoding = "UTF-8"))
 
 ts <- res$series          # data.frame: t (hour, UTC), v (hourly mean)
 head(ts)`;
     }
     if (lang === 'python') {
-      return `import requests
+      return `import os
+import requests
 import pandas as pd
 
-res = requests.get("${base}/series", params={
+headers = {"x-api-key": os.environ["AQ_API_KEY"]}
+res = requests.get("${base}${API_PATHS.timeseries}", params={
     "instrument": "${instrument}",
     "measurement": "${measurement}",
-}).json()
+}, headers=headers).json()
 
 ts = pd.DataFrame(res["series"])   # columns: t (hour, UTC), v (hourly mean)
 print(res["measurements"])          # available measurements
 ts.head()`;
     }
-    return `curl "${base}/series?instrument=${instrument}&measurement=${encodedMeasurement}"`;
+    return `curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}"`;
   }
 
   if (lang === 'r') {
     return `library(jsonlite)
+library(httr)
 
-# Paginated raw records with flag/correction status (100 per page)
-res <- fromJSON("${base}/silver-records?instrument=${instrument}&limit=100")
+api_key <- Sys.getenv("AQ_API_KEY")
+headers <- c("x-api-key" = api_key)
 
-records <- res$rows        # each row: timestamp, values, status, flags
+# Paginated cleaned observations (100 per page)
+response <- GET("${base}${API_PATHS.observations}?instrument=${instrument}&limit=100",
+                add_headers(.headers = headers))
+stop_for_status(response)
+res <- fromJSON(content(response, "text", encoding = "UTF-8"))
+
+records <- res$rows        # each row: timestamp and measurement values
 res$next_cursor            # pass as &cursor= to fetch the next page`;
   }
   if (lang === 'python') {
-    return `import requests
+    return `import os
+import requests
 
-res = requests.get("${base}/silver-records", params={
+headers = {"x-api-key": os.environ["AQ_API_KEY"]}
+res = requests.get("${base}${API_PATHS.observations}", params={
     "instrument": "${instrument}",
     "limit": 100,
-}).json()
+}, headers=headers).json()
 
-rows = res["rows"]                 # timestamp, values, status, flags
+rows = res["rows"]                 # timestamp and measurement values
 next_cursor = res["next_cursor"]   # pass as cursor= for the next page`;
   }
-  return `curl "${base}/silver-records?instrument=${instrument}&limit=100"`;
+  return `curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.observations}?instrument=${instrument}&limit=100"`;
 }
 
-function ApiSnippets() {
+function ApiAccessDialog({ onClose }) {
+  const [form, setForm] = useState({ name: '', email: '', organization: '', useCase: '' });
+  const [state, setState] = useState('idle');
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const updateField = (field) => (event) => {
+    setForm(current => ({ ...current, [field]: event.target.value }));
+  };
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setState('submitting');
+    setMessage('');
+    try {
+      const response = await fetchApi(API_PATHS.accessRequests, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.name,
+          email: form.email,
+          organization: form.organization,
+          use_case: form.useCase,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || 'The access request service is not available at the moment.');
+      }
+      setState('success');
+      setMessage(payload.message || 'Check your email to verify this access request.');
+      setForm({ name: '', email: '', organization: '', useCase: '' });
+    } catch (error) {
+      setState('error');
+      setMessage(error.message || 'The access request service is not available at the moment.');
+    }
+  };
+
+  return (
+    <div className="api-dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="api-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="api-access-dialog-title"
+        onMouseDown={event => event.stopPropagation()}
+      >
+        <div className="api-dialog-header">
+          <div>
+            <p className="api-dialog-eyebrow">Read-only access</p>
+            <h2 id="api-access-dialog-title">Request an API key</h2>
+          </div>
+          <button className="api-icon-button" type="button" onClick={onClose} aria-label="Close request form" title="Close">
+            <X size={19} />
+          </button>
+        </div>
+        <p className="api-dialog-copy">
+          Requests are verified and reviewed before a personal read-only key is issued. API users cannot modify monitoring records.
+        </p>
+        <form className="api-dialog-form" onSubmit={submit}>
+          <div className="api-dialog-fields">
+            <label>
+              <span>Name</span>
+              <input value={form.name} onChange={updateField('name')} autoComplete="name" required />
+            </label>
+            <label>
+              <span>Work email</span>
+              <input value={form.email} onChange={updateField('email')} type="email" autoComplete="email" required />
+            </label>
+            <label className="api-field-wide">
+              <span>Organization</span>
+              <input value={form.organization} onChange={updateField('organization')} autoComplete="organization" />
+            </label>
+            <label className="api-field-wide">
+              <span>Intended use</span>
+              <textarea value={form.useCase} onChange={updateField('useCase')} required rows="4" />
+            </label>
+          </div>
+          <div className="api-dialog-actions">
+            <button className="api-primary-button" type="submit" disabled={state === 'submitting'}>
+              <Send size={16} /> {state === 'submitting' ? 'Sending request' : 'Submit request'}
+            </button>
+            {message && (
+              <p className={`api-dialog-message api-dialog-message-${state}`} role="status">{message}</p>
+            )}
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
   const [task, setTask] = useState('raw');
-  const [lang, setLang] = useState('r');
+  const [lang, setLang] = useState('python');
   const [instrument, setInstrument] = useState('SMPS');
   const [measurement, setMeasurement] = useState('Total Concentration (#/cm³)');
   const [measurements, setMeasurements] = useState([]);
   const [copied, setCopied] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+  const [accessOpen, setAccessOpen] = useState(false);
+  const [activeEndpointId, setActiveEndpointId] = useState('series');
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE_URL}/series?instrument=${encodeURIComponent(instrument)}`)
+    fetchApi(`${API_PATHS.timeseries}?instrument=${encodeURIComponent(instrument)}`)
       .then(res => res.json())
       .then(data => {
         if (cancelled) return;
@@ -870,6 +789,8 @@ function ApiSnippets() {
   }, [instrument]);
 
   const code = buildSnippet({ task, lang, instrument, measurement });
+  const closeNav = () => setNavOpen(false);
+  const activeEndpoint = PUBLIC_ENDPOINTS.find(endpoint => endpoint.id === activeEndpointId) || PUBLIC_ENDPOINTS[0];
 
   const copy = async () => {
     try {
@@ -882,53 +803,175 @@ function ApiSnippets() {
   };
 
   return (
-    <div className="grid gap-5">
-      <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-6 shadow-2xl">
-        <div className="flex items-start gap-3 border-b border-gray-800/50 pb-4 mb-5">
-          <Code2 size={20} className="text-cyan-400 mt-0.5 shrink-0" />
-          <div>
-            <h2 className="text-sm font-black tracking-wide text-white">GET THE DATA IN CODE</h2>
-            <p className="text-xs text-gray-500 mt-1 max-w-2xl">Pick a task and your language, then copy the snippet straight into your IDE. It is filled in with the live API URL and your current selection.</p>
+    <div className="api-portal">
+      <header className="api-portal-header">
+        <div className="api-portal-header-inner">
+          <div className="api-portal-brand-group">
+            <button
+              className="api-icon-button"
+              type="button"
+              onClick={() => setNavOpen(current => !current)}
+              aria-controls="api-docs-nav"
+              aria-expanded={navOpen}
+              aria-label="Open documentation navigation"
+              title="Documentation navigation"
+            >
+              <Menu size={20} />
+            </button>
+            <div>
+              <div className="api-product-name">Des Moines Air Quality API</div>
+              <div className="api-product-version">Developer portal <span>v1</span></div>
+            </div>
+          </div>
+          <div className="api-portal-actions">
+            <button className="api-dashboard-button" type="button" onClick={onOpenDashboard}>Data dashboard</button>
+            <div className="api-theme-switch" aria-label="Color theme">
+              <button
+                type="button"
+                className={theme === 'light' ? 'api-theme-option api-theme-option-active' : 'api-theme-option'}
+                onClick={() => onThemeChange('light')}
+                aria-pressed={theme === 'light'}
+                title="Use light theme"
+              >
+                <Sun size={15} /> <span>Light</span>
+              </button>
+              <button
+                type="button"
+                className={theme === 'dark' ? 'api-theme-option api-theme-option-active' : 'api-theme-option'}
+                onClick={() => onThemeChange('dark')}
+                aria-pressed={theme === 'dark'}
+                title="Use dark theme"
+              >
+                <Moon size={15} /> <span>Dark</span>
+              </button>
+            </div>
           </div>
         </div>
+      </header>
 
-        <div className="flex flex-wrap items-end gap-x-6 gap-y-4 mb-5">
-          <div className="grid gap-1.5">
-            <span className="text-[0.6rem] font-extrabold text-gray-500 tracking-widest uppercase">Task</span>
-            <Segmented options={SNIPPET_TASKS} value={task} onChange={setTask} />
-          </div>
-          <div className="grid gap-1.5">
-            <span className="text-[0.6rem] font-extrabold text-gray-500 tracking-widest uppercase">Language</span>
-            <Segmented options={SNIPPET_LANGS} value={lang} onChange={setLang} />
-          </div>
-          <Control label="Instrument">
-            <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
-            </select>
-          </Control>
-          {task === 'series' && (
-            <Control label="Measurement">
-              <select value={measurement} onChange={event => setMeasurement(event.target.value)} className="control-input min-w-[220px]">
-                {(measurements.length ? measurements : [measurement]).map(name => <option key={name} value={name}>{name}</option>)}
-              </select>
-            </Control>
-          )}
-        </div>
+      {navOpen && <button className="api-nav-scrim" onClick={closeNav} aria-label="Close API navigation" />}
 
-        <div className="relative">
-          <div className="absolute top-3 right-3 z-10">
-            <button onClick={copy} className={`copy-btn ${copied ? 'copy-btn-done' : ''}`}>
-              {copied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+      <div className="api-portal-layout">
+        <aside id="api-docs-nav" className={`api-portal-sidebar ${navOpen ? 'api-portal-sidebar-open' : ''}`}>
+          <div className="api-sidebar-heading">
+            <span>Documentation</span>
+            <button className="api-icon-button api-sidebar-close" type="button" onClick={closeNav} aria-label="Close documentation navigation">
+              <X size={18} />
             </button>
           </div>
-          <pre className="code-block">{code}</pre>
-        </div>
+          <nav className="api-portal-nav" aria-label="API documentation sections">
+            {DOC_NAV.map(item => (
+              <a key={item.id} href={`#${item.id}`} onClick={closeNav}>{item.label}</a>
+            ))}
+          </nav>
+          <div className="api-sidebar-access">
+            <span>API access</span>
+            <strong>Personal read-only keys</strong>
+            <p>Keys are issued after verification and team approval.</p>
+            <button className="api-text-button" type="button" onClick={() => { closeNav(); setAccessOpen(true); }}>Request a key</button>
+          </div>
+        </aside>
 
-        <div className="text-[0.65rem] text-gray-500 mt-4 leading-relaxed">
-          <span className="text-gray-400 font-semibold">Base URL:</span> <span className="font-mono break-all">{API_BASE_URL}</span><br />
-          Times are UTC. The raw download link expires after about 5 minutes, so request a fresh one each run.
-        </div>
+        <main className="api-portal-content">
+          <div className="api-breadcrumb">Documentation <span>/</span> Air quality data</div>
+
+          <section id="getting-started" className="api-intro">
+            <p className="api-section-kicker">Air quality observations</p>
+            <h1>Air Quality Data API</h1>
+            <p className="api-intro-copy">Read cleaned observations, hourly time series, and export links from the Des Moines monitoring project.</p>
+            <div className="api-base-url-row">
+              <div>
+                <span>Base URL</span>
+                <code>{API_BASE_URL}</code>
+              </div>
+              <button className="api-copy-small" type="button" onClick={() => navigator.clipboard?.writeText(API_BASE_URL)} title="Copy base URL">
+                <Copy size={15} /> Copy
+              </button>
+            </div>
+          </section>
+
+          <section className="api-quickstart" aria-label="Quick start">
+            <div><span>01</span><h2>Request access</h2><p>Use a work email to request a personal read-only API key.</p></div>
+            <div><span>02</span><h2>Authenticate</h2><p>Send the key in the <code>x-api-key</code> request header.</p></div>
+            <div><span>03</span><h2>Query data</h2><p>Select an endpoint, then use the parameter reference below.</p></div>
+          </section>
+
+          <section id="access" className="api-portal-section">
+            <div className="api-section-heading">
+              <div><p className="api-section-kicker">Authentication</p><h2>Use a personal API key</h2></div>
+              <button className="api-primary-button" type="button" onClick={() => setAccessOpen(true)}><KeyRound size={16} /> Request API key</button>
+            </div>
+            <p>The API is read-only. Pass your key in a request header. Do not place it in a URL, shared notebook, screenshot, or repository.</p>
+            <pre className="api-header-example"><code>x-api-key: YOUR_API_KEY</code></pre>
+          </section>
+
+          <section id="endpoints" className="api-portal-section">
+            <div className="api-section-heading">
+              <div><p className="api-section-kicker">Reference</p><h2>Endpoints</h2></div>
+              <span className="api-read-only-label"><Lock size={14} /> Read-only</span>
+            </div>
+            <p>Each endpoint returns JSON, except export which returns a short-lived download link.</p>
+            <div className="api-reference">
+              <div className="api-endpoint-list" role="tablist" aria-label="API endpoints">
+                {PUBLIC_ENDPOINTS.map(endpoint => (
+                  <button
+                    key={endpoint.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={activeEndpoint.id === endpoint.id}
+                    className={activeEndpoint.id === endpoint.id ? 'api-endpoint-list-item api-endpoint-list-item-active' : 'api-endpoint-list-item'}
+                    onClick={() => setActiveEndpointId(endpoint.id)}
+                  >
+                    <span className="api-method">{endpoint.method}</span>
+                    <span><strong>{endpoint.title}</strong><code>{endpoint.path}</code></span>
+                  </button>
+                ))}
+              </div>
+              <article className="api-endpoint-detail" role="tabpanel">
+                <div className="api-endpoint-title-row"><span className="api-method">{activeEndpoint.method}</span><code>{activeEndpoint.path}</code></div>
+                <h3>{activeEndpoint.title}</h3>
+                <p>{activeEndpoint.summary}</p>
+                <div className="api-call-example"><span>Example request</span><code>{activeEndpoint.apiCall}</code></div>
+                <div className="api-table-wrap">
+                  <table className="api-table">
+                    <thead><tr><th>Parameter</th><th>Required</th><th>Description</th></tr></thead>
+                    <tbody>
+                      {activeEndpoint.params.map(param => (
+                        <tr key={`${activeEndpoint.id}-${param.name}`}><td><code>{param.name}</code></td><td>{param.required}</td><td>{param.description}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="api-response-fields"><span>Response fields</span><div>{activeEndpoint.responseFields.map(field => <code key={field}>{field}</code>)}</div></div>
+              </article>
+            </div>
+          </section>
+
+          <section id="examples" className="api-portal-section">
+            <div className="api-section-heading"><div><p className="api-section-kicker">Code examples</p><h2>Start with Python</h2></div></div>
+            <p>Choose the type of data you need. Set <code>AQ_API_KEY</code> in your environment before running the sample.</p>
+            <div className="api-example-controls">
+              <div className="api-control-group"><span>Resource</span><Segmented options={SNIPPET_TASKS} value={task} onChange={setTask} /></div>
+              <div className="api-control-group"><span>Language</span><Segmented options={SNIPPET_LANGS} value={lang} onChange={setLang} /></div>
+              <label className="api-select-field"><span>Instrument</span><select value={instrument} onChange={event => setInstrument(event.target.value)}>{INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}</select></label>
+              {task === 'series' && (
+                <label className="api-select-field api-measurement-field"><span>Measurement</span><select value={measurement} onChange={event => setMeasurement(event.target.value)}>{(measurements.length ? measurements : [measurement]).map(name => <option key={name} value={name}>{formatScienceLabel(name)}</option>)}</select></label>
+              )}
+            </div>
+            <div className="api-code-sample">
+              <button onClick={copy} className={`api-copy-code ${copied ? 'api-copy-code-done' : ''}`} type="button">{copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy code</>}</button>
+              <pre><code>{code}</code></pre>
+            </div>
+          </section>
+
+          <section id="limits" className="api-portal-section api-limits-section">
+            <div><p className="api-section-kicker">Usage</p><h2>Reasonable use</h2></div>
+            <p>Use pagination for row-level data, cache results in your analysis, and request a fresh export link for each download. Export links expire after a few minutes.</p>
+          </section>
+        </main>
       </div>
+
+      {accessOpen && <ApiAccessDialog onClose={() => setAccessOpen(false)} />}
     </div>
   );
 }
@@ -951,7 +994,7 @@ function TimeSeriesChart() {
       if (meas) params.set('measurement', meas);
       if (s) params.set('start', toIso(s));
       if (e) params.set('end', toIso(e));
-      const res = await fetch(`${API_BASE_URL}/series?${params.toString()}`);
+      const res = await fetchApi(`${API_PATHS.timeseries}?${params.toString()}`);
       const payload = await res.json();
       if (res.ok) {
         setMeasurements(payload.measurements || []);
@@ -990,17 +1033,17 @@ function TimeSeriesChart() {
     URL.revokeObjectURL(url);
   };
 
-  // The raw silver file can be tens of MB, so the API returns a short-lived S3
-  // link and the browser downloads every original record straight from S3.
+  // The full cleaned observation file can be tens of MB, so the API returns a
+  // short-lived S3 link instead of proxying the CSV through Lambda.
   const downloadRaw = async () => {
     setRawLoading(true);
     try {
-      const res = await fetch(`${API_BASE_URL}/silver-download?instrument=${encodeURIComponent(instrument)}`);
+      const res = await fetchApi(`${API_PATHS.observationsExport}?instrument=${encodeURIComponent(instrument)}`);
       const payload = await res.json();
       if (res.ok && payload.url) {
         const link = document.createElement('a');
         link.href = payload.url;
-        link.download = payload.filename || `${instrument}_silver.csv`;
+        link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
       }
     } catch {
@@ -1023,9 +1066,19 @@ function TimeSeriesChart() {
   };
 
   return (
-    <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 rounded-lg p-6 shadow-2xl mb-8">
-      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-gray-800/50 pb-4 mb-5">
-        <div className="flex flex-wrap gap-3">
+    <section className="surface-card chart-card">
+      <div className="section-heading chart-heading">
+        <div><span className="section-eyebrow">Hourly series</span><h2>Explore measurements over time</h2></div>
+        <div className="section-actions">
+          <button onClick={downloadCSV} disabled={!series.length} className="action-button action-secondary" title="Hourly-averaged values shown in the chart">
+            <Download size={14} /> Chart CSV
+          </button>
+          <button onClick={downloadRaw} disabled={rawLoading} className="action-button action-secondary" title="Full cleaned observation file for this instrument">
+            <Download size={14} /> {rawLoading ? 'Preparing…' : 'Raw CSV'}
+          </button>
+        </div>
+      </div>
+      <div className="chart-controls">
           <Control label="Instrument">
             <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
@@ -1035,9 +1088,9 @@ function TimeSeriesChart() {
             <select
               value={measurement}
               onChange={event => { setMeasurement(event.target.value); fetchSeries({ inst: instrument, meas: event.target.value, s: start, e: end }); }}
-              className="control-input min-w-[220px]"
+              className="control-input measurement-input"
             >
-              {measurements.map(name => <option key={name} value={name}>{name}</option>)}
+              {measurements.map(name => <option key={name} value={name}>{formatScienceLabel(name)}</option>)}
             </select>
           </Control>
           <Control label="Start">
@@ -1046,60 +1099,51 @@ function TimeSeriesChart() {
           <Control label="End">
             <input type="datetime-local" value={end} onChange={event => setEnd(event.target.value)} className="control-input" />
           </Control>
-          <div className="flex items-end">
+          <div className="control-action">
             <button onClick={() => fetchSeries({ inst: instrument, meas: measurement, s: start, e: end })} className="action-button">
               <Search size={14} /> Apply
             </button>
           </div>
-        </div>
-        <div className="flex items-end gap-2">
-          <button onClick={downloadCSV} disabled={!series.length} className="action-button" title="Hourly-averaged values shown in the chart">
-            <Download size={14} /> Chart CSV
-          </button>
-          <button onClick={downloadRaw} disabled={rawLoading} className="action-button" title="Every raw silver record for this instrument">
-            <Download size={14} /> {rawLoading ? 'Preparing…' : 'Raw CSV'}
-          </button>
-        </div>
       </div>
 
       {loading ? (
-        <div className="text-gray-600 text-xs py-24 text-center tracking-widest uppercase">Loading&hellip;</div>
+        <div className="chart-empty">Loading measurements…</div>
       ) : series.length ? (
-        <ResponsiveContainer width="100%" height={300}>
+        <div className="chart-plot"><ResponsiveContainer width="100%" height={320}>
           <LineChart data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
-            <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
-            <XAxis dataKey="t" tickFormatter={fmtTick} tick={{ fill: '#6b7280', fontSize: 10 }} tickLine={false} axisLine={{ stroke: 'rgba(255,255,255,0.10)' }} minTickGap={48} />
-            <YAxis tickFormatter={fmtNumber} tick={{ fill: '#6b7280', fontSize: 10 }} tickLine={false} axisLine={false} width={64} />
+            <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+            <XAxis dataKey="t" tickFormatter={fmtTick} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
+            <YAxis tickFormatter={fmtNumber} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={false} width={64} />
             <Tooltip
-              contentStyle={{ background: '#0a0a0a', border: '1px solid #374151', borderRadius: 8, fontSize: 12 }}
-              labelStyle={{ color: '#9ca3af' }}
-              itemStyle={{ color: '#22d3ee' }}
+              contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, fontSize: 12, boxShadow: '0 14px 30px rgba(15,35,55,.12)' }}
+              labelStyle={{ color: 'var(--text-muted)' }}
+              itemStyle={{ color: 'var(--brand)' }}
               labelFormatter={fmtLabel}
-              formatter={value => [fmtNumber(value), measurement]}
+              formatter={value => [fmtNumber(value), formatScienceLabel(measurement)]}
             />
-            <Line type="monotone" dataKey="v" stroke="#22d3ee" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#22d3ee' }} isAnimationActive={false} />
+            <Line type="monotone" dataKey="v" stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
           </LineChart>
-        </ResponsiveContainer>
+        </ResponsiveContainer></div>
       ) : (
-        <div className="text-gray-600 text-xs py-24 text-center tracking-widest uppercase">No data for this selection.</div>
+        <div className="chart-empty">No measurements are available for this selection.</div>
       )}
 
-      <div className="text-gray-600 text-[0.6rem] tracking-wider uppercase mt-3">
-        {measurement || 'no measurement'} &middot; hourly mean &middot; {series.length} points
+      <div className="chart-caption">
+        <span>{formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly mean</span><span>{series.length} points</span>
       </div>
       {seriesMeta.skippedSchemaMismatch > 0 && (
-        <div className="text-amber-300/80 text-[0.65rem] mt-2">
+        <div className="chart-warning">
           Ignored {seriesMeta.skippedSchemaMismatch.toLocaleString()} {instrument} rows with mismatched column count for this chart.
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
 function Control({ label, children }) {
   return (
-    <label className="grid gap-1">
-      <span className="text-[0.62rem] font-extrabold text-gray-500 tracking-widest uppercase">{label}</span>
+    <label className="control-field">
+      <span>{label}</span>
       {children}
     </label>
   );
@@ -1107,13 +1151,11 @@ function Control({ label, children }) {
 
 function KPICard({ title, value, unit, color, Icon }) {
   return (
-    <div className="bg-black/60 backdrop-blur-sm border border-gray-800/50 p-6 flex flex-col relative rounded-lg shadow-xl hover:border-gray-700 transition-colors">
-      <div className="absolute top-6 right-6 text-gray-700">
-        <Icon size={20} />
-      </div>
-      <div className="text-[0.65rem] font-extrabold text-gray-500 tracking-widest uppercase mb-3">{title}</div>
-      <div className={`text-3xl font-black tracking-tight leading-none ${color}`}>{value}</div>
-      <div className="text-[0.65rem] font-bold text-gray-600 tracking-wider uppercase mt-3">{unit}</div>
-    </div>
+    <article className={`kpi-card kpi-${color}`}>
+      <span className="kpi-icon"><Icon size={20} /></span>
+      <span className="kpi-title">{title}</span>
+      <strong>{value}</strong>
+      <small>{unit}</small>
+    </article>
   );
 }

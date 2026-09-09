@@ -12,8 +12,27 @@ CREDS_FILE = REPO_ROOT / "aws_creds.json"
 DEFAULT_REGION = "us-west-2"
 DEPLOY_REGION = os.environ.get("DEPLOY_AWS_REGION", DEFAULT_REGION)
 USE_CREDS_FILE = os.environ.get("USE_AWS_CREDS_FILE") == "1"
+ENABLE_COST_KPI = os.environ.get("ENABLE_COST_KPI") == "1"
+ENABLE_API_KEY_REGISTRATION = os.environ.get("ENABLE_API_KEY_REGISTRATION") == "1"
+PUBLIC_API_KEY_REQUIRED = os.environ.get("PUBLIC_API_KEY_REQUIRED") == "1"
+API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
+ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
 
 print("Starting AWS deployment script...")
+print(f"Internal cost KPI: {'enabled' if ENABLE_COST_KPI else 'disabled'}")
+print(f"API key registration: {'enabled' if ENABLE_API_KEY_REGISTRATION else 'disabled'}")
+print(f"Public API key enforcement: {'enabled' if PUBLIC_API_KEY_REQUIRED else 'disabled'}")
+
+if PUBLIC_API_KEY_REQUIRED and not API_KEY_HASH_PEPPER:
+    raise SystemExit(
+        "PUBLIC_API_KEY_REQUIRED=1 needs API_KEY_HASH_PEPPER. "
+        "Keep this secret in your shell or secret manager, never in the repository."
+    )
+if ENABLE_API_KEY_REGISTRATION and not ACCESS_REQUEST_FROM_EMAIL:
+    raise SystemExit(
+        "ENABLE_API_KEY_REGISTRATION=1 needs ACCESS_REQUEST_FROM_EMAIL "
+        "for the SES verification email sender."
+    )
 
 
 def build_session():
@@ -60,6 +79,7 @@ lambda_client = session.client("lambda")
 api_gateway_client = session.client("apigatewayv2")
 events_client = session.client("events")
 s3_client = session.client("s3")
+dynamodb_client = session.client("dynamodb")
 sts_client = session.client("sts")
 account_id = sts_client.get_caller_identity()["Account"]
 region = session.region_name
@@ -73,6 +93,9 @@ BUCKET_NAME = "des-moines-data-pipeline-austinlab"
 DQ_RULE_NAME = "dq-collector-hourly"
 DQ_SCHEDULE = "rate(1 hour)"
 LEGACY_DQ_RULE_NAMES = ["dq-collector-15-minutes"]
+ENABLE_REVIEW_API_ROUTES = os.environ.get("ENABLE_REVIEW_API_ROUTES") == "1"
+ACCESS_REQUESTS_TABLE_NAME = "AQApiAccessRequests"
+API_KEYS_TABLE_NAME = "AQApiKeys"
 
 
 def read_zip_bytes(zip_name, files):
@@ -131,6 +154,85 @@ def ensure_bucket():
 
 ensure_bucket()
 
+
+def ensure_table(name, attribute_definitions, key_schema, indexes=()):
+    """Create a pay-per-request DynamoDB table once and keep its TTL enabled."""
+    try:
+        dynamodb_client.describe_table(TableName=name)
+        print(f"DynamoDB table {name} already exists.")
+    except dynamodb_client.exceptions.ResourceNotFoundException:
+        print(f"Creating DynamoDB table {name}...")
+        dynamodb_client.create_table(
+            TableName=name,
+            AttributeDefinitions=attribute_definitions,
+            KeySchema=key_schema,
+            GlobalSecondaryIndexes=list(indexes),
+            BillingMode="PAY_PER_REQUEST",
+            SSESpecification={"Enabled": True},
+        )
+        dynamodb_client.get_waiter("table_exists").wait(TableName=name)
+        print(f"DynamoDB table {name} created.")
+
+    try:
+        ttl = dynamodb_client.describe_time_to_live(TableName=name).get("TimeToLiveDescription", {})
+        if ttl.get("AttributeName") != "ttl" or ttl.get("TimeToLiveStatus") == "DISABLED":
+            dynamodb_client.update_time_to_live(
+                TableName=name,
+                TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
+            )
+            print(f"DynamoDB TTL enabled for {name}.")
+    except Exception as exc:
+        print(f"Could not confirm DynamoDB TTL for {name}; continuing: {exc}")
+
+
+ensure_table(
+    ACCESS_REQUESTS_TABLE_NAME,
+    attribute_definitions=[
+        {"AttributeName": "request_id", "AttributeType": "S"},
+        {"AttributeName": "email", "AttributeType": "S"},
+        {"AttributeName": "status", "AttributeType": "S"},
+        {"AttributeName": "created_at_epoch", "AttributeType": "N"},
+    ],
+    key_schema=[{"AttributeName": "request_id", "KeyType": "HASH"}],
+    indexes=[
+        {
+            "IndexName": "email-created-at-index",
+            "KeySchema": [
+                {"AttributeName": "email", "KeyType": "HASH"},
+                {"AttributeName": "created_at_epoch", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        },
+        {
+            "IndexName": "status-created-at-index",
+            "KeySchema": [
+                {"AttributeName": "status", "KeyType": "HASH"},
+                {"AttributeName": "created_at_epoch", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        },
+    ],
+)
+ensure_table(
+    API_KEYS_TABLE_NAME,
+    attribute_definitions=[
+        {"AttributeName": "key_id", "AttributeType": "S"},
+        {"AttributeName": "status", "AttributeType": "S"},
+        {"AttributeName": "created_at_epoch", "AttributeType": "N"},
+    ],
+    key_schema=[{"AttributeName": "key_id", "KeyType": "HASH"}],
+    indexes=[
+        {
+            "IndexName": "status-created-at-index",
+            "KeySchema": [
+                {"AttributeName": "status", "KeyType": "HASH"},
+                {"AttributeName": "created_at_epoch", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        },
+    ],
+)
+
 print("\nChecking IAM role...")
 try:
     role = iam_client.get_role(RoleName=ROLE_NAME)
@@ -171,11 +273,6 @@ inline_policy = {
     "Statement": [
         {
             "Effect": "Allow",
-            "Action": ["ce:GetCostAndUsage"],
-            "Resource": "*"
-        },
-        {
-            "Effect": "Allow",
             "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
             "Resource": [
                 f"arn:aws:s3:::{BUCKET_NAME}",
@@ -184,6 +281,36 @@ inline_policy = {
         }
     ]
 }
+if ENABLE_COST_KPI:
+    inline_policy["Statement"].append({
+        "Effect": "Allow",
+        "Action": ["ce:GetCostAndUsage"],
+        "Resource": "*",
+    })
+if ENABLE_API_KEY_REGISTRATION or PUBLIC_API_KEY_REQUIRED:
+    inline_policy["Statement"].append({
+        "Effect": "Allow",
+        "Action": [
+            "dynamodb:GetItem",
+            "dynamodb:PutItem",
+            "dynamodb:UpdateItem",
+            "dynamodb:DeleteItem",
+            "dynamodb:Query",
+        ],
+        "Resource": [
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{ACCESS_REQUESTS_TABLE_NAME}",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{ACCESS_REQUESTS_TABLE_NAME}/index/*",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{API_KEYS_TABLE_NAME}",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{API_KEYS_TABLE_NAME}/index/*",
+        ],
+    })
+if ENABLE_API_KEY_REGISTRATION:
+    inline_policy["Statement"].append({
+        "Effect": "Allow",
+        "Action": ["ses:SendEmail"],
+        "Resource": "*",
+        "Condition": {"StringEquals": {"ses:FromAddress": ACCESS_REQUEST_FROM_EMAIL}},
+    })
 iam_client.put_role_policy(
     RoleName=ROLE_NAME,
     PolicyName="AQDashboardRuntimeAccess",
@@ -207,6 +334,23 @@ def run_lambda_update(action_name, update_call):
             time.sleep(5)
 
 
+def api_lambda_environment(existing_env=None):
+    environment = {
+        **(existing_env or {}),
+        "S3_BUCKET": BUCKET_NAME,
+        "ENABLE_COST_KPI": "1" if ENABLE_COST_KPI else "0",
+        "ENABLE_API_KEY_REGISTRATION": "1" if ENABLE_API_KEY_REGISTRATION else "0",
+        "PUBLIC_API_KEY_REQUIRED": "1" if PUBLIC_API_KEY_REQUIRED else "0",
+        "ACCESS_REQUESTS_TABLE": ACCESS_REQUESTS_TABLE_NAME,
+        "API_KEYS_TABLE": API_KEYS_TABLE_NAME,
+    }
+    if API_KEY_HASH_PEPPER:
+        environment["API_KEY_HASH_PEPPER"] = API_KEY_HASH_PEPPER
+    if ACCESS_REQUEST_FROM_EMAIL:
+        environment["ACCESS_REQUEST_FROM_EMAIL"] = ACCESS_REQUEST_FROM_EMAIL
+    return environment
+
+
 def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout):
     print(f"\nDeploying Lambda {function_name}...")
     try:
@@ -218,7 +362,15 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
             .get("Environment", {})
             .get("Variables", {})
         )
-        lambda_env = {**existing_env, "S3_BUCKET": BUCKET_NAME}
+        lambda_env = (
+            api_lambda_environment(existing_env)
+            if function_name == API_LAMBDA_NAME
+            else {
+                **existing_env,
+                "S3_BUCKET": BUCKET_NAME,
+                "ENABLE_COST_KPI": "1" if ENABLE_COST_KPI else "0",
+            }
+        )
         run_lambda_update(
             f"{function_name} code update",
             lambda: lambda_client.update_function_code(FunctionName=function_name, ZipFile=zip_bytes),
@@ -252,7 +404,16 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
                 Code={"ZipFile": zip_bytes},
                 Timeout=timeout,
                 MemorySize=1024,
-                Environment={"Variables": {"S3_BUCKET": BUCKET_NAME}},
+                Environment={
+                    "Variables": (
+                        api_lambda_environment()
+                        if function_name == API_LAMBDA_NAME
+                        else {
+                            "S3_BUCKET": BUCKET_NAME,
+                            "ENABLE_COST_KPI": "1" if ENABLE_COST_KPI else "0",
+                        }
+                    )
+                },
             )
             print(f"Lambda {function_name} created.")
             return response["FunctionArn"]
@@ -348,7 +509,7 @@ else:
 cors_config = {
     "AllowOrigins": ["*"],
     "AllowMethods": ["GET", "POST", "OPTIONS"],
-    "AllowHeaders": ["content-type", "x-api-key", "authorization"],
+    "AllowHeaders": ["content-type"],
     "MaxAge": 300,
 }
 
@@ -381,16 +542,38 @@ else:
     integration_id = integration["IntegrationId"]
 
 routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
-route_keys = [
+canonical_public_route_keys = [
+    "GET /air-quality/v1/summary",
+    "GET /air-quality/v1/timeseries",
+    "GET /air-quality/v1/observations",
+    "GET /air-quality/v1/observations/export",
+]
+public_access_route_keys = [
+    "POST /air-quality/v1/access-requests",
+    "GET /air-quality/v1/access-requests/verify",
+]
+legacy_public_route_keys = [
     "GET /metrics",
     "GET /series",
     "GET /silver-download",
     "GET /silver-records",
+]
+public_route_keys = canonical_public_route_keys + public_access_route_keys + legacy_public_route_keys
+review_route_keys = [
     "GET /record-flags",
     "POST /record-flags",
     "GET /record-corrections",
     "POST /record-corrections",
 ]
+route_keys = public_route_keys + (review_route_keys if ENABLE_REVIEW_API_ROUTES else [])
+
+if not ENABLE_REVIEW_API_ROUTES:
+    for route in routes:
+        if route["RouteKey"] in review_route_keys:
+            api_gateway_client.delete_route(ApiId=api_id, RouteId=route["RouteId"])
+            print(f"Deleted non-public route '{route['RouteKey']}'.")
+    routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
+
 existing_route_keys = {route["RouteKey"] for route in routes}
 for route_key in route_keys:
     if route_key in existing_route_keys:
@@ -423,9 +606,10 @@ try:
 except lambda_client.exceptions.ResourceConflictException:
     pass
 
-final_url = f"{api_endpoint}/metrics"
+final_url = f"{api_endpoint}/air-quality/v1/summary"
 print("\n" + "=" * 50)
 print("AWS DEPLOYMENT COMPLETE")
 print(f"API URL: {final_url}")
+print(f"API base: {api_endpoint}")
 print("=" * 50)
 print("\nNext Step: Update the VITE_API_URL environment variable in Vercel with this URL.")

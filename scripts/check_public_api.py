@@ -1,10 +1,12 @@
-"""Quick smoke test for the dashboard review API.
+#!/usr/bin/env python3
+"""Smoke test the public Des Moines Air Quality API.
 
-Reads a few latest Silver rows from API Gateway without changing S3.
+Reads the dashboard summary and a few latest cleaned observations without
+changing S3.
 
 Usage:
-    python3 scripts/check_review_api.py
-    python3 scripts/check_review_api.py --instrument NO2-CAPS --limit 5
+    python3 scripts/check_public_api.py
+    python3 scripts/check_public_api.py --instrument NO2-CAPS --limit 5
 """
 
 import argparse
@@ -17,17 +19,21 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_API_BASE_URL = "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com"
+SUMMARY_PATH = "/air-quality/v1/summary"
+OBSERVATIONS_PATH = "/air-quality/v1/observations"
 
 
 def api_base_from_env():
     configured = os.environ.get("API_BASE_URL") or os.environ.get("VITE_API_URL")
     if not configured:
         return DEFAULT_API_BASE_URL
-    return configured.rstrip("/").removesuffix("/metrics")
+    return configured.rstrip("/").removesuffix(SUMMARY_PATH)
 
 
-def fetch_json(url):
+def fetch_json(url, api_key=None):
     headers = {"Accept": "application/json"}
+    if api_key:
+        headers["x-api-key"] = api_key
     request = Request(url, headers=headers)
     try:
         with urlopen(request, timeout=30) as response:
@@ -44,25 +50,25 @@ def fetch_json(url):
         raise RuntimeError(f"Could not reach API: {exc.reason}") from exc
 
 
-def print_metrics_summary(api_base):
-    status, payload = fetch_json(f"{api_base}/metrics")
-    print(f"/metrics status: {status}")
+def print_summary(api_base, api_key):
+    status, payload = fetch_json(f"{api_base}{SUMMARY_PATH}", api_key)
+    print(f"{SUMMARY_PATH} status: {status}")
     if status != 200:
         print(json.dumps(payload, indent=2))
         return False
 
     instruments = payload.get("instruments", [])
-    print("Dashboard API is reachable.")
+    print("Public API is reachable.")
     for instrument in instruments:
         print(
             f"  {instrument.get('id')}: "
-            f"bronze={instrument.get('bronzeRows')} "
-            f"silver={instrument.get('silverRows')}"
+            f"raw={instrument.get('bronzeRows')} "
+            f"cleaned={instrument.get('silverRows')}"
         )
     return True
 
 
-def print_silver_rows(api_base, instrument, limit, start, end):
+def print_observations(api_base, instrument, limit, start, end, api_key):
     params = {
         "instrument": instrument,
         "limit": str(limit),
@@ -73,12 +79,12 @@ def print_silver_rows(api_base, instrument, limit, start, end):
     if end:
         params["end"] = end
 
-    url = f"{api_base}/silver-records?{urlencode(params)}"
-    status, payload = fetch_json(url)
-    print(f"\n/silver-records status: {status}")
+    url = f"{api_base}{OBSERVATIONS_PATH}?{urlencode(params)}"
+    status, payload = fetch_json(url, api_key)
+    print(f"\n{OBSERVATIONS_PATH} status: {status}")
 
     if status == 404:
-        print("Silver review route is not available at this API URL yet.")
+        print("Observations route is not available at this API URL yet.")
         print("Deploy the updated AWS routes with: python3 scripts/deploy_aws.py")
         print(json.dumps(payload, indent=2))
         return False
@@ -107,33 +113,39 @@ def print_silver_rows(api_base, instrument, limit, start, end):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Smoke test the review API.")
+    parser = argparse.ArgumentParser(description="Smoke test the public API.")
     parser.add_argument("--api-base-url", default=api_base_from_env())
     parser.add_argument("--instrument", default="NO2-CAPS")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--start", help="Optional ISO start time, for example 2026-03-02T00:00:00")
     parser.add_argument("--end", help="Optional ISO end time, for example 2026-03-02T00:05:00")
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("AQ_API_KEY"),
+        help="Optional API key. Defaults to AQ_API_KEY from the environment.",
+    )
     args = parser.parse_args()
 
-    api_base = args.api_base_url.rstrip("/").removesuffix("/metrics")
+    api_base = args.api_base_url.rstrip("/").removesuffix(SUMMARY_PATH)
     print(f"API base: {api_base}")
     print(f"Instrument: {args.instrument}")
     print(f"Limit: {args.limit}")
 
     try:
-        metrics_ok = print_metrics_summary(api_base)
-        rows_ok = print_silver_rows(
+        summary_ok = print_summary(api_base, args.api_key)
+        rows_ok = print_observations(
             api_base,
             args.instrument,
             args.limit,
             args.start,
             args.end,
+            args.api_key,
         )
     except RuntimeError as exc:
         print(exc)
         return 1
 
-    return 0 if metrics_ok and rows_ok else 1
+    return 0 if summary_ok and rows_ok else 1
 
 
 if __name__ == "__main__":

@@ -1,31 +1,55 @@
 import csv
+import hmac
 import hashlib
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import boto3
 
-cost_explorer_client = boto3.client("ce", region_name="us-east-1")
 s3_client = boto3.client("s3")
+dynamodb_client = boto3.client("dynamodb")
+ses_client = boto3.client("ses")
 
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 REVIEW_API_KEY = os.environ.get("REVIEW_API_KEY")
-
-# The cost tile changes slowly and the Cost Explorer call is slow; cache an hour.
-COST_TTL_SECONDS = 3600
-_cost_cache = {"value": None, "ts": 0.0}
+ENABLE_REVIEW_WRITES = os.environ.get("ENABLE_REVIEW_WRITES") == "1"
+ENABLE_COST_KPI = os.environ.get("ENABLE_COST_KPI") == "1"
+ENABLE_API_KEY_REGISTRATION = os.environ.get("ENABLE_API_KEY_REGISTRATION") == "1"
+PUBLIC_API_KEY_REQUIRED = os.environ.get("PUBLIC_API_KEY_REQUIRED") == "1"
+ACCESS_REQUESTS_TABLE = os.environ.get("ACCESS_REQUESTS_TABLE", "AQApiAccessRequests")
+API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "AQApiKeys")
+API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
+ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
+API_ROUTES = {
+    "summary": "/air-quality/v1/summary",
+    "timeseries": "/air-quality/v1/timeseries",
+    "observations": "/air-quality/v1/observations",
+    "observations_export": "/air-quality/v1/observations/export",
+    "access_requests": "/air-quality/v1/access-requests",
+    "access_verify": "/air-quality/v1/access-requests/verify",
+}
+LEGACY_API_ROUTES = {
+    "summary": "/metrics",
+    "timeseries": "/series",
+    "observations": "/silver-records",
+    "observations_export": "/silver-download",
+}
 
 # Row/size counts are recomputed live from S3, but cached briefly so a burst of
 # refreshes does not each trigger a full scan. New data only lands every few
 # minutes, so a short cache still feels live on the dashboard.
 INVENTORY_TTL_SECONDS = 30
+COST_TTL_SECONDS = 3600
 _inventory_cache = {"data": None, "ts": 0.0}
+_cost_cache = {"data": None, "ts": 0.0}
 
 # Counting many small batch objects is dominated by per-object request latency,
 # so fan the downloads out across threads.
@@ -45,8 +69,8 @@ def iter_s3_objects(prefix):
 def response(status_code, payload=None, extra_headers=None):
     headers = {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        "Access-Control-Allow-Headers": "content-type,x-api-key,authorization",
+        "Access-Control-Allow-Methods": "GET,OPTIONS",
+        "Access-Control-Allow-Headers": "content-type",
         "Content-Type": "application/json",
     }
     if extra_headers:
@@ -56,6 +80,36 @@ def response(status_code, payload=None, extra_headers=None):
         "headers": headers,
         "body": "" if payload is None else json.dumps(payload),
     }
+
+
+def access_response(status_code, payload=None):
+    """Response for the one public POST route used to request API access."""
+    return response(
+        status_code,
+        payload,
+        {"Access-Control-Allow-Methods": "GET,POST,OPTIONS"},
+    )
+
+
+def request_base_url(event):
+    headers = normalized_headers(event)
+    host = headers.get("host")
+    if not host:
+        return ""
+    scheme = headers.get("x-forwarded-proto") or "https"
+    return f"{scheme}://{host}"
+
+
+def redirect_response(event, canonical_path):
+    query = event.get("rawQueryString") or ""
+    location = f"{request_base_url(event)}{canonical_path}"
+    if query:
+        location = f"{location}?{query}"
+    return response(
+        308,
+        {"message": "Endpoint moved", "location": location},
+        {"Location": location},
+    )
 
 
 def parse_body(event):
@@ -70,8 +124,19 @@ def get_route(event):
     request_context = event.get("requestContext", {})
     http_context = request_context.get("http", {})
     method = http_context.get("method") or event.get("httpMethod") or "GET"
-    path = event.get("rawPath") or http_context.get("path") or event.get("path") or "/metrics"
+    path = event.get("rawPath") or http_context.get("path") or event.get("path") or API_ROUTES["summary"]
     return method.upper(), path.rstrip("/") or "/"
+
+
+def route_matches(path, *routes):
+    return any(path == route or path.endswith(route) for route in routes)
+
+
+def legacy_route_target(path):
+    for name, legacy_path in LEGACY_API_ROUTES.items():
+        if route_matches(path, legacy_path):
+            return API_ROUTES[name]
+    return None
 
 
 def query_params(event):
@@ -83,6 +148,8 @@ def normalized_headers(event):
 
 
 def require_review_auth(event):
+    if not ENABLE_REVIEW_WRITES:
+        return False, response(403, {"error": "Forbidden"})
     if not REVIEW_API_KEY:
         return False, response(
             503,
@@ -92,22 +159,282 @@ def require_review_auth(event):
             },
         )
     headers = normalized_headers(event)
-    params = query_params(event)
-    provided = (
-        headers.get("x-api-key")
-        or headers.get("authorization", "").removeprefix("Bearer ").strip()
-        or params.get("api_key")
-        or params.get("review_key")
-    )
-    if provided != REVIEW_API_KEY:
+    authorization = headers.get("authorization", "")
+    provided = headers.get("x-api-key")
+    if not provided and authorization.lower().startswith("bearer "):
+        provided = authorization[7:].strip()
+    if not provided or not hmac.compare_digest(str(provided), REVIEW_API_KEY):
         return False, response(403, {"error": "Forbidden"})
     return True, None
+
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+API_KEY_PATTERN = re.compile(r"^aqk_([a-z0-9]{16})_([A-Za-z0-9_-]{32,})$")
+REQUEST_ID_PATTERN = re.compile(r"^[a-f0-9-]{36}$")
+ACCESS_REQUEST_WINDOW_SECONDS = 24 * 60 * 60
+VERIFICATION_WINDOW_SECONDS = 7 * 24 * 60 * 60
+ACCESS_REQUEST_RETENTION_SECONDS = 90 * 24 * 60 * 60
+READ_SCOPES = {
+    "summary": "read:summary",
+    "timeseries": "read:timeseries",
+    "observations": "read:observations",
+    "observations_export": "read:export",
+}
+
+
+def ddb_string(item, name, default=None):
+    value = (item or {}).get(name)
+    if not value:
+        return default
+    return value.get("S", default)
+
+
+def ddb_number(item, name, default=None):
+    value = (item or {}).get(name)
+    if not value:
+        return default
+    try:
+        return int(value.get("N"))
+    except (TypeError, ValueError):
+        return default
+
+
+def ddb_string_list(item, name):
+    return (item or {}).get(name, {}).get("SS", [])
+
+
+def normalize_email(value):
+    email = str(value or "").strip().lower()
+    return email if EMAIL_PATTERN.fullmatch(email) else None
+
+
+def limit_text(value, maximum):
+    return str(value or "").strip()[:maximum]
+
+
+def access_registration_ready():
+    return ENABLE_API_KEY_REGISTRATION and bool(ACCESS_REQUEST_FROM_EMAIL)
+
+
+def key_hash(raw_key):
+    if not API_KEY_HASH_PEPPER:
+        return None
+    return hmac.new(
+        API_KEY_HASH_PEPPER.encode("utf-8"),
+        raw_key.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def find_recent_access_request(email):
+    result = dynamodb_client.query(
+        TableName=ACCESS_REQUESTS_TABLE,
+        IndexName="email-created-at-index",
+        KeyConditionExpression="email = :email",
+        ExpressionAttributeValues={":email": {"S": email}},
+        ScanIndexForward=False,
+        Limit=1,
+    )
+    items = result.get("Items") or []
+    return items[0] if items else None
+
+
+def access_request_email(verification_url):
+    return {
+        "Source": ACCESS_REQUEST_FROM_EMAIL,
+        "Destination": {"ToAddresses": []},
+        "Message": {
+            "Subject": {"Data": "Verify your Des Moines Air Quality API access request"},
+            "Body": {
+                "Text": {
+                    "Data": (
+                        "We received an API access request for this email address.\n\n"
+                        "Verify the request by opening this link:\n"
+                        f"{verification_url}\n\n"
+                        "After verification, the project team will review the request. "
+                        "If you did not request access, you can ignore this email."
+                    )
+                }
+            },
+        },
+    }
+
+
+def create_access_request(event):
+    """Accept a public read-only access request and send a verification email."""
+    if not access_registration_ready():
+        return access_response(503, {"error": "API access registration is not available"})
+
+    payload = parse_body(event)
+    if payload is None:
+        return access_response(400, {"error": "Invalid JSON body"})
+
+    email = normalize_email(payload.get("email"))
+    name = limit_text(payload.get("name"), 120)
+    organization = limit_text(payload.get("organization"), 160)
+    use_case = limit_text(payload.get("use_case"), 1000)
+    if not email or not name or not use_case:
+        return access_response(400, {
+            "error": "Name, email, and intended use are required",
+        })
+
+    now = datetime.now(timezone.utc)
+    now_epoch = int(now.timestamp())
+    try:
+        recent_request = find_recent_access_request(email)
+        recent_created = ddb_number(recent_request, "created_at_epoch", 0) or 0
+        recent_status = ddb_string(recent_request, "status")
+        if (
+            recent_request
+            and now_epoch - recent_created < ACCESS_REQUEST_WINDOW_SECONDS
+            and recent_status in {"PENDING_VERIFICATION", "PENDING_APPROVAL", "APPROVED"}
+        ):
+            return access_response(202, {
+                "message": "If this email can receive a new request, a verification message will arrive shortly.",
+            })
+    except Exception as exc:
+        print(f"Could not check API access request state: {exc}")
+        return access_response(503, {"error": "API access registration is temporarily unavailable"})
+
+    request_id = str(uuid.uuid4())
+    verification_token = secrets.token_urlsafe(32)
+    verification_url = (
+        f"{request_base_url(event)}{API_ROUTES['access_verify']}?"
+        f"{urlencode({'request_id': request_id, 'token': verification_token})}"
+    )
+    item = {
+        "request_id": {"S": request_id},
+        "email": {"S": email},
+        "name": {"S": name},
+        "organization": {"S": organization},
+        "use_case": {"S": use_case},
+        "status": {"S": "PENDING_VERIFICATION"},
+        "created_at": {"S": now.isoformat()},
+        "created_at_epoch": {"N": str(now_epoch)},
+        "verification_token_hash": {"S": hashlib.sha256(verification_token.encode("utf-8")).hexdigest()},
+        "verification_expires_at": {"N": str(now_epoch + VERIFICATION_WINDOW_SECONDS)},
+        "ttl": {"N": str(now_epoch + ACCESS_REQUEST_RETENTION_SECONDS)},
+    }
+    try:
+        dynamodb_client.put_item(
+            TableName=ACCESS_REQUESTS_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(request_id)",
+        )
+        email_payload = access_request_email(verification_url)
+        email_payload["Destination"]["ToAddresses"] = [email]
+        ses_client.send_email(**email_payload)
+    except Exception as exc:
+        print(f"Could not create API access request: {exc}")
+        try:
+            dynamodb_client.delete_item(
+                TableName=ACCESS_REQUESTS_TABLE,
+                Key={"request_id": {"S": request_id}},
+            )
+        except Exception:
+            pass
+        return access_response(503, {"error": "API access registration is temporarily unavailable"})
+
+    return access_response(202, {
+        "message": "Check your email to verify this access request.",
+    })
+
+
+def verify_access_request(event):
+    if not access_registration_ready():
+        return access_response(404, {"error": "Route not found"})
+
+    params = query_params(event)
+    request_id = str(params.get("request_id") or "")
+    token = str(params.get("token") or "")
+    if not REQUEST_ID_PATTERN.fullmatch(request_id) or len(token) < 32:
+        return access_response(400, {"error": "This verification link is invalid or has expired"})
+
+    now = datetime.now(timezone.utc)
+    now_epoch = int(now.timestamp())
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    try:
+        dynamodb_client.update_item(
+            TableName=ACCESS_REQUESTS_TABLE,
+            Key={"request_id": {"S": request_id}},
+            UpdateExpression=(
+                "SET #status = :approved, verified_at = :verified_at "
+                "REMOVE verification_token_hash"
+            ),
+            ConditionExpression=(
+                "#status = :pending AND verification_token_hash = :token_hash "
+                "AND verification_expires_at >= :now"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":approved": {"S": "PENDING_APPROVAL"},
+                ":pending": {"S": "PENDING_VERIFICATION"},
+                ":verified_at": {"S": now.isoformat()},
+                ":token_hash": {"S": token_hash},
+                ":now": {"N": str(now_epoch)},
+            },
+        )
+    except Exception as exc:
+        print(f"Could not verify API access request: {exc}")
+        return access_response(400, {"error": "This verification link is invalid or has expired"})
+
+    return access_response(200, {
+        "message": "Email verified. Your access request is waiting for team approval.",
+    })
+
+
+def public_api_key(event):
+    headers = normalized_headers(event)
+    key = headers.get("x-api-key", "")
+    authorization = headers.get("authorization", "")
+    if not key and authorization.lower().startswith("bearer "):
+        key = authorization[7:].strip()
+    return str(key).strip()
+
+
+def require_public_api_access(event, required_scope):
+    """Validate an issued API key when key enforcement is explicitly enabled."""
+    if not PUBLIC_API_KEY_REQUIRED:
+        return None
+    if not API_KEY_HASH_PEPPER:
+        print("Public API key enforcement enabled without API_KEY_HASH_PEPPER")
+        return response(503, {"error": "API key authentication is not configured"})
+
+    supplied_key = public_api_key(event)
+    if not supplied_key:
+        return response(401, {"error": "API key required"})
+    match = API_KEY_PATTERN.fullmatch(supplied_key)
+    if not match:
+        return response(403, {"error": "Invalid API key"})
+
+    key_id = match.group(1)
+    try:
+        result = dynamodb_client.get_item(
+            TableName=API_KEYS_TABLE,
+            Key={"key_id": {"S": key_id}},
+            ConsistentRead=True,
+        )
+        item = result.get("Item")
+    except Exception as exc:
+        print(f"Could not validate public API key: {exc}")
+        return response(503, {"error": "API key authentication is temporarily unavailable"})
+
+    expected_hash = ddb_string(item, "key_hash")
+    if (
+        not item
+        or ddb_string(item, "status") != "ACTIVE"
+        or not expected_hash
+        or not hmac.compare_digest(key_hash(supplied_key), expected_hash)
+        or required_scope not in ddb_string_list(item, "scopes")
+    ):
+        return response(403, {"error": "Invalid API key"})
+    return None
 
 
 # --- Row detection: which lines are real data rows vs headers and comments ---
 
 def clean_field(field):
-    return field.strip().lstrip("\ufeff").strip('"').strip()
+    return field.strip().lstrip("\ufeff").strip('"').strip().replace("cm�", "cm³")
 
 
 def split_fields(line):
@@ -452,10 +779,10 @@ def get_silver_records(event):
         try:
             count = count_silver_records(instrument_id, params.get("start"), params.get("end"))
         except s3_client.exceptions.NoSuchKey:
-            return response(404, {"error": "Silver records not found", "instrument_id": instrument_id})
+            return response(404, {"error": "Records not found", "instrument_id": instrument_id})
         except Exception as exc:
             print(f"Silver count error: {exc}")
-            return response(500, {"error": "Could not count silver records"})
+            return response(500, {"error": "Could not count records"})
         return response(200, {"instrument_id": instrument_id, "count": count})
 
     try:
@@ -468,10 +795,10 @@ def get_silver_records(event):
             params.get("order", "asc"),
         )
     except s3_client.exceptions.NoSuchKey:
-        return response(404, {"error": "Silver records not found", "instrument_id": instrument_id})
+        return response(404, {"error": "Records not found", "instrument_id": instrument_id})
     except Exception as exc:
         print(f"Silver records error: {exc}")
-        return response(500, {"error": "Could not read silver records"})
+        return response(500, {"error": "Could not read records"})
 
     return response(200, {
         "instrument_id": instrument_id,
@@ -686,11 +1013,11 @@ def get_series(event):
     })
 
 
-def get_silver_download(event):
-    """Hand back a short-lived presigned URL for the full raw silver CSV.
+def get_observations_export(event):
+    """Hand back a short-lived presigned URL for the full cleaned observation CSV.
 
-    The consolidated file can be tens of MB, past the Lambda response limit, so the
-    browser downloads it straight from S3 instead of through the API.
+    The consolidated file can be tens of MB, past the Lambda response limit, so
+    the client reads it straight from S3 instead of through the API.
     """
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
@@ -703,7 +1030,7 @@ def get_silver_download(event):
     except Exception:
         return response(404, {"error": "Silver data not found", "instrument_id": instrument_id})
 
-    filename = f"{instrument_id}_silver.csv"
+    filename = f"{instrument_id}_observations.csv"
     url = s3_client.generate_presigned_url(
         "get_object",
         Params={
@@ -783,44 +1110,69 @@ def get_inventory():
     return inventory
 
 
-def get_month_to_date_cost():
+def get_mtd_cost():
+    if not ENABLE_COST_KPI:
+        return None
+
     now = time.time()
-    if _cost_cache["value"] is not None and now - _cost_cache["ts"] < COST_TTL_SECONDS:
-        return _cost_cache["value"]
-    try:
-        now_utc = datetime.now(timezone.utc)
-        start_of_month = now_utc.replace(day=1).strftime("%Y-%m-%d")
-        end_date = now_utc.strftime("%Y-%m-%d")
-        if start_of_month == end_date:
-            value = 0.00
-        else:
-            response = cost_explorer_client.get_cost_and_usage(
-                TimePeriod={"Start": start_of_month, "End": end_date},
-                Granularity="MONTHLY",
-                Metrics=["UnblendedCost"],
-            )
-            amount = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
-            value = round(float(amount), 2)
-    except Exception as exc:
-        print(f"Cost Explorer error: {exc}")
-        value = "N/A"
-    _cost_cache["value"] = value
+    if _cost_cache["data"] is not None and now - _cost_cache["ts"] < COST_TTL_SECONDS:
+        return _cost_cache["data"]
+
+    today = datetime.now(timezone.utc).date()
+    start_date = today.replace(day=1).isoformat()
+    end_date = (today + timedelta(days=1)).isoformat()
+    client = boto3.client("ce", region_name="us-east-1")
+    result = client.get_cost_and_usage(
+        TimePeriod={"Start": start_date, "End": end_date},
+        Granularity="MONTHLY",
+        Metrics=["UnblendedCost"],
+    )
+    total = result.get("ResultsByTime", [{}])[0].get("Total", {}).get("UnblendedCost", {})
+    data = {
+        "amount": round(float(total.get("Amount", 0)), 2),
+        "currency": total.get("Unit", "USD"),
+        "periodStart": start_date,
+        "periodEnd": end_date,
+    }
+    _cost_cache["data"] = data
     _cost_cache["ts"] = now
-    return value
+    return data
 
 
 def lambda_handler(event, context):
     method, path = get_route(event)
     if method == "OPTIONS":
+        if route_matches(path, API_ROUTES["access_requests"], API_ROUTES["access_verify"]):
+            return access_response(204)
         return response(204)
 
-    if path.endswith("/series") and method == "GET":
+    if method == "GET":
+        canonical_path = legacy_route_target(path)
+        if canonical_path:
+            return redirect_response(event, canonical_path)
+
+    if route_matches(path, API_ROUTES["access_requests"]) and method == "POST":
+        return create_access_request(event)
+
+    if route_matches(path, API_ROUTES["access_verify"]) and method == "GET":
+        return verify_access_request(event)
+
+    if route_matches(path, API_ROUTES["timeseries"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["timeseries"])
+        if auth_response:
+            return auth_response
         return get_series(event)
 
-    if path.endswith("/silver-download") and method == "GET":
-        return get_silver_download(event)
+    if route_matches(path, API_ROUTES["observations_export"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["observations_export"])
+        if auth_response:
+            return auth_response
+        return get_observations_export(event)
 
-    if path.endswith("/silver-records") and method == "GET":
+    if route_matches(path, API_ROUTES["observations"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["observations"])
+        if auth_response:
+            return auth_response
         return get_silver_records(event)
 
     if path.endswith("/record-flags"):
@@ -835,22 +1187,33 @@ def lambda_handler(event, context):
         if method == "POST":
             return write_review_item(event, "corrections")
 
-    if not path.endswith("/metrics"):
+    if not route_matches(path, API_ROUTES["summary"]):
         return response(404, {"error": "Route not found"})
 
+    auth_response = require_public_api_access(event, READ_SCOPES["summary"])
+    if auth_response:
+        return auth_response
+
     inventory = get_inventory()
-    month_to_date_cost = get_month_to_date_cost()
+    mtd_cost = None
+    try:
+        mtd_cost = get_mtd_cost()
+    except Exception as exc:
+        print(f"Cost Explorer error: {exc}")
 
     payload = {
         "refreshTime": inventory["refreshTime"],
         "systemStatus": inventory["systemStatus"],
         "kpis": {
-            "mtdCost": month_to_date_cost,
-            "costScope": "AWS account MTD",
             "lastUpdatedInstrument": inventory["lastUpdatedInstrument"],
             "siteName": "Des Moines",
         },
         "instruments": inventory["instruments"],
     }
+    if mtd_cost is not None:
+        payload["kpis"]["mtdCost"] = mtd_cost["amount"]
+        payload["kpis"]["costCurrency"] = mtd_cost["currency"]
+        payload["kpis"]["costPeriodStart"] = mtd_cost["periodStart"]
+        payload["kpis"]["costPeriodEnd"] = mtd_cost["periodEnd"]
 
     return response(200, payload)
