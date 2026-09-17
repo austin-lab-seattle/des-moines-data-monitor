@@ -2,8 +2,10 @@
 
 Air quality data pipeline and monitoring dashboard for the DEOHS research project.
 The field laptop uploads instrument data to S3 Bronze, AWS builds a deduplicated
-Silver layer, an API Lambda serves metrics and review records, and the Vercel
+Silver layer, an API Lambda serves public read endpoints, and the Vercel
 React dashboard reads it through API Gateway.
+
+Live dashboard: <https://deohs-des-moines-air.vercel.app>
 
 ## Instruments
 
@@ -29,7 +31,7 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
                                         {instrument}/silver/...                      |
                                              |                                        |
                                         aq-dashboard-api Lambda                      |
-                                        /metrics + review endpoints                  |
+                                        /air-quality/v1/...                          |
                                              |                                        |
                                         API Gateway  -------------------------------+
 ```
@@ -38,7 +40,7 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 
 ```text
 .
-├── lambda_api.py               # dashboard API Lambda: metrics + silver review API
+├── lambda_api.py               # dashboard API Lambda: public API + summary payload
 ├── lambda/
 │   └── silver_builder.py       # rebuilds deduplicated silver CSVs from bronze
 ├── instruments_config.json     # local instrument config (gitignored)
@@ -66,15 +68,18 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
   keeps only real data rows, removes duplicates, and writes a metadata sidecar
   with the unique row count.
 - `lambda_api.py` serves the dashboard JSON payload through API Gateway at
-  `/metrics`. On every request it scans the bronze prefix and counts the real
+  `/air-quality/v1/summary`. On every request it scans the bronze prefix and counts the real
   data rows and bytes per instrument live (its `is_data_row()` logic skips
-  headers and comment lines), reads Silver row counts from metadata, and reads
-  month-to-date AWS account cost from Cost Explorer. It also exposes Silver
-  record review endpoints for browsing, flagging, and correction notes.
+  headers and comment lines), reads Silver row counts from metadata, and exposes
+  public read-only API routes for the dashboard and cleaned data access.
 - `scripts/deploy_aws.py` creates or updates the bucket, Lambda role, the API
   Lambda, and the API Gateway.
 - `frontend/` is the Vite React dashboard deployed through the existing Vercel
   project.
+- `docs/PUBLIC_API_ACCESS.md` is the public API access guide for the read-only
+  endpoints that are safe to share externally.
+- `PROJECT_HANDOVER.md` is the AI-agnostic source of truth for future
+  collaborators.
 
 ## File discovery and checkpoints
 
@@ -117,6 +122,7 @@ There are two schedules:
 Run one upload pass manually:
 
 ```bash
+python3 scripts/upload_instrument_data.py --check  # validates without uploading
 python3 scripts/upload_instrument_data.py
 ```
 
@@ -141,6 +147,10 @@ scripts\run_pipeline.bat       # Windows
 
 Use a 15-minute upload interval while instruments are actively writing. A 30- or
 60-minute interval is fine when near-real-time visibility is not needed.
+
+For a new Windows laptop, follow the complete checklist in
+[`docs/FIELD_LAPTOP_SETUP.md`](docs/FIELD_LAPTOP_SETUP.md) before enabling the
+scheduled task.
 
 ## AWS credentials
 
@@ -173,25 +183,27 @@ Current AWS target:
 ```text
 Region: us-west-2
 Bucket: des-moines-data-pipeline-austinlab
-API: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics
+API: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/summary
 API base: https://yvhb48sthk.execute-api.us-west-2.amazonaws.com
 ```
 
-API routes configured by `scripts/deploy_aws.py`:
+Public dashboard routes remain anonymous and read-only. Researcher API routes
+use the `/air-quality/v1/keyed/...` prefix and require a personal key:
 
 ```text
-GET  /metrics
-GET  /silver-records?instrument=NO2-CAPS&start=...&end=...
-GET  /record-flags?instrument=NO2-CAPS
-POST /record-flags?api_key=<review-api-key>
-GET  /record-corrections?instrument=NO2-CAPS
-POST /record-corrections?api_key=<review-api-key>
+GET  /air-quality/v1/keyed/summary
+GET  /air-quality/v1/keyed/observations?instrument=NO2-CAPS&start=...&end=...
+GET  /air-quality/v1/keyed/timeseries?instrument=SMPS&measurement=...
+GET  /air-quality/v1/keyed/observations/export?instrument=SMPS
+POST /air-quality/v1/access-requests
 ```
 
-Write routes require the API Lambda environment variable `REVIEW_API_KEY`.
-For the current review flow, open the dashboard with `?api_key=<review-api-key>`.
-The dashboard then passes that key to the AWS write endpoints as a URL query
-parameter.
+When API key registration is enabled, users request access, verify their email,
+and automatically receive a personal read-only key at that same address. Keys
+are rate-limited and are stored only as one-way keyed hashes.
+
+Review/admin routes are separate internal endpoints protected by Cognito JWTs
+and named team roles. The public Vercel views remain read-only.
 
 ## Common commands
 
@@ -199,12 +211,33 @@ parameter.
 python3 -m pip install -r requirements.txt   # install deps
 python3 scripts/upload_instrument_data.py     # one upload pass
 python3 scripts/deploy_aws.py                 # deploy/update AWS resources
-python3 scripts/check_review_api.py --limit 5 # verify metrics + Silver review API
+python3 scripts/check_public_api.py --limit 5 # verify public API reads
 cd frontend && npm install && npm run dev     # run the dashboard locally
 ```
 
-For Vercel, set `VITE_API_URL` to the API Gateway `/metrics` URL printed by
+To enable access requests after SES has a verified sender address:
+
+```bash
+export ACCESS_REQUEST_FROM_EMAIL="pavands@uw.edu"
+export API_KEY_HASH_PEPPER="set-this-from-a-secret-manager"
+ENABLE_API_KEY_REGISTRATION=1 python3 scripts/deploy_aws.py
+```
+
+After the user opens the verification link, SES emails the key to that verified
+address. If delivery fails, the new key is revoked. The Lambda execution role
+needs permission to send from `ACCESS_REQUEST_FROM_EMAIL`.
+
+Keep `PUBLIC_API_KEY_REQUIRED=0` until the public dashboard has a server-side
+data proxy. A static browser dashboard cannot keep a shared key secret.
+
+For Vercel, set `VITE_API_URL` to the API Gateway summary URL printed by
 `scripts/deploy_aws.py`.
+
+For an internal dashboard deployment that should show AWS MTD cost in Overview:
+
+```bash
+ENABLE_COST_KPI=1 python3 scripts/deploy_aws.py
+```
 
 ## Data layout (medallion)
 
@@ -231,7 +264,7 @@ Current layer status:
 |-------|--------|------------------------------|
 | Bronze | done | raw files, partitioned by year/month (optionally add an S3 lifecycle rule) |
 | Silver | done, CSV | daily Lambda rebuild that filters headers/comments, dedupes rows, and writes `{id}/silver/` |
-| Review sidecars | deployed | flags and corrections stored as JSON under `{id}/flags/` and `{id}/corrections/` through authenticated write routes |
+| Review sidecars | deployed privately | Cognito-protected flags/corrections stored separately from immutable Bronze and Silver, with audit entries |
 | Gold | partial | only SMPS hourly summary was seen in S3; decide the required aggregates before expanding |
 | Query/catalog | optional | Athena and Glue Catalog can be added later if querying large historical data becomes important |
 | Orchestration | partial | laptop scheduler for uploads, EventBridge daily schedule for Silver |
@@ -241,20 +274,6 @@ sidecars are simpler and cheaper for the present data size. Revisit Iceberg only
 when many users need concurrent edits, versioned table history, or SQL updates
 over large Silver/Gold datasets.
 
-## Cost tile
-
-The dashboard `MTD COST` tile comes from AWS Cost Explorer through `lambda_api.py`
-(`Dashboard -> API Gateway -> aq-dashboard-api Lambda -> Cost Explorer`):
-
-- It is account-level month-to-date unblended cost, not per-bucket or
-  per-instrument.
-- Cost Explorer data can lag, so the tile may not match live usage minute-by-minute.
-- If the Lambda role lacks `ce:GetCostAndUsage`, the tile shows `N/A`.
-- The API Lambda calls Cost Explorer in `us-east-1` (normal for billing APIs)
-  even though project resources live in `us-west-2`.
-
-Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibility.
-
 ## Operational walkthrough
 
 1. Confirm `instruments_config.json` `data_glob` patterns match the live files.
@@ -262,23 +281,20 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
 3. Confirm S3 has `{instrument_id}/bronze/...` files and
    `{instrument_id}/checkpoints/checkpoint.json`.
 4. Run `python3 scripts/deploy_aws.py` after Lambda/API changes.
-5. Open the API Gateway `/metrics` URL and confirm JSON contains `kpis`,
+5. Open the API Gateway summary URL and confirm JSON contains `kpis`,
    `refreshTime`, and all five instruments with Bronze and Silver row counts.
-6. Set Vercel `VITE_API_URL` to that `/metrics` URL and redeploy the frontend.
-7. If enabling Data Review writes, set `REVIEW_API_KEY` on the API Lambda before
-   deploying the new API routes.
+6. Set Vercel `VITE_API_URL` to that summary URL and redeploy the frontend.
+7. Keep public pages read-only; use the Cognito-protected Team Console for
+   review and access administration.
 8. Install the laptop scheduler only after a clean manual upload pass.
 
 ## Security notes
 
-- **The `/metrics` endpoint is public and unauthenticated, and it returns
-  month-to-date AWS account cost.** Anyone with the URL can read your billing
-  number. Before this is widely shared, either drop `mtdCost` from the public
-  payload or put the API behind auth (API key / Cognito / signed requests).
-- Review write endpoints require `REVIEW_API_KEY`. The current dashboard passes
-  this as `?api_key=...` in the URL for write actions. This is convenient for
-  review testing, but it can appear in browser history and shared links, so move
-  to proper user auth before broad access.
+- Public API and dashboard routes must stay read-only.
+- Do not pass private access tokens in URLs. URLs end up in browser history,
+  logs, screenshots, and shared messages.
+- Record modification workflows must be private, explicitly enabled, and reviewed
+  before deployment.
 - Do not commit AWS credentials, Vercel tokens, sample data, checkpoint files,
   logs, SQLite buffers, or generated Lambda zips.
 - The Lambda execution role attaches the broad managed policy
@@ -290,9 +306,9 @@ Add an AWS Budget or billing alarm for hard guardrails; the tile is only visibil
 
 ## Next steps
 
-- Add an AWS Budget and project resource tags so billing can be separated.
-- Address the public cost endpoint (see Security notes).
-- Keep `REVIEW_API_KEY` configured in AWS Lambda.
-- Add a small audit view for flags/corrections once the team decides the exact
-  correction approval workflow.
+- Add an AWS Budget and project resource tags so cost tracking stays in AWS
+  and internal dashboard cost visibility stays deliberate. The Overview tile can
+  show MTD cost when the API Lambda is deployed with `ENABLE_COST_KPI=1`.
+- Keep review/admin workflows inside the Cognito-protected Team Console.
+- Review Team Console roles and audit records periodically.
 - Decide Gold requirements after Silver review usage is clear.

@@ -22,6 +22,7 @@ Run from the repository root:
     python3 scripts/upload_instrument_data.py
 """
 
+import argparse
 import asyncio
 import glob
 import json
@@ -36,14 +37,15 @@ from datetime import datetime, timezone
 import boto3
 
 
+log_handlers = [logging.StreamHandler()]
+if os.environ.get("PIPELINE_LOG_TO_FILE", "1") != "0":
+    log_handlers.append(logging.FileHandler("collector.log", encoding="utf-8"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("collector.log", encoding="utf-8"),
-    ],
+    handlers=log_handlers,
 )
 logger = logging.getLogger(__name__)
 
@@ -554,6 +556,59 @@ def write_pipeline_status(s3, config, instrument_results):
     )
 
 
+def validate_setup():
+    """Validate field-laptop files and configuration without uploading data."""
+    try:
+        config = load_config()
+    except Exception as exc:
+        logger.error("Could not read %s: %s", CONFIG_FILE, exc)
+        return False
+
+    required = ("s3_bucket", "aws_region", "pipeline_status_key", "instruments")
+    missing = [name for name in required if not config.get(name)]
+    if missing:
+        logger.error("Configuration is missing: %s", ", ".join(missing))
+        return False
+
+    active_instruments = [item for item in config["instruments"] if item.get("active", True)]
+    if not active_instruments:
+        logger.error("No active instruments are configured.")
+        return False
+
+    valid = True
+    for instrument in active_instruments:
+        instrument_id = instrument.get("id") or "UNKNOWN"
+        if instrument.get("ingestion_type") != "growing_file":
+            log("error", instrument_id, "ingestion_type must be growing_file")
+            valid = False
+            continue
+        files = discover_files(instrument)
+        if not files:
+            log("error", instrument_id, "No files matched data_glob")
+            valid = False
+            continue
+        total_bytes = sum(os.path.getsize(path) for path in files)
+        log("info", instrument_id, f"Matched {len(files)} file(s), {total_bytes:,} bytes")
+
+    try:
+        credential_session = boto3.Session()
+        if credential_session.get_credentials() is None:
+            if not os.path.exists(CREDS_FILE):
+                raise RuntimeError(
+                    f"no standard AWS credentials and {CREDS_FILE} does not exist"
+                )
+            load_aws_credentials()
+        create_s3_client(config)
+        logger.info("AWS credential configuration loaded; no network request was made.")
+    except Exception as exc:
+        logger.error("AWS credentials are not configured correctly: %s", exc)
+        valid = False
+
+    if valid:
+        logger.info("Field-laptop preflight passed. No data was uploaded.")
+    return valid
+
+
 async def main():
     config = load_config()
     init_db()
@@ -565,7 +620,7 @@ async def main():
 
     if not active_instruments:
         logger.info("No active instruments. Exiting.")
-        return
+        return True
 
     coroutines = [
         process_instrument(inst, s3, config, loop, executor)
@@ -587,7 +642,18 @@ async def main():
         write_pipeline_status(s3, config, instrument_results)
     except Exception as exc:
         logger.error(f"Failed to write pipeline status: {exc}")
+        return False
+
+    return all(result.get("status") == "ok" for result in instrument_results.values())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Upload instrument data to S3 Bronze.")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="validate local configuration, files, and credentials without uploading",
+    )
+    arguments = parser.parse_args()
+    succeeded = validate_setup() if arguments.check else asyncio.run(main())
+    raise SystemExit(0 if succeeded else 1)

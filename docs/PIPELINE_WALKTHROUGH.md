@@ -55,10 +55,9 @@ across the field laptop, AWS, and Vercel:
  + SQLite buffer                      daily rebuild into {instrument}/silver/
        │                                    │
  checkpoint mirror  ◄────────────►    aq-dashboard-api Lambda
- {instrument}/checkpoints/              • /metrics dashboard summary
-   checkpoint.json                       • /silver-records browser
-                                         • /record-flags and /record-corrections
-                                         • Cost Explorer tile
+ {instrument}/checkpoints/              • /air-quality/v1/summary
+   checkpoint.json                       • /air-quality/v1/observations
+                                         • /air-quality/v1/timeseries + export
                                               │
                                          API Gateway ───────────────► dashboard
 ```
@@ -67,10 +66,10 @@ across the field laptop, AWS, and Vercel:
 
 | Component | Where | Cadence | Job |
 |---|---|---|---|
-| `upload_instrument_data.py` | laptop | every 5 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
+| `upload_instrument_data.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
 | `aq-silver-builder` | AWS Lambda | daily EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
-| `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve review APIs, and assemble dashboard JSON |
-| `frontend` | Vercel | browser | render the dashboard, poll `/metrics`, and provide the local Data Review UI after deployment |
+| `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve public read APIs, and assemble dashboard JSON |
+| `frontend` | Vercel | browser | render the dashboard, poll the public summary endpoint, and provide the read-only Data Review UI after deployment |
 
 There are two schedules: the laptop upload schedule and the daily cloud Silver
 builder schedule. The API still counts Bronze live whenever the dashboard asks.
@@ -81,7 +80,7 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
 
 ```text
 .
-├── lambda_api.py                    # dashboard API Lambda: metrics + silver review API
+├── lambda_api.py                    # dashboard API Lambda: public API + dashboard summary
 ├── lambda/
 │   └── silver_builder.py            # deduplicates Bronze into Silver CSVs
 ├── instruments_config.json          # LOCAL instrument config (gitignored)
@@ -627,12 +626,17 @@ no static key ever has to live in the repo; the field laptop can still drop an
 There are two active AWS Lambdas for this pipeline:
 
 - `aq-silver-builder` rebuilds the Silver layer from Bronze daily.
-- `aq-dashboard-api` sits behind API Gateway and serves dashboard metrics and
-  review endpoints.
+- `aq-dashboard-api` sits behind API Gateway and serves the public read API plus
+  optional internal dashboard KPIs.
 
 There is no separate collector and no CloudWatch metrics. An earlier
 `dq_collector` Lambda that published metrics hourly was removed because it added
 cost and made the dashboard lag behind the data.
+
+MTD AWS account cost can still be shown to internal dashboard users through the
+Overview KPI card, but only when the API Lambda is deployed with
+`ENABLE_COST_KPI=1`. The public API tab and public API guide should not document
+cost as a public endpoint or public field.
 
 ### `aq-silver-builder` (scheduled, rebuilds Silver)
 
@@ -659,42 +663,51 @@ On every request the API does the following:
    many small batch files are read in parallel;
 3. reads each instrument's Silver metadata sidecar for `silverRows`;
 4. aggregates per instrument into `bronzeRows`, `bronzeSize`, `silverRows`, and
-   `lastUpdate`;
-5. reads month-to-date account cost from **Cost Explorer** (`us-east-1`).
+   `lastUpdate`.
 
 Because counting is live, the dashboard updates the moment you hit Refresh. Two
 short caches keep it fast: the whole inventory is cached for 30 seconds (so a
-burst of refreshes does not re-scan S3 every time) and the cost value for an hour
-(that call is slow and barely moves). The Lambda runs with 1 GB of memory (more
-memory means more CPU) and a 30 second timeout. It computes `refreshTime`,
-`systemStatus` (`ONLINE` if any data exists else `DEGRADED`), and the KPI block.
-Response is JSON with permissive CORS.
+burst of refreshes does not re-scan S3 every time). The Lambda runs with 1 GB of
+memory (more memory means more CPU) and a 30 second timeout. It computes
+`refreshTime`, `systemStatus` (`ONLINE` if any data exists else `DEGRADED`), and
+the KPI block. Response is JSON.
 
-### Review API routes
+### Public API routes
 
-`lambda_api.py` also supports these local code paths:
+`lambda_api.py` exposes these public read routes:
 
 | Route | Purpose |
 |---|---|
-| `GET /silver-records` | load Silver rows by instrument, time range, cursor, and limit |
-| `GET /record-flags` | list saved flag JSON objects for one instrument |
-| `POST /record-flags` | save a selected-row or time-range flag JSON object |
-| `GET /record-corrections` | list saved correction JSON objects for one instrument |
-| `POST /record-corrections` | save correction values for one selected Silver row |
+| `GET /air-quality/v1/summary` | dashboard summary payload |
+| `GET /air-quality/v1/timeseries` | hourly mean series for one instrument measurement |
+| `GET /air-quality/v1/observations/export` | short-lived export link for one cleaned CSV |
+| `GET /air-quality/v1/observations` | load cleaned rows by instrument, time range, cursor, and limit |
+| `POST /air-quality/v1/access-requests` | begin a verified request for read-only API access |
 
-Write routes require the Lambda environment variable `REVIEW_API_KEY`; without
-it, writes return `503`. For the current review flow, the dashboard can be
-opened with `?api_key=<review-api-key>`, and it passes that key to the AWS write
-endpoints as a URL query parameter.
+The public Vercel views are read-only. Record modification workflows remain in
+the Cognito-protected Team Console and fail closed if authorization or audit
+logging is unavailable.
+
+### Managed API access
+
+API key registration is an opt-in deployment feature. When enabled, a visitor
+submits a request and verifies their email. The verification flow generates one
+random read-only key, emails it to that same verified address, and stores only
+its one-way keyed hash. The public dashboard cannot list users, revoke keys, or
+reveal existing keys.
+
+Do not require API keys on the public data routes until the dashboard reads data
+through a server-side proxy. The current Vercel dashboard is a static browser
+application and cannot keep a shared key secret.
 
 > **Scale caveat:** the API recounts every bronze object on a cache miss. This is
 > fine at the current data size (a few seconds), but it grows with the data. The
 > durable fix, when needed, is to have the uploader keep a running count and write
 > it to a small file the API reads, instead of recounting live.
 
-> **Security caveat:** `/metrics` is public and unauthenticated and includes
-> `mtdCost`, so your AWS bill is readable by anyone with the URL. Drop `mtdCost`
-> from the public payload or put the API behind auth before sharing widely.
+> **Security caveat:** keep the public dashboard and API read-only. Do not pass
+> private access tokens in URLs because URLs appear in browser history, logs,
+> screenshots, and shared messages.
 
 ### Flow
 
@@ -703,7 +716,7 @@ uploader ──► bronze objects ──► silver_builder ──► silver obje
                      │                                  │
                      └──────────────► lambda_api ◄──────┘
                                       │
-                                      └──► API Gateway (/metrics + review routes) ──► dashboard
+                                      └──► API Gateway (public read routes) ──► dashboard
 ```
 
 ---
@@ -762,9 +775,13 @@ Legend: ✅ handled, ⚠️ known limitation / needs operator awareness.
 
 ```bash
 cd <repo root>
+python3 scripts/upload_instrument_data.py --check  # no-upload preflight
 python3 scripts/upload_instrument_data.py
 tail -f collector.log         # watch results
 ```
+
+On Windows, follow [`FIELD_LAPTOP_SETUP.md`](FIELD_LAPTOP_SETUP.md) for the
+complete first-install and Task Scheduler checklist.
 
 ### Install the scheduler
 
@@ -862,9 +879,8 @@ each batch is a distinct, traceable bronze object.
 | Silent instrument | reports `ok`, not `degraded` | add a `stale` status + threshold |
 | Live counting | API recounts all bronze per request, O(data) | uploader keeps a running count in a small file the API reads |
 | Buffer size | stores full `raw_data` | store metadata only, re-read on retry |
-| API | public, leaks `mtdCost` | drop the field or add auth |
 | Checkpoint growth | one entry per file ever seen | prune entries for files no longer matched |
-| Review writes | URL `api_key` is temporary and can appear in browser history or shared links | Cognito/API authorizer if many users need controlled access |
+| Review workflow | private Cognito-protected Team Console | keep public views read-only and review role/audit settings periodically |
 | Medallion | Silver exists as CSV, Gold is only partial | define Gold aggregates, then consider Parquet + Glue Catalog if data grows |
 
 ---
@@ -904,6 +920,10 @@ Bronze row counts are counted live from S3 on each request (cached 30s), so they
 update on Refresh. Silver row counts come from Silver metadata sidecars. There is
 no CloudWatch and no separate collector; an earlier hourly `dq_collector` was
 removed because it cost money and lagged behind the data.
+
+**Q: Can internal users see MTD AWS cost?**
+Yes, but only if the API Lambda is deployed with `ENABLE_COST_KPI=1`. Keep that
+out of public API documentation.
 
 **Q: Is Athena used?**
 Not today. It only becomes useful once Silver/Gold Parquet exists to query.
