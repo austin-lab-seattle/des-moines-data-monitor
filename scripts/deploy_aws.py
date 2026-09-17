@@ -485,13 +485,13 @@ silver_lambda_arn = create_or_update_lambda(
     300,
 )
 
-print("\nScheduling the Silver builder (daily)...")
+print("\nScheduling the Silver builder (every 15 minutes)...")
 SILVER_RULE_NAME = "silver-builder-daily"
 silver_rule = events_client.put_rule(
     Name=SILVER_RULE_NAME,
-    ScheduleExpression="rate(1 day)",
+    ScheduleExpression="rate(15 minutes)",
     State="ENABLED",
-    Description="Rebuilds the Silver layer from Bronze once a day.",
+    Description="Rebuilds the Silver layer from Bronze every 15 minutes.",
 )
 events_client.put_targets(
     Rule=SILVER_RULE_NAME,
@@ -507,7 +507,7 @@ try:
     )
 except lambda_client.exceptions.ResourceConflictException:
     pass
-print(f"EventBridge rule {SILVER_RULE_NAME} configured (daily).")
+print(f"EventBridge rule {SILVER_RULE_NAME} configured (every 15 minutes).")
 
 print("\nRemoving the retired dq_collector (CloudWatch metrics are no longer used)...")
 for rule_name in [DQ_RULE_NAME] + LEGACY_DQ_RULE_NAMES:
