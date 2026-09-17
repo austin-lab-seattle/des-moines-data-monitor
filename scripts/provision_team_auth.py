@@ -24,6 +24,7 @@ DOMAIN_PREFIX = "des-moines-air-team-213598695875"
 CLIENT_NAME = "DesMoinesAirTeamConsole"
 INITIAL_ADMIN = os.environ.get("TEAM_INITIAL_ADMIN", "pavands@uw.edu").strip().lower()
 CALLBACK_URLS = [
+    "https://deohs-des-moines-air.vercel.app/team",
     "https://project-kv69p.vercel.app/team",
     "http://127.0.0.1:5173/team",
     "http://localhost:5173/team",

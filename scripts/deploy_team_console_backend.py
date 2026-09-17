@@ -138,7 +138,12 @@ def ensure_authorizer(api, lambda_arn):
     api.update_api(
         ApiId=API_ID,
         CorsConfiguration={
-            "AllowOrigins": ["https://project-kv69p.vercel.app", "http://127.0.0.1:5173", "http://localhost:5173"],
+            "AllowOrigins": [
+                "https://deohs-des-moines-air.vercel.app",
+                "https://project-kv69p.vercel.app",
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+            ],
             "AllowMethods": ["GET", "POST", "OPTIONS"],
             "AllowHeaders": ["content-type", "authorization", "x-api-key"],
             "MaxAge": 300,

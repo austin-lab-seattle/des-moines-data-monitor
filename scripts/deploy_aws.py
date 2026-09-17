@@ -541,6 +541,7 @@ else:
     print(f"Creating HTTP API {API_NAME}...")
 cors_config = {
     "AllowOrigins": [
+        "https://deohs-des-moines-air.vercel.app",
         "https://project-kv69p.vercel.app",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
