@@ -166,9 +166,16 @@ def check_backend_guardrails():
     if re.search(r'params\.get\(["\'](?:api_key|review_key)["\']\)', api_text):
         add("HIGH", "unsafe-review-auth", "lambda_api.py",
             "Review auth accepts keys from URL query parameters.")
-    if "ENABLE_REVIEW_WRITES" not in api_text:
+    has_review_write = "def write_review_item(" in api_text
+    has_team_claim_guard = (
+        "def require_team_role(" in api_text
+        and 'get("authorizer", {})' in api_text
+        and 'get("jwt", {})' in api_text
+        and 'INTERNAL_API_ROUTES["flags"]' in api_text
+    )
+    if has_review_write and not has_team_claim_guard:
         add("HIGH", "unsafe-review-auth", "lambda_api.py",
-            "Review writes do not appear to be gated by an explicit fail-closed backend toggle.")
+            "Review writes do not appear to require API Gateway-verified team identity and roles.")
     if "PUBLIC_API_KEY_REQUIRED" in api_text:
         if "API_KEY_HASH_PEPPER" not in api_text or "key_hash(" not in api_text:
             add("HIGH", "unsafe-api-key-auth", "lambda_api.py",
@@ -200,9 +207,13 @@ def check_deploy_guardrails():
     if allows_post and not has_access_request_route:
         add("HIGH", "browser-write-cors", "scripts/deploy_aws.py",
             "API Gateway CORS allows browser POST calls without a narrowly scoped access-request route.")
-    if re.search(r'"AllowHeaders"\s*:\s*\[[^\]]*(x-api-key|authorization)', text, re.S | re.I):
-        add("MEDIUM", "browser-write-cors", "scripts/deploy_aws.py",
-            "API Gateway CORS allows browser credential headers.")
+    credential_headers = re.search(
+        r'"AllowHeaders"\s*:\s*\[[^\]]*(x-api-key|authorization)', text, re.S | re.I
+    )
+    wildcard_origin = re.search(r'"AllowOrigins"\s*:\s*\[[^\]]*"\*"', text, re.S)
+    if credential_headers and wildcard_origin:
+        add("HIGH", "browser-write-cors", "scripts/deploy_aws.py",
+            "API Gateway allows browser credential headers from every origin.")
 
 
 def main():

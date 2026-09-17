@@ -22,7 +22,13 @@ const API_PATHS = {
   observationsExport: '/air-quality/v1/observations/export',
   accessRequests: '/air-quality/v1/access-requests',
 };
-const apiUrl = (path) => import.meta.env.DEV ? path : `${API_BASE_URL}${path}`;
+const RESEARCH_API_PATHS = {
+  summary: '/air-quality/v1/keyed/summary',
+  timeseries: '/air-quality/v1/keyed/timeseries',
+  observations: '/air-quality/v1/keyed/observations',
+  observationsExport: '/air-quality/v1/keyed/observations/export',
+};
+const apiUrl = (path) => path;
 const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
 const API_TIMEOUT_MS = 15000;
 const fetchApi = async (pathWithQuery, options = {}) => {
@@ -484,11 +490,11 @@ const PUBLIC_ENDPOINTS = [
   {
     id: 'metrics',
     method: 'GET',
-    path: API_PATHS.summary,
+    path: RESEARCH_API_PATHS.summary,
     title: 'Dashboard Summary',
     summary: 'Returns the public dashboard summary with upload freshness, instrument inventory, raw upload counts, cleaned row counts, and site status.',
     access: 'Read',
-    apiCall: documentedApiUrl(API_PATHS.summary),
+    apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.summary)}"`,
     params: [
       { name: 'None', required: '-', description: 'This endpoint does not require query parameters.' },
     ],
@@ -497,11 +503,11 @@ const PUBLIC_ENDPOINTS = [
   {
     id: 'series',
     method: 'GET',
-    path: API_PATHS.timeseries,
+    path: RESEARCH_API_PATHS.timeseries,
     title: 'Hourly Time Series',
     summary: 'Returns hourly mean values for one measurement from the cleaned records.',
     access: 'Read',
-    apiCall: `${documentedApiUrl(API_PATHS.timeseries)}?instrument=SMPS&measurement=Total%20Concentration%20(%23/cm%C2%B3)`,
+    apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.timeseries)}?instrument=SMPS&measurement=Total%20Concentration%20(%23/cm%C2%B3)"`,
     params: [
       { name: 'instrument', required: 'Yes', description: 'Instrument ID such as SMPS, NO2-CAPS, CO2-LICOR, NEPH-PM25, or BC-MA200.' },
       { name: 'measurement', required: 'No', description: 'Measurement column name. If omitted, the API chooses a default for the instrument.' },
@@ -513,11 +519,11 @@ const PUBLIC_ENDPOINTS = [
   {
     id: 'observations',
     method: 'GET',
-    path: API_PATHS.observations,
+    path: RESEARCH_API_PATHS.observations,
     title: 'Observations',
     summary: 'Returns paginated row-level cleaned records with timestamp and measurement values.',
     access: 'Read',
-    apiCall: `${documentedApiUrl(API_PATHS.observations)}?instrument=SMPS&limit=100&order=desc`,
+    apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.observations)}?instrument=SMPS&limit=100&order=desc"`,
     params: [
       { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
       { name: 'start', required: 'No', description: 'ISO timestamp filter.' },
@@ -531,11 +537,11 @@ const PUBLIC_ENDPOINTS = [
   {
     id: 'observations-export',
     method: 'GET',
-    path: API_PATHS.observationsExport,
+    path: RESEARCH_API_PATHS.observationsExport,
     title: 'Observation Export',
     summary: 'Returns metadata and a short-lived download URL for the full cleaned observation CSV.',
     access: 'Read',
-    apiCall: `${documentedApiUrl(API_PATHS.observationsExport)}?instrument=SMPS`,
+    apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.observationsExport)}?instrument=SMPS"`,
     params: [
       { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
     ],
@@ -564,7 +570,7 @@ api_key <- Sys.getenv("AQ_API_KEY")
 headers <- c("x-api-key" = api_key)
 
 # 1. Ask the API for a short-lived export link (valid ~5 min)
-response <- GET("${base}${API_PATHS.observationsExport}?instrument=${instrument}",
+response <- GET("${base}${RESEARCH_API_PATHS.observationsExport}?instrument=${instrument}",
                 add_headers(.headers = headers))
 stop_for_status(response)
 meta <- fromJSON(content(response, "text", encoding = "UTF-8"))
@@ -582,17 +588,19 @@ import pandas as pd
 
 # The API returns a short-lived download link; pandas reads it directly
 headers = {"x-api-key": os.environ["AQ_API_KEY"]}
-url = requests.get(
-    "${base}${API_PATHS.observationsExport}",
+response = requests.get(
+    "${base}${RESEARCH_API_PATHS.observationsExport}",
     params={"instrument": "${instrument}"},
     headers=headers,
-).json()["url"]
+)
+response.raise_for_status()
+url = response.json()["url"]
 
 df = pd.read_csv(url)
 print(df.shape)`;
     }
     return `# 1. Get a short-lived export link
-curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.observationsExport}?instrument=${instrument}"
+curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${base}${RESEARCH_API_PATHS.observationsExport}?instrument=${instrument}"
 
 # 2. Download using the "url" field from the JSON response
 curl -o ${instrument}_observations.csv "PASTE_URL_HERE"`;
@@ -607,7 +615,7 @@ api_key <- Sys.getenv("AQ_API_KEY")
 headers <- c("x-api-key" = api_key)
 
 # Hourly mean of one measurement. res$measurements lists the choices.
-response <- GET("${base}${API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}",
+response <- GET("${base}${RESEARCH_API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}",
                 add_headers(.headers = headers))
 stop_for_status(response)
 res <- fromJSON(content(response, "text", encoding = "UTF-8"))
@@ -621,16 +629,18 @@ import requests
 import pandas as pd
 
 headers = {"x-api-key": os.environ["AQ_API_KEY"]}
-res = requests.get("${base}${API_PATHS.timeseries}", params={
+response = requests.get("${base}${RESEARCH_API_PATHS.timeseries}", params={
     "instrument": "${instrument}",
     "measurement": "${measurement}",
-}, headers=headers).json()
+}, headers=headers)
+response.raise_for_status()
+res = response.json()
 
 ts = pd.DataFrame(res["series"])   # columns: t (hour, UTC), v (hourly mean)
 print(res["measurements"])          # available measurements
 ts.head()`;
     }
-    return `curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}"`;
+    return `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${base}${RESEARCH_API_PATHS.timeseries}?instrument=${instrument}&measurement=${encodedMeasurement}"`;
   }
 
   if (lang === 'r') {
@@ -641,7 +651,7 @@ api_key <- Sys.getenv("AQ_API_KEY")
 headers <- c("x-api-key" = api_key)
 
 # Paginated cleaned observations (100 per page)
-response <- GET("${base}${API_PATHS.observations}?instrument=${instrument}&limit=100",
+response <- GET("${base}${RESEARCH_API_PATHS.observations}?instrument=${instrument}&limit=100",
                 add_headers(.headers = headers))
 stop_for_status(response)
 res <- fromJSON(content(response, "text", encoding = "UTF-8"))
@@ -654,15 +664,17 @@ res$next_cursor            # pass as &cursor= to fetch the next page`;
 import requests
 
 headers = {"x-api-key": os.environ["AQ_API_KEY"]}
-res = requests.get("${base}${API_PATHS.observations}", params={
+response = requests.get("${base}${RESEARCH_API_PATHS.observations}", params={
     "instrument": "${instrument}",
     "limit": 100,
-}, headers=headers).json()
+}, headers=headers)
+response.raise_for_status()
+res = response.json()
 
 rows = res["rows"]                 # timestamp and measurement values
 next_cursor = res["next_cursor"]   # pass as cursor= for the next page`;
   }
-  return `curl -H "x-api-key: $AQ_API_KEY" "${base}${API_PATHS.observations}?instrument=${instrument}&limit=100"`;
+  return `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${base}${RESEARCH_API_PATHS.observations}?instrument=${instrument}&limit=100"`;
 }
 
 function ApiAccessDialog({ onClose }) {
@@ -702,7 +714,7 @@ function ApiAccessDialog({ onClose }) {
         throw new Error(payload.error || 'The access request service is not available at the moment.');
       }
       setState('success');
-      setMessage(payload.message || 'Check your email to verify this access request.');
+      setMessage(payload.message || 'Check your email for the verification link.');
       setForm({ name: '', email: '', organization: '', useCase: '' });
     } catch (error) {
       setState('error');
@@ -729,7 +741,7 @@ function ApiAccessDialog({ onClose }) {
           </button>
         </div>
         <p className="api-dialog-copy">
-          Requests are verified and reviewed before a personal read-only key is issued. API users cannot modify monitoring records.
+          Submit your email, open the verification link, and your personal read-only key will be generated and emailed automatically. API users cannot modify monitoring records.
         </p>
         <form className="api-dialog-form" onSubmit={submit}>
           <div className="api-dialog-fields">
@@ -867,7 +879,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
           <div className="api-sidebar-access">
             <span>API access</span>
             <strong>Personal read-only keys</strong>
-            <p>Keys are issued after verification and team approval.</p>
+            <p>Verify your email and your personal read-only key will be generated and emailed automatically.</p>
             <button className="api-text-button" type="button" onClick={() => { closeNav(); setAccessOpen(true); }}>Request a key</button>
           </div>
         </aside>
@@ -901,7 +913,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
               <div><p className="api-section-kicker">Authentication</p><h2>Use a personal API key</h2></div>
               <button className="api-primary-button" type="button" onClick={() => setAccessOpen(true)}><KeyRound size={16} /> Request API key</button>
             </div>
-            <p>The API is read-only. Pass your key in a request header. Do not place it in a URL, shared notebook, screenshot, or repository.</p>
+            <p>The researcher API is read-only and every documented endpoint requires a valid key. Pass it in a request header; invalid keys are rejected.</p>
             <pre className="api-header-example"><code>x-api-key: YOUR_API_KEY</code></pre>
           </section>
 
@@ -966,7 +978,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
 
           <section id="limits" className="api-portal-section api-limits-section">
             <div><p className="api-section-kicker">Usage</p><h2>Reasonable use</h2></div>
-            <p>Use pagination for row-level data, cache results in your analysis, and request a fresh export link for each download. Export links expire after a few minutes.</p>
+            <p>Each key is limited to 30 requests per minute and 5,000 requests per day. CSV exports are limited to 20 per day. Use pagination, cache analysis results, and request a fresh export link for each download.</p>
           </section>
         </main>
       </div>

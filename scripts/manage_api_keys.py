@@ -2,8 +2,8 @@
 """Private operator commands for API access requests and issued API keys.
 
 This script is deliberately not exposed through the public dashboard or API.
-It uses the operator's AWS identity to review verified access requests, issue a
-read-only key once, and revoke a key when needed.
+It uses the operator's AWS identity to review access requests, issue a read-only
+key once, email it automatically, and revoke a key when needed.
 
 Examples:
     python3 scripts/manage_api_keys.py list-pending
@@ -13,7 +13,7 @@ Examples:
 
 Set API_KEY_HASH_PEPPER and ACCESS_REQUEST_FROM_EMAIL in the operator's secure
 shell or secret manager before issuing a key. Approved keys are emailed only to
-the address that completed verification. Never put secrets in source code,
+the address on the approved request. Never put secrets in source code,
 docs, or a committed .env file.
 """
 
@@ -98,17 +98,17 @@ def list_requests(ddb):
     )
     items = result.get("Items", [])
     if not items:
-        print("No verified access requests are waiting for approval.")
+        print("No access requests are waiting for approval.")
         return
 
-    print("Verified access requests waiting for approval:\n")
+    print("Access requests waiting for approval:\n")
     for item in items:
         print(f"Request:      {string_value(item, 'request_id')}")
         print(f"Email:        {string_value(item, 'email')}")
         print(f"Name:         {string_value(item, 'name')}")
         print(f"Organization: {string_value(item, 'organization') or 'Not provided'}")
         print(f"Intended use: {string_value(item, 'use_case')}")
-        print(f"Verified:     {string_value(item, 'verified_at')}")
+        print(f"Submitted:    {string_value(item, 'created_at')}")
         print()
 
 
@@ -191,7 +191,7 @@ def approve_request(ddb, ses, request_id):
     if not request:
         raise RuntimeError("Access request was not found.")
     if string_value(request, "status") != "PENDING_APPROVAL":
-        raise RuntimeError("Only email-verified requests that are waiting for approval can receive a key.")
+        raise RuntimeError("Only requests that are waiting for approval can receive a key.")
 
     key_id = secrets.token_hex(8)
     raw_key = f"aqk_{key_id}_{secrets.token_urlsafe(32)}"
@@ -250,7 +250,7 @@ def approve_request(ddb, ses, request_id):
             "to PENDING_APPROVAL; fix SES delivery and approve it again."
         ) from email_error
 
-    print(f"Read-only API key emailed to the verified address for request {request_id}.")
+    print(f"Read-only API key emailed to the approved request address for {request_id}.")
     print(f"Key ID: {key_id}")
     print("Scopes: " + ", ".join(READ_SCOPES))
 
@@ -299,12 +299,12 @@ def revoke_key(ddb, key_id):
 def build_parser():
     parser = argparse.ArgumentParser(description="Manage private API access requests and keys.")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("list-pending", help="List email-verified requests waiting for approval.")
+    subcommands.add_parser("list-pending", help="List requests waiting for approval.")
     subcommands.add_parser("list-active", help="List active API key IDs and their owners.")
 
     approve = subcommands.add_parser(
         "approve",
-        help="Approve a request and email a one-time API key to its verified address.",
+        help="Approve a request and email a one-time API key to its submitted address.",
     )
     approve.add_argument("--request-id", required=True, type=uuid.UUID)
 

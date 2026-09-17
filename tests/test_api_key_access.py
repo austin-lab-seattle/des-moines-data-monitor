@@ -5,13 +5,13 @@ import re
 import sys
 import types
 import unittest
-from urllib.parse import parse_qs, urlparse
 
 
 class FakeDynamoDb:
     def __init__(self):
         self.requests = {}
         self.keys = {}
+        self.counters = {}
 
     def query(self, **_kwargs):
         return {"Items": []}
@@ -22,19 +22,6 @@ class FakeDynamoDb:
         else:
             self.keys[Item["key_id"]["S"]] = Item
 
-    def delete_item(self, TableName, Key):
-        if TableName == "AQApiAccessRequests":
-            self.requests.pop(Key["request_id"]["S"], None)
-
-    def update_item(self, TableName, Key, ExpressionAttributeValues, **_kwargs):
-        request = self.requests[Key["request_id"]["S"]]
-        supplied_hash = ExpressionAttributeValues[":token_hash"]["S"]
-        self.assert_token_matches(request, supplied_hash)
-        request["status"] = ExpressionAttributeValues[":approved"]
-        request["verified_at"] = ExpressionAttributeValues[":verified_at"]
-        request.pop("verification_token_hash", None)
-        return {}
-
     def get_item(self, TableName, Key, **_kwargs):
         if TableName == "AQApiKeys":
             item = self.keys.get(Key["key_id"]["S"])
@@ -42,19 +29,32 @@ class FakeDynamoDb:
         item = self.requests.get(Key["request_id"]["S"])
         return {"Item": item} if item else {}
 
-    @staticmethod
-    def assert_token_matches(request, supplied_hash):
-        if request["verification_token_hash"]["S"] != supplied_hash:
-            raise ValueError("verification token mismatch")
+    def transact_write_items(self, TransactItems):
+        for operation in TransactItems:
+            if "Put" in operation:
+                item = operation["Put"]["Item"]
+                self.keys[item["key_id"]["S"]] = item
+                continue
+            update = operation["Update"]
+            request = self.requests[update["Key"]["request_id"]["S"]]
+            values = update["ExpressionAttributeValues"]
+            request["status"] = values[":active"]
+            request["verified_at"] = values[":verified_at"]
+            request["key_id"] = values[":key_id"]
+            request.pop("verification_token_hash", None)
+
+    def update_item(self, TableName, Key, **_kwargs):
+        if TableName == "AQApiRateLimits":
+            counter_id = Key["counter_id"]["S"]
+            self.counters[counter_id] = self.counters.get(counter_id, 0) + 1
 
 
 class FakeSes:
     def __init__(self):
         self.messages = []
 
-    def send_email(self, **kwargs):
-        self.messages.append(kwargs)
-
+    def send_email(self, **message):
+        self.messages.append(message)
 
 class FakeS3:
     pass
@@ -85,13 +85,14 @@ class ApiKeyAccessTests(unittest.TestCase):
     def setUp(self):
         fake_dynamodb.requests.clear()
         fake_dynamodb.keys.clear()
+        fake_dynamodb.counters.clear()
         fake_ses.messages.clear()
         lambda_api.ENABLE_API_KEY_REGISTRATION = True
         lambda_api.PUBLIC_API_KEY_REQUIRED = True
         lambda_api.ACCESS_REQUEST_FROM_EMAIL = "api-access@example.org"
         lambda_api.API_KEY_HASH_PEPPER = "unit-test-only-pepper"
 
-    def test_request_verification_and_hashed_key_validation(self):
+    def test_email_verification_automatically_issues_and_emails_key(self):
         request_event = {
             "headers": {"host": "api.example.org", "x-forwarded-proto": "https"},
             "body": json.dumps({
@@ -103,38 +104,39 @@ class ApiKeyAccessTests(unittest.TestCase):
         }
         created = lambda_api.create_access_request(request_event)
         self.assertEqual(created["statusCode"], 202)
-        self.assertEqual(len(fake_ses.messages), 1)
 
         request = next(iter(fake_dynamodb.requests.values()))
+        self.assertEqual(request["status"]["S"], "PENDING_VERIFICATION")
         self.assertIn("verification_token_hash", request)
-        self.assertNotIn("verification_token", request)
-        email_text = fake_ses.messages[0]["Message"]["Body"]["Text"]["Data"]
-        verification_url = re.search(r"https://\S+", email_text).group(0)
-        query = parse_qs(urlparse(verification_url).query)
+        self.assertEqual(len(fake_ses.messages), 1)
+        verification_text = fake_ses.messages[0]["Message"]["Body"]["Text"]["Data"]
+        raw_token = re.search(r"token=(aqv_[A-Za-z0-9_-]+)", verification_text).group(1)
         verified = lambda_api.verify_access_request({
-            "queryStringParameters": {
-                "request_id": query["request_id"][0],
-                "token": query["token"][0],
-            }
+            "queryStringParameters": {"token": raw_token},
         })
         self.assertEqual(verified["statusCode"], 200)
-        self.assertEqual(request["status"]["S"], "PENDING_APPROVAL")
-        self.assertNotIn("verification_token_hash", request)
-
-        raw_key = "aqk_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEF1234567890_-"
-        fake_dynamodb.keys["0123456789abcdef"] = {
-            "key_id": {"S": "0123456789abcdef"},
-            "status": {"S": "ACTIVE"},
-            "key_hash": {"S": lambda_api.key_hash(raw_key)},
-            "scopes": {"SS": ["read:summary"]},
-        }
+        self.assertEqual(len(fake_ses.messages), 2)
+        key_text = fake_ses.messages[1]["Message"]["Body"]["Text"]["Data"]
+        raw_key = re.search(r"API key: (aqk_[A-Za-z0-9_-]+)", key_text).group(1)
+        key_id = lambda_api.API_KEY_PATTERN.fullmatch(raw_key).group(1)
+        self.assertNotEqual(fake_dynamodb.keys[key_id]["key_hash"]["S"], raw_key)
         allowed = lambda_api.require_public_api_access(
             {"headers": {"x-api-key": raw_key}},
             "read:summary",
         )
         self.assertIsNone(allowed)
+        self.assertEqual(len(fake_dynamodb.counters), 2)
         missing = lambda_api.require_public_api_access({"headers": {}}, "read:summary")
         self.assertEqual(missing["statusCode"], 401)
+
+        lambda_api.PUBLIC_API_KEY_REQUIRED = False
+        anonymous = lambda_api.require_public_api_access({"headers": {}}, "read:summary")
+        self.assertIsNone(anonymous)
+        invalid = lambda_api.require_public_api_access(
+            {"headers": {"x-api-key": "definitely-wrong"}},
+            "read:summary",
+        )
+        self.assertEqual(invalid["statusCode"], 403)
 
     def test_key_hash_is_one_way(self):
         raw_key = "aqk_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEF1234567890_-"

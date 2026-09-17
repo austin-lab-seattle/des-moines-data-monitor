@@ -64,7 +64,7 @@ class ManageApiKeysTests(unittest.TestCase):
         manage_api_keys.API_KEY_HASH_PEPPER = "unit-test-only-pepper"
         manage_api_keys.ACCESS_REQUEST_FROM_EMAIL = "api-access@example.org"
 
-    def test_approval_emails_key_to_verified_address_without_printing_it(self):
+    def test_approval_emails_key_to_request_address_without_printing_it(self):
         ddb = FakeDynamoDb()
         ses = FakeSes()
         output = io.StringIO()

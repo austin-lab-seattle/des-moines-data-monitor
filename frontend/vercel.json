@@ -1,0 +1,28 @@
+{
+  "rewrites": [
+    {
+      "source": "/team",
+      "destination": "/"
+    },
+    {
+      "source": "/air-quality/v1/summary",
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics"
+    },
+    {
+      "source": "/air-quality/v1/timeseries",
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/series"
+    },
+    {
+      "source": "/air-quality/v1/observations/export",
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/silver-download"
+    },
+    {
+      "source": "/air-quality/v1/observations",
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/silver-records"
+    },
+    {
+      "source": "/air-quality/v1/access-requests",
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/access-requests"
+    }
+  ]
+}

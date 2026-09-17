@@ -1,0 +1,43 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ApiFunctionAccessRequestKeyAndUsageRecordsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:TransactWriteItems"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiAccessRequests",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiKeys",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiRateLimits",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQAdminAudit"
+      ]
+    },
+    {
+      "Sid": "ApiFunctionQueryAccessIndexesOnly",
+      "Effect": "Allow",
+      "Action": "dynamodb:Query",
+      "Resource": [
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiAccessRequests",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiAccessRequests/index/*",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiKeys",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiKeys/index/*",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQAdminAudit",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQAdminAudit/index/*"
+      ]
+    },
+    {
+      "Sid": "ApiFunctionSendFromVerifiedUwAddressOnly",
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": "arn:aws:ses:us-west-2:213598695875:identity/pavands@uw.edu",
+      "Condition": {
+        "StringEquals": {"ses:FromAddress": "pavands@uw.edu"}
+      }
+    }
+  ]
+}

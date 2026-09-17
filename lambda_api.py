@@ -9,7 +9,6 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
 
 import boto3
 
@@ -19,13 +18,13 @@ ses_client = boto3.client("ses")
 
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
-REVIEW_API_KEY = os.environ.get("REVIEW_API_KEY")
-ENABLE_REVIEW_WRITES = os.environ.get("ENABLE_REVIEW_WRITES") == "1"
 ENABLE_COST_KPI = os.environ.get("ENABLE_COST_KPI") == "1"
 ENABLE_API_KEY_REGISTRATION = os.environ.get("ENABLE_API_KEY_REGISTRATION") == "1"
 PUBLIC_API_KEY_REQUIRED = os.environ.get("PUBLIC_API_KEY_REQUIRED") == "1"
 ACCESS_REQUESTS_TABLE = os.environ.get("ACCESS_REQUESTS_TABLE", "AQApiAccessRequests")
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "AQApiKeys")
+RATE_LIMITS_TABLE = os.environ.get("RATE_LIMITS_TABLE", "AQApiRateLimits")
+ADMIN_AUDIT_TABLE = os.environ.get("ADMIN_AUDIT_TABLE", "AQAdminAudit")
 API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
 ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
 API_ROUTES = {
@@ -34,7 +33,21 @@ API_ROUTES = {
     "observations": "/air-quality/v1/observations",
     "observations_export": "/air-quality/v1/observations/export",
     "access_requests": "/air-quality/v1/access-requests",
-    "access_verify": "/air-quality/v1/access-requests/verify",
+    "verify_access": "/air-quality/v1/access-requests/verify",
+}
+KEYED_API_ROUTES = {
+    "summary": "/air-quality/v1/keyed/summary",
+    "timeseries": "/air-quality/v1/keyed/timeseries",
+    "observations": "/air-quality/v1/keyed/observations",
+    "observations_export": "/air-quality/v1/keyed/observations/export",
+}
+INTERNAL_API_ROUTES = {
+    "api_users": "/air-quality/internal/v1/api-users",
+    "api_users_revoke": "/air-quality/internal/v1/api-users/revoke",
+    "observations": "/air-quality/internal/v1/observations",
+    "flags": "/air-quality/internal/v1/flags",
+    "corrections": "/air-quality/internal/v1/corrections",
+    "audit": "/air-quality/internal/v1/audit",
 }
 LEGACY_API_ROUTES = {
     "summary": "/metrics",
@@ -69,8 +82,8 @@ def iter_s3_objects(prefix):
 def response(status_code, payload=None, extra_headers=None):
     headers = {
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET,OPTIONS",
-        "Access-Control-Allow-Headers": "content-type",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "content-type,authorization",
         "Content-Type": "application/json",
     }
     if extra_headers:
@@ -147,33 +160,61 @@ def normalized_headers(event):
     return {key.lower(): value for key, value in (event.get("headers") or {}).items()}
 
 
-def require_review_auth(event):
-    if not ENABLE_REVIEW_WRITES:
-        return False, response(403, {"error": "Forbidden"})
-    if not REVIEW_API_KEY:
-        return False, response(
-            503,
-            {
-                "error": "Review writes are not configured",
-                "message": "Set REVIEW_API_KEY on the API Lambda before enabling write routes.",
-            },
-        )
-    headers = normalized_headers(event)
-    authorization = headers.get("authorization", "")
-    provided = headers.get("x-api-key")
-    if not provided and authorization.lower().startswith("bearer "):
-        provided = authorization[7:].strip()
-    if not provided or not hmac.compare_digest(str(provided), REVIEW_API_KEY):
-        return False, response(403, {"error": "Forbidden"})
-    return True, None
+TEAM_ROLES = {"Admin", "Reviewer", "AccessManager", "Viewer"}
+
+
+def _claim_groups(value):
+    """Normalize API Gateway's Cognito groups claim into a set."""
+    if isinstance(value, list):
+        return {str(group) for group in value}
+    if not value:
+        return set()
+    text = str(value).strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return {str(group) for group in parsed}
+        except json.JSONDecodeError:
+            text = text.strip("[]")
+    return {group.strip().strip("'\"") for group in text.split(",") if group.strip()}
+
+
+def team_identity(event):
+    """Trust claims only after an API Gateway JWT authorizer has verified them."""
+    claims = (
+        event.get("requestContext", {})
+        .get("authorizer", {})
+        .get("jwt", {})
+        .get("claims", {})
+    )
+    subject = str(claims.get("sub") or "").strip()
+    email = normalize_email(claims.get("email"))
+    groups = _claim_groups(claims.get("cognito:groups") or claims.get("groups"))
+    roles = groups & TEAM_ROLES
+    if not subject or not email:
+        return None
+    return {"subject": subject, "email": email, "roles": roles}
+
+
+def require_team_role(event, allowed_roles):
+    identity = team_identity(event)
+    if not identity:
+        return None, response(401, {"error": "Team sign-in required"})
+    if not identity["roles"].intersection(set(allowed_roles)):
+        return None, response(403, {"error": "Your team role does not allow this action"})
+    return identity, None
 
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 API_KEY_PATTERN = re.compile(r"^aqk_([a-z0-9]{16})_([A-Za-z0-9_-]{32,})$")
-REQUEST_ID_PATTERN = re.compile(r"^[a-f0-9-]{36}$")
+VERIFICATION_TOKEN_PATTERN = re.compile(r"^aqv_([0-9a-f-]{36})_([A-Za-z0-9_-]{32,})$")
 ACCESS_REQUEST_WINDOW_SECONDS = 24 * 60 * 60
-VERIFICATION_WINDOW_SECONDS = 7 * 24 * 60 * 60
 ACCESS_REQUEST_RETENTION_SECONDS = 90 * 24 * 60 * 60
+VERIFICATION_WINDOW_SECONDS = 30 * 60
+PER_MINUTE_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "30"))
+PER_DAY_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_DAY", "5000"))
+EXPORTS_PER_DAY_LIMIT = int(os.environ.get("API_EXPORT_LIMIT_PER_DAY", "20"))
 READ_SCOPES = {
     "summary": "read:summary",
     "timeseries": "read:timeseries",
@@ -213,7 +254,7 @@ def limit_text(value, maximum):
 
 
 def access_registration_ready():
-    return ENABLE_API_KEY_REGISTRATION and bool(ACCESS_REQUEST_FROM_EMAIL)
+    return bool(ENABLE_API_KEY_REGISTRATION and API_KEY_HASH_PEPPER and ACCESS_REQUEST_FROM_EMAIL)
 
 
 def key_hash(raw_key):
@@ -224,6 +265,46 @@ def key_hash(raw_key):
         raw_key.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
+
+
+def verification_email(request, raw_token, event):
+    recipient = ddb_string(request, "email")
+    name = ddb_string(request, "name") or "researcher"
+    verification_url = f"{request_base_url(event)}{API_ROUTES['verify_access']}?token={raw_token}"
+    text = (
+        f"Hello {name},\n\n"
+        "Verify your email address to receive a personal read-only Des Moines Air Quality API key.\n\n"
+        f"Verify email: {verification_url}\n\n"
+        "This link expires in 30 minutes and can be used once. If you did not request an API key, ignore this message.\n"
+    )
+    return {
+        "Source": ACCESS_REQUEST_FROM_EMAIL,
+        "Destination": {"ToAddresses": [recipient]},
+        "Message": {
+            "Subject": {"Data": "Verify your Des Moines Air Quality API request", "Charset": "UTF-8"},
+            "Body": {"Text": {"Data": text, "Charset": "UTF-8"}},
+        },
+    }
+
+
+def key_delivery_email(request, raw_key, key_id):
+    recipient = ddb_string(request, "email")
+    name = ddb_string(request, "name") or "researcher"
+    text = (
+        f"Hello {name},\n\nYour email has been verified. Here is your personal read-only Des Moines Air Quality API key.\n\n"
+        f"API key: {raw_key}\nKey ID: {key_id}\n\n"
+        "Send the key only in the x-api-key request header. Store it in a secret manager or environment variable. "
+        "Do not put it in a URL, repository, notebook, screenshot, or shared document.\n\n"
+        "This key cannot change or flag observations.\n"
+    )
+    return {
+        "Source": ACCESS_REQUEST_FROM_EMAIL,
+        "Destination": {"ToAddresses": [recipient]},
+        "Message": {
+            "Subject": {"Data": "Your Des Moines Air Quality API key", "Charset": "UTF-8"},
+            "Body": {"Text": {"Data": text, "Charset": "UTF-8"}},
+        },
+    }
 
 
 def find_recent_access_request(email):
@@ -239,29 +320,8 @@ def find_recent_access_request(email):
     return items[0] if items else None
 
 
-def access_request_email(verification_url):
-    return {
-        "Source": ACCESS_REQUEST_FROM_EMAIL,
-        "Destination": {"ToAddresses": []},
-        "Message": {
-            "Subject": {"Data": "Verify your Des Moines Air Quality API access request"},
-            "Body": {
-                "Text": {
-                    "Data": (
-                        "We received an API access request for this email address.\n\n"
-                        "Verify the request by opening this link:\n"
-                        f"{verification_url}\n\n"
-                        "After verification, the project team will review the request. "
-                        "If you did not request access, you can ignore this email."
-                    )
-                }
-            },
-        },
-    }
-
-
 def create_access_request(event):
-    """Accept a public read-only access request and send a verification email."""
+    """Email a short-lived ownership check before issuing an API key."""
     if not access_registration_ready():
         return access_response(503, {"error": "API access registration is not available"})
 
@@ -284,24 +344,31 @@ def create_access_request(event):
         recent_request = find_recent_access_request(email)
         recent_created = ddb_number(recent_request, "created_at_epoch", 0) or 0
         recent_status = ddb_string(recent_request, "status")
+        recent_verification_expiry = (
+            ddb_number(recent_request, "verification_expires_epoch", 0) or 0
+        )
+        if recent_request and recent_status == "ACTIVE":
+            return access_response(202, {
+                "message": (
+                    "A personal API key has already been issued to this address. "
+                    "Contact the project team if it must be revoked or replaced."
+                ),
+            })
         if (
             recent_request
             and now_epoch - recent_created < ACCESS_REQUEST_WINDOW_SECONDS
-            and recent_status in {"PENDING_VERIFICATION", "PENDING_APPROVAL", "APPROVED"}
+            and recent_status == "PENDING_VERIFICATION"
+            and recent_verification_expiry > now_epoch
         ):
             return access_response(202, {
-                "message": "If this email can receive a new request, a verification message will arrive shortly.",
+                "message": "Check your email for the verification link.",
             })
     except Exception as exc:
         print(f"Could not check API access request state: {exc}")
         return access_response(503, {"error": "API access registration is temporarily unavailable"})
 
     request_id = str(uuid.uuid4())
-    verification_token = secrets.token_urlsafe(32)
-    verification_url = (
-        f"{request_base_url(event)}{API_ROUTES['access_verify']}?"
-        f"{urlencode({'request_id': request_id, 'token': verification_token})}"
-    )
+    raw_token = f"aqv_{request_id}_{secrets.token_urlsafe(32)}"
     item = {
         "request_id": {"S": request_id},
         "email": {"S": email},
@@ -309,10 +376,10 @@ def create_access_request(event):
         "organization": {"S": organization},
         "use_case": {"S": use_case},
         "status": {"S": "PENDING_VERIFICATION"},
+        "verification_token_hash": {"S": key_hash(raw_token)},
+        "verification_expires_epoch": {"N": str(now_epoch + VERIFICATION_WINDOW_SECONDS)},
         "created_at": {"S": now.isoformat()},
         "created_at_epoch": {"N": str(now_epoch)},
-        "verification_token_hash": {"S": hashlib.sha256(verification_token.encode("utf-8")).hexdigest()},
-        "verification_expires_at": {"N": str(now_epoch + VERIFICATION_WINDOW_SECONDS)},
         "ttl": {"N": str(now_epoch + ACCESS_REQUEST_RETENTION_SECONDS)},
     }
     try:
@@ -321,65 +388,112 @@ def create_access_request(event):
             Item=item,
             ConditionExpression="attribute_not_exists(request_id)",
         )
-        email_payload = access_request_email(verification_url)
-        email_payload["Destination"]["ToAddresses"] = [email]
-        ses_client.send_email(**email_payload)
+        ses_client.send_email(**verification_email(item, raw_token, event))
     except Exception as exc:
         print(f"Could not create API access request: {exc}")
-        try:
-            dynamodb_client.delete_item(
-                TableName=ACCESS_REQUESTS_TABLE,
-                Key={"request_id": {"S": request_id}},
-            )
-        except Exception:
-            pass
         return access_response(503, {"error": "API access registration is temporarily unavailable"})
 
     return access_response(202, {
-        "message": "Check your email to verify this access request.",
+        "message": "Check your email and open the verification link within 30 minutes.",
     })
 
 
 def verify_access_request(event):
     if not access_registration_ready():
-        return access_response(404, {"error": "Route not found"})
+        return access_response(503, {"error": "API access registration is not available"})
+    raw_token = str(query_params(event).get("token") or "").strip()
+    match = VERIFICATION_TOKEN_PATTERN.fullmatch(raw_token)
+    if not match:
+        return access_response(400, {"error": "Invalid verification link"})
 
-    params = query_params(event)
-    request_id = str(params.get("request_id") or "")
-    token = str(params.get("token") or "")
-    if not REQUEST_ID_PATTERN.fullmatch(request_id) or len(token) < 32:
-        return access_response(400, {"error": "This verification link is invalid or has expired"})
-
+    request_id = match.group(1)
     now = datetime.now(timezone.utc)
     now_epoch = int(now.timestamp())
-    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     try:
-        dynamodb_client.update_item(
+        result = dynamodb_client.get_item(
             TableName=ACCESS_REQUESTS_TABLE,
             Key={"request_id": {"S": request_id}},
-            UpdateExpression=(
-                "SET #status = :approved, verified_at = :verified_at "
-                "REMOVE verification_token_hash"
-            ),
-            ConditionExpression=(
-                "#status = :pending AND verification_token_hash = :token_hash "
-                "AND verification_expires_at >= :now"
-            ),
-            ExpressionAttributeNames={"#status": "status"},
-            ExpressionAttributeValues={
-                ":approved": {"S": "PENDING_APPROVAL"},
-                ":pending": {"S": "PENDING_VERIFICATION"},
-                ":verified_at": {"S": now.isoformat()},
-                ":token_hash": {"S": token_hash},
-                ":now": {"N": str(now_epoch)},
-            },
+            ConsistentRead=True,
         )
+        request = result.get("Item")
+        expected_hash = ddb_string(request, "verification_token_hash")
+        if (
+            not request
+            or ddb_string(request, "status") != "PENDING_VERIFICATION"
+            or not expected_hash
+            or now_epoch > (ddb_number(request, "verification_expires_epoch", 0) or 0)
+            or not hmac.compare_digest(key_hash(raw_token), expected_hash)
+        ):
+            return access_response(400, {"error": "Verification link is invalid or expired"})
+
+        key_id = secrets.token_hex(8)
+        raw_key = f"aqk_{key_id}_{secrets.token_urlsafe(32)}"
+        key_item = {
+            "key_id": {"S": key_id},
+            "key_hash": {"S": key_hash(raw_key)},
+            "status": {"S": "ACTIVE"},
+            "request_id": {"S": request_id},
+            "email": {"S": ddb_string(request, "email")},
+            "scopes": {"SS": list(READ_SCOPES.values())},
+            "created_at": {"S": now.isoformat()},
+            "created_at_epoch": {"N": str(now_epoch)},
+        }
+        dynamodb_client.transact_write_items(TransactItems=[
+            {"Put": {
+                "TableName": API_KEYS_TABLE,
+                "Item": key_item,
+                "ConditionExpression": "attribute_not_exists(key_id)",
+            }},
+            {"Update": {
+                "TableName": ACCESS_REQUESTS_TABLE,
+                "Key": {"request_id": {"S": request_id}},
+                "UpdateExpression": (
+                    "SET #status = :active, verified_at = :verified_at, key_id = :key_id "
+                    "REMOVE verification_token_hash"
+                ),
+                "ConditionExpression": "#status = :pending",
+                "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {
+                    ":active": {"S": "ACTIVE"},
+                    ":pending": {"S": "PENDING_VERIFICATION"},
+                    ":verified_at": {"S": now.isoformat()},
+                    ":key_id": {"S": key_id},
+                },
+            }},
+        ])
+        try:
+            ses_client.send_email(**key_delivery_email(request, raw_key, key_id))
+        except Exception:
+            failed_at = datetime.now(timezone.utc).isoformat()
+            dynamodb_client.transact_write_items(TransactItems=[
+                {"Update": {
+                    "TableName": API_KEYS_TABLE,
+                    "Key": {"key_id": {"S": key_id}},
+                    "UpdateExpression": "SET #status = :revoked, revoked_at = :failed_at",
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {
+                        ":revoked": {"S": "REVOKED"},
+                        ":failed_at": {"S": failed_at},
+                    },
+                }},
+                {"Update": {
+                    "TableName": ACCESS_REQUESTS_TABLE,
+                    "Key": {"request_id": {"S": request_id}},
+                    "UpdateExpression": "SET #status = :failed, delivery_failed_at = :failed_at",
+                    "ExpressionAttributeNames": {"#status": "status"},
+                    "ExpressionAttributeValues": {
+                        ":failed": {"S": "DELIVERY_FAILED"},
+                        ":failed_at": {"S": failed_at},
+                    },
+                }},
+            ])
+            raise
     except Exception as exc:
         print(f"Could not verify API access request: {exc}")
-        return access_response(400, {"error": "This verification link is invalid or has expired"})
+        return access_response(503, {"error": "API key delivery is temporarily unavailable"})
 
     return access_response(200, {
-        "message": "Email verified. Your access request is waiting for team approval.",
+        "message": "Email verified. Your personal API key has been emailed to you."
     })
 
 
@@ -392,15 +506,83 @@ def public_api_key(event):
     return str(key).strip()
 
 
-def require_public_api_access(event, required_scope):
+def increment_rate_counter(counter_id, limit, ttl, retry_after):
+    try:
+        dynamodb_client.update_item(
+            TableName=RATE_LIMITS_TABLE,
+            Key={"counter_id": {"S": counter_id}},
+            UpdateExpression="SET #ttl = :ttl ADD request_count :one",
+            ConditionExpression="attribute_not_exists(request_count) OR request_count < :limit",
+            ExpressionAttributeNames={"#ttl": "ttl"},
+            ExpressionAttributeValues={
+                ":ttl": {"N": str(ttl)},
+                ":one": {"N": "1"},
+                ":limit": {"N": str(limit)},
+            },
+        )
+        return None
+    except Exception as exc:
+        error_code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+        if error_code == "ConditionalCheckFailedException":
+            return response(
+                429,
+                {"error": "API rate limit exceeded"},
+                {"Retry-After": str(retry_after)},
+            )
+        print(f"Could not update API rate counter: {exc}")
+        return response(503, {"error": "API rate limiting is temporarily unavailable"})
+
+
+def enforce_rate_limit(key_id, required_scope):
+    now = datetime.now(timezone.utc)
+    now_epoch = int(now.timestamp())
+    minute_bucket = now_epoch // 60
+    result = increment_rate_counter(
+        f"{key_id}:minute:{minute_bucket}",
+        PER_MINUTE_LIMIT,
+        now_epoch + 120,
+        max(1, 60 - (now_epoch % 60)),
+    )
+    if result:
+        return result
+
+    day_bucket = now.strftime("%Y-%m-%d")
+    day_limit = EXPORTS_PER_DAY_LIMIT if required_scope == READ_SCOPES["observations_export"] else PER_DAY_LIMIT
+    counter_type = "exports" if required_scope == READ_SCOPES["observations_export"] else "requests"
+    result = increment_rate_counter(
+        f"{key_id}:{counter_type}:{day_bucket}",
+        day_limit,
+        now_epoch + (2 * 24 * 60 * 60),
+        24 * 60 * 60,
+    )
+    if result:
+        return result
+    try:
+        dynamodb_client.update_item(
+            TableName=API_KEYS_TABLE,
+            Key={"key_id": {"S": key_id}},
+            UpdateExpression="SET last_used_at = :now, last_used_at_epoch = :epoch",
+            ExpressionAttributeValues={
+                ":now": {"S": now.isoformat()},
+                ":epoch": {"N": str(now_epoch)},
+            },
+        )
+    except Exception as exc:
+        # Authentication and rate limiting succeeded; usage metadata is useful
+        # for operators but must not make an otherwise valid research request fail.
+        print(f"Could not update API key last-used metadata: {exc}")
+    return None
+
+
+def require_public_api_access(event, required_scope, force=False):
     """Validate an issued API key when key enforcement is explicitly enabled."""
-    if not PUBLIC_API_KEY_REQUIRED:
+    supplied_key = public_api_key(event)
+    if not PUBLIC_API_KEY_REQUIRED and not force and not supplied_key:
         return None
     if not API_KEY_HASH_PEPPER:
         print("Public API key enforcement enabled without API_KEY_HASH_PEPPER")
         return response(503, {"error": "API key authentication is not configured"})
 
-    supplied_key = public_api_key(event)
     if not supplied_key:
         return response(401, {"error": "API key required"})
     match = API_KEY_PATTERN.fullmatch(supplied_key)
@@ -428,7 +610,7 @@ def require_public_api_access(event, required_scope):
         or required_scope not in ddb_string_list(item, "scopes")
     ):
         return response(403, {"error": "Invalid API key"})
-    return None
+    return enforce_rate_limit(key_id, required_scope)
 
 
 # --- Row detection: which lines are real data rows vs headers and comments ---
@@ -818,11 +1000,7 @@ def get_review_items(event, review_type):
     return response(200, {"instrument_id": instrument_id, review_type: items})
 
 
-def write_review_item(event, review_type):
-    authorized, auth_response = require_review_auth(event)
-    if not authorized:
-        return auth_response
-
+def write_review_item(event, review_type, identity):
     payload = parse_body(event)
     if payload is None:
         return response(400, {"error": "Invalid JSON body"})
@@ -842,6 +1020,8 @@ def write_review_item(event, review_type):
         "reason": payload.get("reason", ""),
         "notes": payload.get("notes", ""),
         "created_at": now.isoformat(),
+        "created_by": identity["email"],
+        "created_by_subject": identity["subject"],
     }
 
     for key in [
@@ -857,6 +1037,8 @@ def write_review_item(event, review_type):
             item[key] = payload[key]
 
     if review_type == "flags":
+        if not limit_text(item.get("reason"), 500):
+            return response(400, {"error": "A flag reason is required"})
         if item["scope"] == "time_range" and (not item.get("start_time") or not item.get("end_time")):
             return response(400, {"error": "Time range flags require start_time and end_time"})
         if item["scope"] != "time_range" and not (item.get("row_key") or item.get("row_keys")):
@@ -872,14 +1054,230 @@ def write_review_item(event, review_type):
         f"/month={now.strftime('%m')}"
         f"/{review_id}.json"
     )
-    s3_client.put_object(
-        Bucket=BUCKET,
-        Key=key,
-        Body=json.dumps(item, indent=2).encode("utf-8"),
-        ContentType="application/json",
+    audit_id = begin_audit_event(
+        identity,
+        f"CREATE_{review_type[:-1].upper()}",
+        review_id,
+        {"instrument_id": instrument_id, "scope": item["scope"]},
     )
+    if not audit_id:
+        return response(503, {"error": "The audit log is unavailable; no change was made"})
+    try:
+        s3_client.put_object(
+            Bucket=BUCKET,
+            Key=key,
+            Body=json.dumps(item, indent=2).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as exc:
+        finish_audit_event(audit_id, "FAILED", str(exc))
+        print(f"Could not write review item: {exc}")
+        return response(500, {"error": "Could not save the review annotation"})
+    finish_audit_event(audit_id, "SUCCEEDED")
     item["_s3_key"] = key
+    item["audit_id"] = audit_id
     return response(201, item)
+
+
+def begin_audit_event(identity, action, target_id, details=None):
+    now = datetime.now(timezone.utc)
+    audit_id = str(uuid.uuid4())
+    item = {
+        "audit_id": {"S": audit_id},
+        "audit_scope": {"S": "ADMIN"},
+        "created_at": {"S": now.isoformat()},
+        "created_at_epoch": {"N": str(int(now.timestamp()))},
+        "actor_email": {"S": identity["email"]},
+        "actor_subject": {"S": identity["subject"]},
+        "action": {"S": action},
+        "target_id": {"S": str(target_id)},
+        "result": {"S": "PENDING"},
+    }
+    if details:
+        item["details"] = {"S": json.dumps(details, separators=(",", ":"), sort_keys=True)}
+    try:
+        dynamodb_client.put_item(
+            TableName=ADMIN_AUDIT_TABLE,
+            Item=item,
+            ConditionExpression="attribute_not_exists(audit_id)",
+        )
+        return audit_id
+    except Exception as exc:
+        print(f"Could not begin admin audit event: {exc}")
+        return None
+
+
+def finish_audit_event(audit_id, result, error=None):
+    now = datetime.now(timezone.utc).isoformat()
+    expression = "SET #result = :result, completed_at = :completed_at"
+    values = {
+        ":result": {"S": result},
+        ":completed_at": {"S": now},
+    }
+    if error:
+        expression += ", error_message = :error"
+        values[":error"] = {"S": limit_text(error, 500)}
+    try:
+        dynamodb_client.update_item(
+            TableName=ADMIN_AUDIT_TABLE,
+            Key={"audit_id": {"S": audit_id}},
+            UpdateExpression=expression,
+            ExpressionAttributeNames={"#result": "result"},
+            ExpressionAttributeValues=values,
+        )
+        return True
+    except Exception as exc:
+        print(f"Could not finish admin audit event {audit_id}: {exc}")
+        return False
+
+
+def query_by_status(table_name, status, limit=100):
+    result = dynamodb_client.query(
+        TableName=table_name,
+        IndexName="status-created-at-index",
+        KeyConditionExpression="#status = :status",
+        ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":status": {"S": status}},
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+    return result.get("Items") or []
+
+
+def rate_counter_value(key_id, counter_type, day_bucket):
+    result = dynamodb_client.get_item(
+        TableName=RATE_LIMITS_TABLE,
+        Key={"counter_id": {"S": f"{key_id}:{counter_type}:{day_bucket}"}},
+        ConsistentRead=False,
+    )
+    return ddb_number(result.get("Item"), "request_count", 0) or 0
+
+
+def get_team_api_users(event, identity):
+    try:
+        items = query_by_status(API_KEYS_TABLE, "ACTIVE") + query_by_status(API_KEYS_TABLE, "REVOKED")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        keys = []
+        for item in sorted(items, key=lambda value: ddb_number(value, "created_at_epoch", 0), reverse=True):
+            key_id = ddb_string(item, "key_id", "")
+            request_id = ddb_string(item, "request_id", "")
+            organization = ""
+            if request_id:
+                request = dynamodb_client.get_item(
+                    TableName=ACCESS_REQUESTS_TABLE,
+                    Key={"request_id": {"S": request_id}},
+                ).get("Item")
+                organization = ddb_string(request, "organization", "")
+            keys.append({
+                "key_id": key_id,
+                "email": ddb_string(item, "email", ""),
+                "organization": organization,
+                "status": ddb_string(item, "status", "UNKNOWN"),
+                "scopes": ddb_string_list(item, "scopes"),
+                "created_at": ddb_string(item, "created_at"),
+                "last_used_at": ddb_string(item, "last_used_at"),
+                "requests_today": rate_counter_value(key_id, "requests", today),
+                "exports_today": rate_counter_value(key_id, "exports", today),
+            })
+        return response(200, {
+            "keys": keys,
+            "limits": {
+                "requests_per_minute": PER_MINUTE_LIMIT,
+                "requests_per_day": PER_DAY_LIMIT,
+                "exports_per_day": EXPORTS_PER_DAY_LIMIT,
+            },
+            "viewer": {"email": identity["email"], "roles": sorted(identity["roles"])},
+        })
+    except Exception as exc:
+        print(f"Could not list API users: {exc}")
+        return response(500, {"error": "Could not load API users"})
+
+
+def revoke_team_api_key(event, identity):
+    payload = parse_body(event)
+    if payload is None:
+        return response(400, {"error": "Invalid JSON body"})
+    key_id = str(payload.get("key_id") or "").strip().lower()
+    reason = limit_text(payload.get("reason"), 500)
+    if not re.fullmatch(r"[a-f0-9]{16}", key_id) or not reason:
+        return response(400, {"error": "A valid key ID and revocation reason are required"})
+    try:
+        key_item = dynamodb_client.get_item(
+            TableName=API_KEYS_TABLE,
+            Key={"key_id": {"S": key_id}},
+            ConsistentRead=True,
+        ).get("Item")
+        if not key_item:
+            return response(404, {"error": "API key not found"})
+        if ddb_string(key_item, "status") != "ACTIVE":
+            return response(409, {"error": "API key is not active"})
+        audit_id = begin_audit_event(identity, "REVOKE_API_KEY", key_id, {"reason": reason})
+        if not audit_id:
+            return response(503, {"error": "The audit log is unavailable; no change was made"})
+        now = datetime.now(timezone.utc).isoformat()
+        dynamodb_client.update_item(
+            TableName=API_KEYS_TABLE,
+            Key={"key_id": {"S": key_id}},
+            UpdateExpression=(
+                "SET #status = :revoked, revoked_at = :now, "
+                "revocation_reason = :reason, revoked_by = :actor"
+            ),
+            ConditionExpression="#status = :active",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":active": {"S": "ACTIVE"},
+                ":revoked": {"S": "REVOKED"},
+                ":now": {"S": now},
+                ":reason": {"S": reason},
+                ":actor": {"S": identity["email"]},
+            },
+        )
+        request_id = ddb_string(key_item, "request_id")
+        if request_id:
+            dynamodb_client.update_item(
+                TableName=ACCESS_REQUESTS_TABLE,
+                Key={"request_id": {"S": request_id}},
+                UpdateExpression="SET #status = :revoked, revoked_at = :now",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={":revoked": {"S": "REVOKED"}, ":now": {"S": now}},
+            )
+        finish_audit_event(audit_id, "SUCCEEDED")
+        return response(200, {"message": "API key revoked", "key_id": key_id, "audit_id": audit_id})
+    except Exception as exc:
+        if "audit_id" in locals() and audit_id:
+            finish_audit_event(audit_id, "FAILED", str(exc))
+        print(f"Could not revoke API key: {exc}")
+        return response(500, {"error": "Could not revoke API key"})
+
+
+def get_admin_audit(event, identity):
+    try:
+        result = dynamodb_client.query(
+            TableName=ADMIN_AUDIT_TABLE,
+            IndexName="scope-created-at-index",
+            KeyConditionExpression="audit_scope = :scope",
+            ExpressionAttributeValues={":scope": {"S": "ADMIN"}},
+            ScanIndexForward=False,
+            Limit=100,
+        )
+        events = []
+        for item in result.get("Items") or []:
+            events.append({
+                "audit_id": ddb_string(item, "audit_id"),
+                "created_at": ddb_string(item, "created_at"),
+                "completed_at": ddb_string(item, "completed_at"),
+                "actor_email": ddb_string(item, "actor_email"),
+                "action": ddb_string(item, "action"),
+                "target_id": ddb_string(item, "target_id"),
+                "result": ddb_string(item, "result"),
+            })
+        return response(200, {
+            "events": events,
+            "viewer": {"email": identity["email"], "roles": sorted(identity["roles"])},
+        })
+    except Exception as exc:
+        print(f"Could not read admin audit log: {exc}")
+        return response(500, {"error": "Could not load the audit log"})
 
 
 SERIES_DEFAULT_MEASUREMENT = {
@@ -1142,9 +1540,40 @@ def get_mtd_cost():
 def lambda_handler(event, context):
     method, path = get_route(event)
     if method == "OPTIONS":
-        if route_matches(path, API_ROUTES["access_requests"], API_ROUTES["access_verify"]):
+        if route_matches(path, API_ROUTES["access_requests"]):
             return access_response(204)
         return response(204)
+
+    if route_matches(path, INTERNAL_API_ROUTES["api_users"]) and method == "GET":
+        identity, auth_response = require_team_role(event, {"Admin", "AccessManager"})
+        return auth_response or get_team_api_users(event, identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["api_users_revoke"]) and method == "POST":
+        identity, auth_response = require_team_role(event, {"Admin", "AccessManager"})
+        return auth_response or revoke_team_api_key(event, identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["observations"]) and method == "GET":
+        identity, auth_response = require_team_role(event, {"Admin", "Reviewer", "Viewer"})
+        if auth_response:
+            return auth_response
+        result = get_silver_records(event)
+        if result.get("statusCode") == 200:
+            payload = json.loads(result["body"])
+            payload["viewer"] = {"email": identity["email"], "roles": sorted(identity["roles"])}
+            result["body"] = json.dumps(payload)
+        return result
+
+    if route_matches(path, INTERNAL_API_ROUTES["flags"]) and method == "POST":
+        identity, auth_response = require_team_role(event, {"Admin", "Reviewer"})
+        return auth_response or write_review_item(event, "flags", identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["corrections"]) and method == "POST":
+        identity, auth_response = require_team_role(event, {"Admin", "Reviewer"})
+        return auth_response or write_review_item(event, "corrections", identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["audit"]) and method == "GET":
+        identity, auth_response = require_team_role(event, {"Admin", "Reviewer", "AccessManager"})
+        return auth_response or get_admin_audit(event, identity)
 
     if method == "GET":
         canonical_path = legacy_route_target(path)
@@ -1154,8 +1583,35 @@ def lambda_handler(event, context):
     if route_matches(path, API_ROUTES["access_requests"]) and method == "POST":
         return create_access_request(event)
 
-    if route_matches(path, API_ROUTES["access_verify"]) and method == "GET":
+    if route_matches(path, API_ROUTES["verify_access"]) and method == "GET":
         return verify_access_request(event)
+
+    if route_matches(path, KEYED_API_ROUTES["timeseries"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["timeseries"], force=True)
+        return auth_response or get_series(event)
+
+    if route_matches(path, KEYED_API_ROUTES["observations_export"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["observations_export"], force=True)
+        return auth_response or get_observations_export(event)
+
+    if route_matches(path, KEYED_API_ROUTES["observations"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["observations"], force=True)
+        return auth_response or get_silver_records(event)
+
+    if route_matches(path, KEYED_API_ROUTES["summary"]) and method == "GET":
+        auth_response = require_public_api_access(event, READ_SCOPES["summary"], force=True)
+        if auth_response:
+            return auth_response
+        inventory = get_inventory()
+        return response(200, {
+            "refreshTime": inventory["refreshTime"],
+            "systemStatus": inventory["systemStatus"],
+            "kpis": {
+                "lastUpdatedInstrument": inventory["lastUpdatedInstrument"],
+                "siteName": "Des Moines",
+            },
+            "instruments": inventory["instruments"],
+        })
 
     if route_matches(path, API_ROUTES["timeseries"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"])
@@ -1174,18 +1630,6 @@ def lambda_handler(event, context):
         if auth_response:
             return auth_response
         return get_silver_records(event)
-
-    if path.endswith("/record-flags"):
-        if method == "GET":
-            return get_review_items(event, "flags")
-        if method == "POST":
-            return write_review_item(event, "flags")
-
-    if path.endswith("/record-corrections"):
-        if method == "GET":
-            return get_review_items(event, "corrections")
-        if method == "POST":
-            return write_review_item(event, "corrections")
 
     if not route_matches(path, API_ROUTES["summary"]):
         return response(404, {"error": "Route not found"})

@@ -1,0 +1,93 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "UpdateExistingApiLambdaOnly",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetPolicy",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration"
+      ],
+      "Resource": "arn:aws:lambda:us-west-2:213598695875:function:aq-dashboard-api"
+    },
+    {
+      "Sid": "AllowExistingApiGatewayToInvokeApiLambda",
+      "Effect": "Allow",
+      "Action": "lambda:AddPermission",
+      "Resource": "arn:aws:lambda:us-west-2:213598695875:function:aq-dashboard-api",
+      "Condition": {
+        "StringEquals": {"lambda:Principal": "apigateway.amazonaws.com"}
+      }
+    },
+    {
+      "Sid": "InspectExistingBackendRoleOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::213598695875:role/AQDashboardBackendRole"
+    },
+    {
+      "Sid": "ProvisionApiAccessStorageOnly",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:UpdateTimeToLive"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiAccessRequests",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiKeys",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQApiRateLimits",
+        "arn:aws:dynamodb:us-west-2:213598695875:table/AQAdminAudit"
+      ]
+    },
+    {
+      "Sid": "ReadAndUpdateExistingHttpApiOnly",
+      "Effect": "Allow",
+      "Action": ["apigateway:GET", "apigateway:PATCH"],
+      "Resource": [
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk",
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/*"
+      ]
+    },
+    {
+      "Sid": "AddRoutesIntegrationsAndStagesToExistingApiOnly",
+      "Effect": "Allow",
+      "Action": "apigateway:POST",
+      "Resource": [
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/routes",
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/authorizers",
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/integrations",
+        "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/stages"
+      ]
+    },
+    {
+      "Sid": "RemoveObsoleteRoutesNotApiOrData",
+      "Effect": "Allow",
+      "Action": "apigateway:DELETE",
+      "Resource": "arn:aws:apigateway:us-west-2::/apis/yvhb48sthk/routes/*"
+    },
+    {
+      "Sid": "ReadApiLogsForDeploymentDiagnostics",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents"
+      ],
+      "Resource": [
+        "arn:aws:logs:us-west-2:213598695875:log-group:/aws/lambda/aq-dashboard-api",
+        "arn:aws:logs:us-west-2:213598695875:log-group:/aws/lambda/aq-dashboard-api:*"
+      ]
+    }
+  ]
+}

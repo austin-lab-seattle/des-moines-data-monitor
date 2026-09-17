@@ -1,0 +1,36 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoverAndCreateOneRegionalUserPool",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:CreateUserPool",
+        "cognito-idp:ListUserPools",
+        "cognito-idp:DescribeUserPoolDomain"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ConfigureDesMoinesTeamUserPool",
+      "Effect": "Allow",
+      "Action": [
+        "cognito-idp:DescribeUserPool",
+        "cognito-idp:UpdateUserPool",
+        "cognito-idp:SetUserPoolMfaConfig",
+        "cognito-idp:CreateUserPoolClient",
+        "cognito-idp:ListUserPoolClients",
+        "cognito-idp:DescribeUserPoolClient",
+        "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:CreateUserPoolDomain",
+        "cognito-idp:CreateGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:ListGroups",
+        "cognito-idp:AdminCreateUser",
+        "cognito-idp:AdminGetUser",
+        "cognito-idp:AdminAddUserToGroup"
+      ],
+      "Resource": "arn:aws:cognito-idp:us-west-2:213598695875:userpool/us-west-2_*"
+    }
+  ]
+}

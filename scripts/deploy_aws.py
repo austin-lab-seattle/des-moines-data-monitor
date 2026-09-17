@@ -31,7 +31,7 @@ if PUBLIC_API_KEY_REQUIRED and not API_KEY_HASH_PEPPER:
 if ENABLE_API_KEY_REGISTRATION and not ACCESS_REQUEST_FROM_EMAIL:
     raise SystemExit(
         "ENABLE_API_KEY_REGISTRATION=1 needs ACCESS_REQUEST_FROM_EMAIL "
-        "for the SES verification email sender."
+        "for automatic approved-key delivery."
     )
 
 
@@ -44,7 +44,7 @@ def build_session():
     """
     if USE_CREDS_FILE and CREDS_FILE.exists():
         with open(CREDS_FILE) as f:
-            creds = json.load(f)
+            creds, _ = json.JSONDecoder().raw_decode(f.read())
         print("Using AWS credentials from aws_creds.json.")
         return boto3.Session(
             aws_access_key_id=creds["aws_access_key_id"],
@@ -60,7 +60,7 @@ def build_session():
 
     if CREDS_FILE.exists():
         with open(CREDS_FILE) as f:
-            creds = json.load(f)
+            creds, _ = json.JSONDecoder().raw_decode(f.read())
         print("Using AWS credentials from aws_creds.json.")
         return boto3.Session(
             aws_access_key_id=creds["aws_access_key_id"],
@@ -93,9 +93,13 @@ BUCKET_NAME = "des-moines-data-pipeline-austinlab"
 DQ_RULE_NAME = "dq-collector-hourly"
 DQ_SCHEDULE = "rate(1 hour)"
 LEGACY_DQ_RULE_NAMES = ["dq-collector-15-minutes"]
-ENABLE_REVIEW_API_ROUTES = os.environ.get("ENABLE_REVIEW_API_ROUTES") == "1"
 ACCESS_REQUESTS_TABLE_NAME = "AQApiAccessRequests"
 API_KEYS_TABLE_NAME = "AQApiKeys"
+RATE_LIMITS_TABLE_NAME = "AQApiRateLimits"
+ADMIN_AUDIT_TABLE_NAME = "AQAdminAudit"
+TEAM_AUTH_ISSUER = os.environ.get("TEAM_AUTH_ISSUER")
+TEAM_AUTH_AUDIENCE = os.environ.get("TEAM_AUTH_AUDIENCE")
+ENABLE_TEAM_CONSOLE = bool(TEAM_AUTH_ISSUER and TEAM_AUTH_AUDIENCE)
 
 
 def read_zip_bytes(zip_name, files):
@@ -232,6 +236,30 @@ ensure_table(
         },
     ],
 )
+ensure_table(
+    RATE_LIMITS_TABLE_NAME,
+    attribute_definitions=[{"AttributeName": "counter_id", "AttributeType": "S"}],
+    key_schema=[{"AttributeName": "counter_id", "KeyType": "HASH"}],
+)
+ensure_table(
+    ADMIN_AUDIT_TABLE_NAME,
+    attribute_definitions=[
+        {"AttributeName": "audit_id", "AttributeType": "S"},
+        {"AttributeName": "audit_scope", "AttributeType": "S"},
+        {"AttributeName": "created_at_epoch", "AttributeType": "N"},
+    ],
+    key_schema=[{"AttributeName": "audit_id", "KeyType": "HASH"}],
+    indexes=[
+        {
+            "IndexName": "scope-created-at-index",
+            "KeySchema": [
+                {"AttributeName": "audit_scope", "KeyType": "HASH"},
+                {"AttributeName": "created_at_epoch", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        },
+    ],
+)
 
 print("\nChecking IAM role...")
 try:
@@ -302,6 +330,9 @@ if ENABLE_API_KEY_REGISTRATION or PUBLIC_API_KEY_REQUIRED:
             f"arn:aws:dynamodb:{region}:{account_id}:table/{ACCESS_REQUESTS_TABLE_NAME}/index/*",
             f"arn:aws:dynamodb:{region}:{account_id}:table/{API_KEYS_TABLE_NAME}",
             f"arn:aws:dynamodb:{region}:{account_id}:table/{API_KEYS_TABLE_NAME}/index/*",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{RATE_LIMITS_TABLE_NAME}",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{ADMIN_AUDIT_TABLE_NAME}",
+            f"arn:aws:dynamodb:{region}:{account_id}:table/{ADMIN_AUDIT_TABLE_NAME}/index/*",
         ],
     })
 if ENABLE_API_KEY_REGISTRATION:
@@ -343,6 +374,8 @@ def api_lambda_environment(existing_env=None):
         "PUBLIC_API_KEY_REQUIRED": "1" if PUBLIC_API_KEY_REQUIRED else "0",
         "ACCESS_REQUESTS_TABLE": ACCESS_REQUESTS_TABLE_NAME,
         "API_KEYS_TABLE": API_KEYS_TABLE_NAME,
+        "RATE_LIMITS_TABLE": RATE_LIMITS_TABLE_NAME,
+        "ADMIN_AUDIT_TABLE": ADMIN_AUDIT_TABLE_NAME,
     }
     if API_KEY_HASH_PEPPER:
         environment["API_KEY_HASH_PEPPER"] = API_KEY_HASH_PEPPER
@@ -507,9 +540,13 @@ if api:
 else:
     print(f"Creating HTTP API {API_NAME}...")
 cors_config = {
-    "AllowOrigins": ["*"],
+    "AllowOrigins": [
+        "https://project-kv69p.vercel.app",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
     "AllowMethods": ["GET", "POST", "OPTIONS"],
-    "AllowHeaders": ["content-type"],
+    "AllowHeaders": ["content-type", "authorization", "x-api-key"],
     "MaxAge": 300,
 }
 
@@ -552,37 +589,66 @@ public_access_route_keys = [
     "POST /air-quality/v1/access-requests",
     "GET /air-quality/v1/access-requests/verify",
 ]
+keyed_api_route_keys = [
+    "GET /air-quality/v1/keyed/summary",
+    "GET /air-quality/v1/keyed/timeseries",
+    "GET /air-quality/v1/keyed/observations",
+    "GET /air-quality/v1/keyed/observations/export",
+]
+internal_route_keys = [
+    "GET /air-quality/internal/v1/api-users",
+    "POST /air-quality/internal/v1/api-users/revoke",
+    "GET /air-quality/internal/v1/observations",
+    "POST /air-quality/internal/v1/flags",
+    "POST /air-quality/internal/v1/corrections",
+    "GET /air-quality/internal/v1/audit",
+]
 legacy_public_route_keys = [
     "GET /metrics",
     "GET /series",
     "GET /silver-download",
     "GET /silver-records",
 ]
-public_route_keys = canonical_public_route_keys + public_access_route_keys + legacy_public_route_keys
+public_route_keys = canonical_public_route_keys + public_access_route_keys + keyed_api_route_keys + legacy_public_route_keys
 review_route_keys = [
     "GET /record-flags",
     "POST /record-flags",
     "GET /record-corrections",
     "POST /record-corrections",
 ]
-route_keys = public_route_keys + (review_route_keys if ENABLE_REVIEW_API_ROUTES else [])
+route_keys = public_route_keys + (internal_route_keys if ENABLE_TEAM_CONSOLE else [])
 
-if not ENABLE_REVIEW_API_ROUTES:
-    for route in routes:
-        if route["RouteKey"] in review_route_keys:
-            api_gateway_client.delete_route(ApiId=api_id, RouteId=route["RouteId"])
-            print(f"Deleted non-public route '{route['RouteKey']}'.")
-    routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
+for route in routes:
+    if route["RouteKey"] in review_route_keys:
+        api_gateway_client.delete_route(ApiId=api_id, RouteId=route["RouteId"])
+        print(f"Deleted retired shared-key route '{route['RouteKey']}'.")
+routes = api_gateway_client.get_routes(ApiId=api_id)["Items"]
 
 existing_route_keys = {route["RouteKey"] for route in routes}
 for route_key in route_keys:
     if route_key in existing_route_keys:
         continue
-    api_gateway_client.create_route(
-        ApiId=api_id,
-        RouteKey=route_key,
-        Target=f"integrations/{integration_id}",
-    )
+    route_args = {
+        "ApiId": api_id,
+        "RouteKey": route_key,
+        "Target": f"integrations/{integration_id}",
+    }
+    if route_key in internal_route_keys:
+        authorizers = api_gateway_client.get_authorizers(ApiId=api_id).get("Items", [])
+        authorizer = next((item for item in authorizers if item.get("Name") == "UWTeamJwt"), None)
+        if not authorizer:
+            authorizer = api_gateway_client.create_authorizer(
+                ApiId=api_id,
+                AuthorizerType="JWT",
+                Name="UWTeamJwt",
+                IdentitySource=["$request.header.Authorization"],
+                JwtConfiguration={"Audience": [TEAM_AUTH_AUDIENCE], "Issuer": TEAM_AUTH_ISSUER},
+            )
+        route_args.update({
+            "AuthorizationType": "JWT",
+            "AuthorizerId": authorizer["AuthorizerId"],
+        })
+    api_gateway_client.create_route(**route_args)
     print(f"Route '{route_key}' created.")
 
 stages = api_gateway_client.get_stages(ApiId=api_id)["Items"]
