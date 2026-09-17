@@ -146,5 +146,39 @@ function FlagDialog({ row, busy, onClose, onSubmit }) {
   return <div className="team-dialog-backdrop" role="presentation"><form className="team-dialog" onSubmit={(event) => { event.preventDefault(); onSubmit(reason.trim(), notes.trim()); }}><div className="team-dialog-heading"><div><span>Quality review</span><h2>Flag this record</h2></div><button type="button" onClick={onClose} aria-label="Close"><X size={18}/></button></div><p>The source measurement stays intact. The flag and reviewer identity are added as a separate annotation.</p><code>{row.row_key}</code><label>Reason <textarea required maxLength="500" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Describe the quality concern"/></label><label>Notes (optional) <textarea maxLength="1000" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add context for the research team"/></label><div className="team-dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={busy || !reason.trim()}>Save flag</button></div></form></div>;
 }
 
-function TeamLogin({ onLogin, error }) { return <div className="team-gate"><ShieldCheck size={44}/><h1>Team Console</h1><p>Private record review and API access administration for authorized UW researchers.</p>{error && <div className="team-message team-error">{error}</div>}<button onClick={onLogin}><LogIn size={17}/> Sign in to Team Console</button><a href="/">Return to public dashboard</a></div>; }
-function TeamSetup() { return <div className="team-gate"><ShieldCheck size={44}/><h1>Team Console</h1><p>Team authentication is not configured for this deployment.</p><div className="team-message team-error">No private data or administrative actions are available without a verified team login.</div><a href="/">Return to public dashboard</a></div>; }
+function TeamLogin({ onLogin, error }) {
+  return <div className="team-auth-page">
+    <div className="team-auth-glow team-auth-glow-one" />
+    <div className="team-auth-glow team-auth-glow-two" />
+    <main className="team-auth-shell">
+      <section className="team-auth-intro">
+        <a className="team-auth-brand" href="/"><span><ShieldCheck size={21}/></span><strong>Des Moines Air</strong></a>
+        <div className="team-auth-intro-copy">
+          <span className="team-auth-eyebrow">UW research operations</span>
+          <h1>One secure place to review data and manage access.</h1>
+          <p>Built for the research team to handle quality review and API access without exposing administrative controls on the public dashboard.</p>
+        </div>
+        <div className="team-auth-capabilities">
+          <div><span><KeyRound size={18}/></span><p><strong>API access</strong><small>Track keys, usage and limits</small></p></div>
+          <div><span><Flag size={18}/></span><p><strong>Quality review</strong><small>Flag records without changing source data</small></p></div>
+          <div><span><Activity size={18}/></span><p><strong>Audit history</strong><small>See who performed each action</small></p></div>
+        </div>
+        <small className="team-auth-owner">University of Washington · DEOHS</small>
+      </section>
+      <section className="team-auth-card" aria-labelledby="team-sign-in-title">
+        <div className="team-auth-mark"><ShieldCheck size={30}/></div>
+        <span className="team-auth-eyebrow">Private workspace</span>
+        <h2 id="team-sign-in-title">Team Console</h2>
+        <p>Sign in with your invited research-team account. Multi-factor authentication is required.</p>
+        {error && <div className="team-message team-error">{error}</div>}
+        <button className="team-auth-submit" onClick={onLogin}><LogIn size={18}/> Continue securely</button>
+        <div className="team-auth-security"><ShieldCheck size={15}/><span>Invite-only access · MFA protected</span></div>
+        <a className="team-auth-back" href="/">Return to public dashboard</a>
+      </section>
+    </main>
+  </div>;
+}
+
+function TeamSetup() {
+  return <div className="team-auth-page"><main className="team-auth-shell team-auth-shell-setup"><section className="team-auth-card"><div className="team-auth-mark"><ShieldCheck size={30}/></div><span className="team-auth-eyebrow">Private workspace</span><h2>Team Console</h2><p>Team authentication is not configured for this deployment.</p><div className="team-message team-error">No private data or administrative actions are available without a verified team login.</div><a className="team-auth-back" href="/">Return to public dashboard</a></section></main></div>;
+}
