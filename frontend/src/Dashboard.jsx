@@ -998,6 +998,7 @@ function TimeSeriesChart() {
   const [end, setEnd] = useState('');
   const [loading, setLoading] = useState(false);
   const [rawLoading, setRawLoading] = useState(false);
+  const [rawMessage, setRawMessage] = useState('');
 
   const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
     setLoading(true);
@@ -1049,6 +1050,7 @@ function TimeSeriesChart() {
   // short-lived S3 link instead of proxying the CSV through Lambda.
   const downloadRaw = async () => {
     setRawLoading(true);
+    setRawMessage('');
     try {
       const res = await fetchApi(`${API_PATHS.observationsExport}?instrument=${encodeURIComponent(instrument)}`);
       const payload = await res.json();
@@ -1057,9 +1059,13 @@ function TimeSeriesChart() {
         link.href = payload.url;
         link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
+      } else if (res.status === 404) {
+        setRawMessage(`No cleaned CSV is available for ${instrument} yet. It will appear after the next Silver processing run.`);
+      } else {
+        setRawMessage(payload.error || 'The cleaned CSV could not be prepared. Please try again.');
       }
     } catch {
-      /* transient; the button can be pressed again */
+      setRawMessage('The cleaned CSV could not be prepared. Please try again.');
     } finally {
       setRawLoading(false);
     }
@@ -1090,9 +1096,15 @@ function TimeSeriesChart() {
           </button>
         </div>
       </div>
+      {rawMessage && (
+        <div className="filter-message filter-message-error" role="status">
+          <AlertTriangle size={14} />
+          <span>{rawMessage}</span>
+        </div>
+      )}
       <div className="chart-controls">
           <Control label="Instrument">
-            <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
+            <select value={instrument} onChange={event => { setInstrument(event.target.value); setRawMessage(''); }} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
             </select>
           </Control>
