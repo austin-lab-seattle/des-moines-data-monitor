@@ -68,6 +68,9 @@ def newest_bronze_object(s3):
 
 
 def load_state(s3):
+    listing = s3.list_objects_v2(Bucket=BUCKET, Prefix=STATE_KEY, MaxKeys=1)
+    if not any(item.get("Key") == STATE_KEY for item in listing.get("Contents", [])):
+        return {}
     try:
         response = s3.get_object(Bucket=BUCKET, Key=STATE_KEY)
         return json.loads(response["Body"].read().decode("utf-8"))

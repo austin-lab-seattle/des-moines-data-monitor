@@ -83,6 +83,7 @@ role_policy = {
                 "NEPH-PM25/bronze/*",
                 "NO2-CAPS/bronze/*",
                 "SMPS/bronze/*",
+                "_monitor/upload_freshness_state.json",
             ]}},
         },
         {
@@ -126,6 +127,7 @@ environment = {
 }
 try:
     function = lambda_client.get_function(FunctionName=FUNCTION_NAME)["Configuration"]
+    lambda_client.get_waiter("function_active_v2").wait(FunctionName=FUNCTION_NAME)
     lambda_client.update_function_code(FunctionName=FUNCTION_NAME, ZipFile=zip_bytes)
     lambda_client.get_waiter("function_updated_v2").wait(FunctionName=FUNCTION_NAME)
     lambda_client.update_function_configuration(
@@ -152,6 +154,7 @@ except lambda_client.exceptions.ResourceNotFoundException:
         Environment={"Variables": environment},
     )
     function_arn = function["FunctionArn"]
+    lambda_client.get_waiter("function_active_v2").wait(FunctionName=FUNCTION_NAME)
 
 rule = events.put_rule(
     Name=RULE_NAME,
@@ -183,7 +186,7 @@ payload = json.loads(response["Payload"].read().decode())
 if response.get("FunctionError"):
     raise RuntimeError(payload)
 body = json.loads(payload.get("body", "{}"))
-if body.get("status") != "waiting-for-first-upload":
+if body.get("status") not in {"waiting-for-first-upload", "healthy", "stale"}:
     raise RuntimeError(f"Unexpected initial monitor state: {body}")
 
 print(json.dumps({

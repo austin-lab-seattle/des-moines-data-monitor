@@ -31,6 +31,11 @@ class FakeS3:
     def get_paginator(self, name):
         return FakePaginator(self)
 
+    def list_objects_v2(self, Bucket, Prefix, MaxKeys):
+        if self.state is None:
+            return {}
+        return {"Contents": [{"Key": Prefix}]}
+
     def get_object(self, Bucket, Key):
         if self.state is None:
             raise FakeNoSuchKey()
