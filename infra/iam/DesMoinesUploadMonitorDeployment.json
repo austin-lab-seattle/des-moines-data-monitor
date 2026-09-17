@@ -1,0 +1,37 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageUploadMonitorRole",
+      "Effect": "Allow",
+      "Action": ["iam:GetRole", "iam:CreateRole", "iam:PutRolePolicy"],
+      "Resource": "arn:aws:iam::213598695875:role/AQUploadFreshnessMonitorRole"
+    },
+    {
+      "Sid": "PassUploadMonitorRoleToLambdaOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::213598695875:role/AQUploadFreshnessMonitorRole",
+      "Condition": {"StringEquals": {"iam:PassedToService": "lambda.amazonaws.com"}}
+    },
+    {
+      "Sid": "DeployUploadMonitorLambda",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:GetFunction",
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:AddPermission",
+        "lambda:InvokeFunction"
+      ],
+      "Resource": "arn:aws:lambda:us-west-2:213598695875:function:aq-upload-freshness-monitor"
+    },
+    {
+      "Sid": "ScheduleUploadMonitor",
+      "Effect": "Allow",
+      "Action": ["events:PutRule", "events:PutTargets"],
+      "Resource": "arn:aws:events:us-west-2:213598695875:rule/aq-upload-freshness-hourly"
+    }
+  ]
+}
