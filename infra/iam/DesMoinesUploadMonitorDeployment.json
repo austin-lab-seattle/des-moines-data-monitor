@@ -19,13 +19,24 @@
       "Effect": "Allow",
       "Action": [
         "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
         "lambda:CreateFunction",
         "lambda:UpdateFunctionCode",
         "lambda:UpdateFunctionConfiguration",
-        "lambda:AddPermission",
         "lambda:InvokeFunction"
       ],
       "Resource": "arn:aws:lambda:us-west-2:213598695875:function:aq-upload-freshness-monitor"
+    },
+    {
+      "Sid": "AllowEventBridgeInvokeGrantOnly",
+      "Effect": "Allow",
+      "Action": "lambda:AddPermission",
+      "Resource": "arn:aws:lambda:us-west-2:213598695875:function:aq-upload-freshness-monitor",
+      "Condition": {
+        "StringEquals": {
+          "lambda:Principal": "events.amazonaws.com"
+        }
+      }
     },
     {
       "Sid": "ScheduleUploadMonitor",
