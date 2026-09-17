@@ -576,6 +576,7 @@ def validate_setup():
         return False
 
     valid = True
+    matched_instruments = 0
     for instrument in active_instruments:
         instrument_id = instrument.get("id") or "UNKNOWN"
         if instrument.get("ingestion_type") != "growing_file":
@@ -584,11 +585,22 @@ def validate_setup():
             continue
         files = discover_files(instrument)
         if not files:
-            log("error", instrument_id, "No files matched data_glob")
-            valid = False
+            log(
+                "warning",
+                instrument_id,
+                "No files matched data_glob; this instrument will remain enabled "
+                "and begin uploading automatically when a matching file appears.",
+            )
             continue
+        matched_instruments += 1
         total_bytes = sum(os.path.getsize(path) for path in files)
         log("info", instrument_id, f"Matched {len(files)} file(s), {total_bytes:,} bytes")
+
+    if matched_instruments == 0:
+        logger.warning(
+            "No active instrument files are present yet. Configuration is valid; "
+            "scheduled runs will keep checking for matching files."
+        )
 
     try:
         credential_session = boto3.Session()

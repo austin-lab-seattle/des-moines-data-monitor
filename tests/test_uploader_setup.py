@@ -44,7 +44,7 @@ class UploaderSetupTests(unittest.TestCase):
                 self.assertTrue(upload_instrument_data.validate_setup())
                 create_client.assert_called_once()
 
-    def test_preflight_fails_when_glob_matches_nothing(self):
+    def test_preflight_allows_enabled_instrument_before_data_arrives(self):
         with tempfile.TemporaryDirectory() as root:
             config_path = self.config(root, str(Path(root) / "missing-*.dat"))
             session = mock.Mock()
@@ -58,7 +58,7 @@ class UploaderSetupTests(unittest.TestCase):
                 ),
                 mock.patch.object(upload_instrument_data, "create_s3_client"),
             ):
-                self.assertFalse(upload_instrument_data.validate_setup())
+                self.assertTrue(upload_instrument_data.validate_setup())
 
 
 if __name__ == "__main__":
