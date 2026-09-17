@@ -22,6 +22,8 @@
         "cognito-idp:ListUserPoolClients",
         "cognito-idp:DescribeUserPoolClient",
         "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:GetUICustomization",
+        "cognito-idp:SetUICustomization",
         "cognito-idp:CreateUserPoolDomain",
         "cognito-idp:CreateGroup",
         "cognito-idp:GetGroup",

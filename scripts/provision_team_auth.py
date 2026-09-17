@@ -16,6 +16,8 @@ from botocore.exceptions import ClientError
 
 ROOT = Path(__file__).resolve().parent.parent
 CREDS_FILE = ROOT / "aws_creds.json"
+HOSTED_UI_CSS_FILE = ROOT / "infra" / "cognito" / "team-login.css"
+HOSTED_UI_LOGO_FILE = ROOT / "infra" / "cognito" / "team-login-logo.png"
 REGION = os.environ.get("DEPLOY_AWS_REGION", "us-west-2")
 POOL_NAME = "DesMoinesAirTeam"
 DOMAIN_PREFIX = "des-moines-air-team-213598695875"
@@ -168,6 +170,16 @@ def ensure_client(client, pool_id):
     return client_id
 
 
+def ensure_hosted_ui_branding(client, pool_id, client_id):
+    client.set_ui_customization(
+        UserPoolId=pool_id,
+        ClientId=client_id,
+        CSS=HOSTED_UI_CSS_FILE.read_text(),
+        ImageFile=HOSTED_UI_LOGO_FILE.read_bytes(),
+    )
+    print("Applied Des Moines Air branding to the hosted team sign-in page.")
+
+
 def ensure_admin(client, pool_id):
     try:
         client.admin_get_user(UserPoolId=pool_id, Username=INITIAL_ADMIN)
@@ -198,6 +210,7 @@ def main():
     ensure_domain(client, pool_id)
     ensure_groups(client, pool_id)
     client_id = ensure_client(client, pool_id)
+    ensure_hosted_ui_branding(client, pool_id, client_id)
     ensure_admin(client, pool_id)
     issuer = f"https://cognito-idp.{REGION}.amazonaws.com/{pool_id}"
     authority = issuer
