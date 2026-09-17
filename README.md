@@ -218,7 +218,7 @@ cd frontend && npm install && npm run dev     # run the dashboard locally
 To enable access requests after SES has a verified sender address:
 
 ```bash
-export ACCESS_REQUEST_FROM_EMAIL="pavands@uw.edu"
+export ACCESS_REQUEST_FROM_EMAIL="elaustin@uw.edu"
 export API_KEY_HASH_PEPPER="set-this-from-a-secret-manager"
 ENABLE_API_KEY_REGISTRATION=1 python3 scripts/deploy_aws.py
 ```

@@ -34,9 +34,9 @@
       "Sid": "ApiFunctionSendFromVerifiedUwAddressOnly",
       "Effect": "Allow",
       "Action": "ses:SendEmail",
-      "Resource": "arn:aws:ses:us-west-2:213598695875:identity/pavands@uw.edu",
+      "Resource": "arn:aws:ses:us-west-2:213598695875:identity/elaustin@uw.edu",
       "Condition": {
-        "StringEquals": {"ses:FromAddress": "pavands@uw.edu"}
+        "StringEquals": {"ses:FromAddress": "elaustin@uw.edu"}
       }
     }
   ]
