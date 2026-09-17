@@ -663,7 +663,7 @@ def is_data_row(instrument_id, line):
     if instrument_id == "NEPH-PM25":
         return (
             len(fields) >= 3
-            and re.match(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}$", first)
+            and re.match(r"^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}$", first)
             and is_float(second)
         )
 

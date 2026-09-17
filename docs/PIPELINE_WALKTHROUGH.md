@@ -733,7 +733,7 @@ instrument's shape:
 |---|---|---|---|
 | BC-MA200 | `.csv` | quoted CSV | >10 fields, field0 starts `MA…`, field1 is digits |
 | CO2-LICOR | `.txt` | TAB | field0 = `YYYY-MM-DD`, field1 = `HH:MM:SS` |
-| NEPH-PM25 | `.csv` | CSV (BOM) | field0 = `YYYY/MM/DD HH:MM:SS`, field1 numeric |
+| NEPH-PM25 | `.csv` or field-capture batch | CSV (BOM allowed) | field0 = `YYYY/MM/DD HH:MM:SS` or `YYYY-MM-DD HH:MM:SS`, field1 numeric |
 | NO2-CAPS | `.dat` | CSV | ≥10 fields, field0 = 6 digits, field3 numeric; `%` comments |
 | SMPS | `.csv` | CSV | >40 fields, field0 digits, field1 a date-time; huge metadata header |
 

@@ -76,6 +76,10 @@ class TeamAccessTests(unittest.TestCase):
         identity = lambda_api.team_identity(event("/", groups="[Admin,Reviewer]"))
         self.assertEqual(identity["roles"], {"Admin", "Reviewer"})
 
+    def test_dashboard_counts_field_neph_timestamp(self):
+        row = "2026-09-17 13:13:50, 8.174, 25.114, 26.847, 39.478, 1011.836,00,07"
+        self.assertTrue(lambda_api.is_data_row("NEPH-PM25", row))
+
     def test_reviewer_flag_keeps_source_immutable_and_records_actor(self):
         result = lambda_api.lambda_handler(
             event(

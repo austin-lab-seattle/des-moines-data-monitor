@@ -32,6 +32,22 @@ BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 MAX_WORKERS = 16
 
+# The field nephelometer's PuTTY capture does not include a CSV header. Its
+# current eight-field stream is the same instrument output used by the older
+# seven-field export, with the scattering value first and two state fields at
+# the end. Supply the schema explicitly so a PuTTY log marker is never mistaken
+# for the header.
+NEPH_HEADERS_BY_FIELD_COUNT = {
+    7: (
+        "Date_Time,Major State,Scat coefficient,Sample temperature,"
+        "Enclosure temperature,Relative humidity,Atmospheric pressure"
+    ),
+    8: (
+        "Date_Time,Scat coefficient,Sample temperature,Enclosure temperature,"
+        "Relative humidity,Atmospheric pressure,Major State,Minor State"
+    ),
+}
+
 # Bronze currently holds a batch of June 2026 SMPS instrument test/dev runs
 # alongside the real Oct Duwamish export. Exclude those specific sources by name
 # so Silver stays clean. This is a denylist, not an allowlist, so automated
@@ -124,7 +140,7 @@ def is_data_row(instrument_id, line):
     if instrument_id == "NEPH-PM25":
         return (
             len(fields) >= 3
-            and re.match(r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}$", first)
+            and re.match(r"^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}$", first)
             and is_float(second)
         )
     if instrument_id == "NO2-CAPS":
@@ -156,9 +172,14 @@ def consolidate(instrument_id, ordered_texts):
             line = raw.rstrip("\r")
             if is_data_row(instrument_id, line):
                 fields = split_fields(line)
-                if header is None and last_nondata is not None:
-                    header = last_nondata
-                    expected_fields = len(split_fields(header))
+                if header is None:
+                    candidate_fields = split_fields(last_nondata) if last_nondata else []
+                    if len(candidate_fields) == len(fields):
+                        header = last_nondata
+                    elif instrument_id == "NEPH-PM25":
+                        header = NEPH_HEADERS_BY_FIELD_COUNT.get(len(fields))
+                    if header:
+                        expected_fields = len(split_fields(header))
                 if expected_fields is None:
                     expected_fields = len(fields)
                 if len(fields) != expected_fields:
