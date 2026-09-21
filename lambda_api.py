@@ -9,6 +9,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import boto3
 
@@ -67,6 +68,7 @@ _cost_cache = {"data": None, "ts": 0.0}
 # Counting many small batch objects is dominated by per-object request latency,
 # so fan the downloads out across threads.
 MAX_WORKERS = 24
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("DATA_TIMEZONE", "America/Los_Angeles"))
 
 
 def iter_s3_objects(prefix):
@@ -215,6 +217,10 @@ VERIFICATION_WINDOW_SECONDS = 30 * 60
 PER_MINUTE_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "30"))
 PER_DAY_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_DAY", "5000"))
 EXPORTS_PER_DAY_LIMIT = int(os.environ.get("API_EXPORT_LIMIT_PER_DAY", "20"))
+EXPORT_DEFAULT_DAYS = int(os.environ.get("API_EXPORT_DEFAULT_DAYS", "14"))
+EXPORT_MAX_DAYS = int(os.environ.get("API_EXPORT_MAX_DAYS", "31"))
+EXPORT_MAX_ROWS = int(os.environ.get("API_EXPORT_MAX_ROWS", "250000"))
+EXPORT_URL_TTL_SECONDS = 300
 READ_SCOPES = {
     "summary": "read:summary",
     "timeseries": "read:timeseries",
@@ -641,6 +647,32 @@ def is_data_row(instrument_id, line):
     if not stripped or stripped.startswith(('%', '#')):
         return False
 
+    # New field-laptop captures preserve the exact serial payload in a simple
+    # Bronze envelope: PC_Date_Time<TAB>Raw_Line. Unwrap only for row counting;
+    # the Silver builder owns parsing and transformation.
+    envelope = re.match(
+        r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\t(.*)$",
+        stripped,
+    )
+    payload = envelope.group(1) if envelope else stripped
+
+    if instrument_id == "CO2-LICOR" and "<li850>" in payload and "</li850>" in payload:
+        return True
+    if instrument_id == "NEPH-PM25" and re.search(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\s*-?[\d.]+,",
+        payload.replace("\x00", ""),
+    ):
+        return True
+    if instrument_id == "NO2-CAPS":
+        raw_fields = [field.strip() for field in payload.split(",")]
+        if len(raw_fields) == 9 and all(is_float(field) for field in raw_fields):
+            try:
+                raw_time = datetime(1904, 1, 1) + timedelta(seconds=float(raw_fields[0]))
+                if 2000 <= raw_time.year <= 2100:
+                    return True
+            except (ValueError, OverflowError):
+                pass
+
     fields = split_fields(stripped)
     if not fields or not any(fields):
         return False
@@ -663,7 +695,10 @@ def is_data_row(instrument_id, line):
     if instrument_id == "NEPH-PM25":
         return (
             len(fields) >= 3
-            and re.match(r"^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}$", first)
+            and re.match(
+                r"^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$",
+                first,
+            )
             and is_float(second)
         )
 
@@ -725,13 +760,21 @@ def datetime_for_compare(value, prefer_month_first=False):
     parsed = parse_datetime_value(value, prefer_month_first=prefer_month_first)
     if parsed is None:
         return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
+    # Instrument files use Pacific local wall time while browser/API callers
+    # commonly send explicit UTC offsets. Normalize both to naive UTC before
+    # filtering; comparing aware UTC to naive local time shifts ranges by 7/8h.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TIMEZONE)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def instrument_prefers_month_first(instrument_id):
-    return instrument_id == "SMPS"
+    # Elena's CSV import uses lubridate order="dmY HMS" for
+    # ``DateTime Sample Start``.  Trying month-first first silently turns an
+    # ambiguous value such as 11/08/2026 into November 8 instead of August 11.
+    # The generic parser still falls back to month-first when day-first is
+    # impossible, which keeps older US-formatted files readable.
+    return False
 
 
 def datetime_for_instrument(instrument_id, value):
@@ -1282,7 +1325,7 @@ def get_admin_audit(event, identity):
 
 SERIES_DEFAULT_MEASUREMENT = {
     "SMPS": "Total Concentration",
-    "NEPH-PM25": "Scat coefficient",
+    "NEPH-PM25": "PM2.5",
     "CO2-LICOR": "CO2",
     "NO2-CAPS": "NO2",
     "BC-MA200": "BC",
@@ -1316,8 +1359,8 @@ MEASUREMENT_BLOCKLIST = (
     "flow", "voltage", "temp", "pressure", "humidity", "viscosity", "free path",
     "dma", "ramping", "transit", "adjustment", "dilution", "density", "sheath",
     "impactor", "size", "scan", "polarity", "direction", "neutralizer",
-    "classifier", "detector", "communication", "status", "reserved", "d50",
-    "inlet", "counting", "channel", "retrace",
+    "classifier", "detector", "communication", "status", "state", "reserved", "d50",
+    "inlet", "counting", "channel", "retrace", "pc_minus", "raw ",
 )
 
 
@@ -1412,37 +1455,138 @@ def get_series(event):
 
 
 def get_observations_export(event):
-    """Hand back a short-lived presigned URL for the full cleaned observation CSV.
-
-    The consolidated file can be tens of MB, past the Lambda response limit, so
-    the client reads it straight from S3 instead of through the API.
-    """
+    """Build a bounded, filtered Silver CSV and return a short-lived S3 URL."""
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
     if not is_valid_instrument(instrument_id):
         return response(400, {"error": "Invalid or missing instrument"})
 
-    key = f"{instrument_id}/silver/{instrument_id}_data.csv"
     try:
-        head = s3_client.head_object(Bucket=BUCKET, Key=key)
-    except Exception:
+        text = get_silver_text(instrument_id)
+    except s3_client.exceptions.NoSuchKey:
         return response(404, {"error": "Silver data not found", "instrument_id": instrument_id})
+    except Exception as exc:
+        print(f"Export read error: {exc}")
+        return response(500, {"error": "Could not read Silver data"})
 
-    filename = f"{instrument_id}_observations.csv"
-    url = s3_client.generate_presigned_url(
-        "get_object",
-        Params={
-            "Bucket": BUCKET,
-            "Key": key,
-            "ResponseContentDisposition": f'attachment; filename="{filename}"',
-            "ResponseContentType": "text/csv",
-        },
-        ExpiresIn=300,
-    )
+    lines = [line for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return response(404, {"error": "Silver data has no observations", "instrument_id": instrument_id})
+
+    columns = split_fields(lines[0])
+    expected_fields = len(columns)
+    start_raw = params.get("start")
+    end_raw = params.get("end")
+    start_time = datetime_for_compare(start_raw)
+    end_time = datetime_for_compare(end_raw)
+    if start_raw and start_time is None:
+        return response(400, {"error": "Invalid start timestamp; use ISO 8601"})
+    if end_raw and end_time is None:
+        return response(400, {"error": "Invalid end timestamp; use ISO 8601"})
+
+    latest_time = None
+    if end_time is None:
+        for raw_line in lines[1:]:
+            fields = split_fields(raw_line)
+            if len(fields) != expected_fields:
+                continue
+            moment = datetime_for_instrument(
+                instrument_id,
+                record_timestamp(instrument_id, columns, fields),
+            )
+            if moment is not None and (latest_time is None or moment > latest_time):
+                latest_time = moment
+        if latest_time is None:
+            return response(422, {"error": "Silver data has no usable timestamps"})
+        end_time = latest_time if start_time is None else min(
+            latest_time,
+            start_time + timedelta(days=EXPORT_DEFAULT_DAYS),
+        )
+    if start_time is None:
+        start_time = end_time - timedelta(days=EXPORT_DEFAULT_DAYS)
+    if start_time > end_time:
+        return response(400, {"error": "start must be before or equal to end"})
+    if end_time - start_time > timedelta(days=EXPORT_MAX_DAYS):
+        return response(400, {
+            "error": f"Export window cannot exceed {EXPORT_MAX_DAYS} days",
+            "max_days": EXPORT_MAX_DAYS,
+        })
+
+    export_lines = [lines[0]]
+    skipped_schema_mismatch = 0
+    skipped_no_timestamp = 0
+    for raw_line in lines[1:]:
+        fields = split_fields(raw_line)
+        if len(fields) != expected_fields:
+            skipped_schema_mismatch += 1
+            continue
+        moment = datetime_for_instrument(
+            instrument_id,
+            record_timestamp(instrument_id, columns, fields),
+        )
+        if moment is None:
+            skipped_no_timestamp += 1
+            continue
+        if row_matches_time_range(moment, start_time, end_time):
+            export_lines.append(raw_line)
+            if len(export_lines) - 1 > EXPORT_MAX_ROWS:
+                return response(413, {
+                    "error": (
+                        f"Export exceeds the {EXPORT_MAX_ROWS:,}-row limit; "
+                        "request a narrower date range"
+                    ),
+                    "max_rows": EXPORT_MAX_ROWS,
+                    "max_days": EXPORT_MAX_DAYS,
+                })
+
+    start_label = start_time.strftime("%Y%m%d")
+    end_label = end_time.strftime("%Y%m%d")
+    filename = f"{instrument_id}_observations_{start_label}_{end_label}.csv"
+    export_body = ("\n".join(export_lines) + "\n").encode("utf-8")
+    export_id = str(uuid.uuid4())
+    key = f"{instrument_id}/exports/{export_id}.csv"
+    try:
+        s3_client.put_object(
+            Bucket=BUCKET,
+            Key=key,
+            Body=export_body,
+            ContentType="text/csv; charset=utf-8",
+            ContentDisposition=f'attachment; filename="{filename}"',
+            Tagging="generated-export=true",
+            Metadata={
+                "instrument-id": instrument_id,
+                "start": start_time.isoformat(),
+                "end": end_time.isoformat(),
+                "rows": str(len(export_lines) - 1),
+            },
+        )
+        url = s3_client.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": BUCKET,
+                "Key": key,
+                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                "ResponseContentType": "text/csv",
+            },
+            ExpiresIn=EXPORT_URL_TTL_SECONDS,
+        )
+    except Exception as exc:
+        print(f"Export write error: {exc}")
+        return response(500, {"error": "Could not prepare the filtered export"})
+
     return response(200, {
         "instrument_id": instrument_id,
         "filename": filename,
-        "bytes": head.get("ContentLength"),
+        "bytes": len(export_body),
+        "rows": len(export_lines) - 1,
+        "start": start_time.isoformat(),
+        "end": end_time.isoformat(),
+        "default_days": EXPORT_DEFAULT_DAYS,
+        "max_days": EXPORT_MAX_DAYS,
+        "max_rows": EXPORT_MAX_ROWS,
+        "skipped_schema_mismatch": skipped_schema_mismatch,
+        "skipped_no_timestamp": skipped_no_timestamp,
+        "expires_in_seconds": EXPORT_URL_TTL_SECONDS,
         "url": url,
     })
 

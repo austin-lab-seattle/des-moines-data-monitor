@@ -13,7 +13,10 @@
       "display_name": "CO2 Li-Cor",
       "location": "Duwamish",
       "ingestion_type": "growing_file",
-      "data_glob": "data/co2_li_cor/*CO2-*.txt",
+      "data_glob": [
+        "data/co2_li_cor/*CO2-*.txt",
+        "data/co2_li_cor/co2.txt"
+      ],
       "active": true
     },
     {
@@ -21,7 +24,10 @@
       "display_name": "Nephelometer PM25",
       "location": "Duwamish",
       "ingestion_type": "growing_file",
-      "data_glob": "data/nephlometer/*Neph*.csv",
+      "data_glob": [
+        "data/nephlometer/*Neph*.csv",
+        "data/nephlometer/Neph.txt"
+      ],
       "active": true
     },
     {
@@ -29,7 +35,10 @@
       "display_name": "NO2 CAPS",
       "location": "Duwamish",
       "ingestion_type": "growing_file",
-      "data_glob": "data/no2_caps/*NO2-CAPS*.dat",
+      "data_glob": [
+        "data/no2_caps/*NO2-CAPS*.dat",
+        "data/no2_caps/no2.txt"
+      ],
       "active": true
     },
     {

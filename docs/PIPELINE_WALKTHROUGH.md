@@ -649,6 +649,21 @@ exact duplicate rows, and writes:
 {instrument}/silver/{instrument}_metadata.txt
 ```
 
+Instrument-specific Silver cleaning happens after deduplication. NEPH-PM25
+retains the raw scattering coefficient, derives `BScat = raw / 100` to match the
+field R workflow, and derives `PM2.5 = (28.6 * BScat) + 2.6`. SMPS normalizes
+the damaged Total Concentration unit header to `Total Concentration (#/cm³)`.
+The API interprets SMPS `DateTime Sample Start` as day-first (`dmY HMS`), matching
+Elena's R importer; it falls back to month-first only when a day-first value is
+impossible. Naive instrument times are treated as America/Los_Angeles wall time
+before comparison with the browser's UTC query timestamps.
+Serial acquisition files arrive from Bronze as
+`PC_Date_Time<TAB>Raw_Line`; Silver unwraps and parses the raw NO2 epoch rows,
+nephelometer CSV rows, and LI-COR XML. Legacy PuTTY LI-COR captures have no
+per-row time, so Silver anchors them to the PuTTY start marker at the observed
+one-second cadence and labels `Timestamp_Source` as
+`inferred_from_putty_start_1s`. New logger rows are labeled `pc_received_at`.
+
 The metadata file includes `data_rows_unique`, which the dashboard API reads
 cheaply instead of recounting Silver content on every dashboard request.
 
@@ -680,7 +695,7 @@ the KPI block. Response is JSON.
 |---|---|
 | `GET /air-quality/v1/summary` | dashboard summary payload |
 | `GET /air-quality/v1/timeseries` | hourly mean series for one instrument measurement |
-| `GET /air-quality/v1/observations/export` | short-lived export link for one cleaned CSV |
+| `GET /air-quality/v1/observations/export` | short-lived link for a bounded, date-filtered cleaned CSV |
 | `GET /air-quality/v1/observations` | load cleaned rows by instrument, time range, cursor, and limit |
 | `POST /air-quality/v1/access-requests` | begin a verified request for read-only API access |
 

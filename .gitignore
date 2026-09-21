@@ -35,6 +35,8 @@ data/
 *.zip
 sensor_buffer.db
 collector.log
+serial_collector.log
+serial_logs/
 docs/dashboard-review-screenshot-*.png
 docs/meeting-progress-*.html
 docs/team-email-update-*.md
@@ -45,4 +47,5 @@ Thumbs.db
 
 # Local instrument config (copy instruments_config.example.json and edit data_glob paths)
 instruments_config.json
+serial_instruments_config.json
 .vercel

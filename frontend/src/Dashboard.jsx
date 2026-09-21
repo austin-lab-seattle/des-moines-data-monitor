@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { Activity, AlertTriangle, Check, Clock, Copy, Database, DollarSign, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -306,6 +306,7 @@ function DataReview() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const recordsRequestId = useRef(0);
 
   const displayColumns = columns.slice(0, 8);
 
@@ -316,6 +317,7 @@ function DataReview() {
     selectedEnd = '',
     auto = false,
   }) => {
+    const requestId = ++recordsRequestId.current;
     setLoading(true);
     setError('');
     setMessage('');
@@ -334,14 +336,18 @@ function DataReview() {
       if (!response.ok) {
         throw new Error(result.error || `API returned ${response.status}`);
       }
-      setColumns(result.columns || []);
-      setRows(result.rows || []);
-      setNextCursor(result.next_cursor ?? null);
-      setMessage(`${auto ? 'Showing latest' : 'Loaded'} ${(result.rows || []).length} cleaned records.`);
+      if (requestId === recordsRequestId.current) {
+        setColumns(result.columns || []);
+        setRows(result.rows || []);
+        setNextCursor(result.next_cursor ?? null);
+        setMessage(`${auto ? 'Showing latest' : 'Loaded'} ${(result.rows || []).length} cleaned records.`);
+      }
     } catch (err) {
-      setError(err.message || 'Could not load cleaned records');
+      if (requestId === recordsRequestId.current) {
+        setError(err.message || 'Could not load cleaned records');
+      }
     } finally {
-      setLoading(false);
+      if (requestId === recordsRequestId.current) setLoading(false);
     }
   }, []);
 
@@ -539,13 +545,15 @@ const PUBLIC_ENDPOINTS = [
     method: 'GET',
     path: RESEARCH_API_PATHS.observationsExport,
     title: 'Observation Export',
-    summary: 'Returns metadata and a short-lived download URL for the full cleaned observation CSV.',
+    summary: 'Returns a short-lived download URL for a bounded, date-filtered cleaned CSV.',
     access: 'Read',
     apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.observationsExport)}?instrument=SMPS"`,
     params: [
       { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
+      { name: 'start', required: 'No', description: 'ISO timestamp. Defaults to 14 days before end.' },
+      { name: 'end', required: 'No', description: 'ISO timestamp. Defaults to the latest available observation.' },
     ],
-    responseFields: ['instrument_id', 'filename', 'bytes', 'url'],
+    responseFields: ['instrument_id', 'filename', 'rows', 'start', 'end', 'bytes', 'url'],
   },
 ];
 
@@ -575,7 +583,7 @@ response <- GET("${base}${RESEARCH_API_PATHS.observationsExport}?instrument=${in
 stop_for_status(response)
 meta <- fromJSON(content(response, "text", encoding = "UTF-8"))
 
-# 2. Download the full cleaned observation CSV and read it
+# 2. Download the cleaned CSV (latest 14 days by default; 31-day maximum)
 download.file(meta$url, "${instrument}_observations.csv", mode = "wb")
 df <- read.csv("${instrument}_observations.csv", check.names = FALSE)
 
@@ -997,11 +1005,15 @@ function TimeSeriesChart() {
   const [start, setStart] = useState('');
   const [end, setEnd] = useState('');
   const [loading, setLoading] = useState(false);
-  const [rawLoading, setRawLoading] = useState(false);
-  const [rawMessage, setRawMessage] = useState('');
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportMessage, setExportMessage] = useState('');
+  const seriesRequestId = useRef(0);
 
   const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
+    const requestId = ++seriesRequestId.current;
     setLoading(true);
+    setSeries([]);
+    setSeriesMeta({});
     try {
       const params = new URLSearchParams({ instrument: inst });
       if (meas) params.set('measurement', meas);
@@ -1009,7 +1021,9 @@ function TimeSeriesChart() {
       if (e) params.set('end', toIso(e));
       const res = await fetchApi(`${API_PATHS.timeseries}?${params.toString()}`);
       const payload = await res.json();
-      if (res.ok) {
+      // A slower response for the previously selected measurement must never
+      // replace the data (and Y-axis scale) for the current selection.
+      if (requestId === seriesRequestId.current && res.ok) {
         setMeasurements(payload.measurements || []);
         setMeasurement(payload.measurement || '');
         setSeries(payload.series || []);
@@ -1021,18 +1035,18 @@ function TimeSeriesChart() {
         });
       }
     } catch {
-      /* keep the last successful data on screen */
+      /* the empty state already replaces data from the previous selection */
     } finally {
-      setLoading(false);
+      if (requestId === seriesRequestId.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     const task = setTimeout(() => {
-      fetchSeries({ inst: instrument });
+      fetchSeries({ inst: 'SMPS' });
     }, 0);
     return () => clearTimeout(task);
-  }, [instrument, fetchSeries]);
+  }, [fetchSeries]);
 
   const downloadCSV = () => {
     if (!series.length) return;
@@ -1046,13 +1060,16 @@ function TimeSeriesChart() {
     URL.revokeObjectURL(url);
   };
 
-  // The full cleaned observation file can be tens of MB, so the API returns a
-  // short-lived S3 link instead of proxying the CSV through Lambda.
-  const downloadRaw = async () => {
-    setRawLoading(true);
-    setRawMessage('');
+  // The API materializes only the selected bounded time window and returns a
+  // short-lived S3 link. With no filters it exports the latest 14 days.
+  const downloadExport = async () => {
+    setExportLoading(true);
+    setExportMessage('');
     try {
-      const res = await fetchApi(`${API_PATHS.observationsExport}?instrument=${encodeURIComponent(instrument)}`);
+      const params = new URLSearchParams({ instrument });
+      if (start) params.set('start', toIso(start));
+      if (end) params.set('end', toIso(end));
+      const res = await fetchApi(`${API_PATHS.observationsExport}?${params.toString()}`);
       const payload = await res.json();
       if (res.ok && payload.url) {
         const link = document.createElement('a');
@@ -1060,14 +1077,14 @@ function TimeSeriesChart() {
         link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
       } else if (res.status === 404) {
-        setRawMessage(`No cleaned CSV is available for ${instrument} yet. It will appear after the next Silver processing run.`);
+        setExportMessage(`No cleaned CSV is available for ${instrument} yet. It will appear after the next Silver processing run.`);
       } else {
-        setRawMessage(payload.error || 'The cleaned CSV could not be prepared. Please try again.');
+        setExportMessage(payload.error || 'The cleaned CSV could not be prepared. Please try again.');
       }
     } catch {
-      setRawMessage('The cleaned CSV could not be prepared. Please try again.');
+      setExportMessage('The cleaned CSV could not be prepared. Please try again.');
     } finally {
-      setRawLoading(false);
+      setExportLoading(false);
     }
   };
 
@@ -1091,20 +1108,27 @@ function TimeSeriesChart() {
           <button onClick={downloadCSV} disabled={!series.length} className="action-button action-secondary" title="Hourly-averaged values shown in the chart">
             <Download size={14} /> Chart CSV
           </button>
-          <button onClick={downloadRaw} disabled={rawLoading} className="action-button action-secondary" title="Full cleaned observation file for this instrument">
-            <Download size={14} /> {rawLoading ? 'Preparing…' : 'Raw CSV'}
+          <button onClick={downloadExport} disabled={exportLoading} className="action-button action-secondary" title="Cleaned observations for the selected dates; defaults to the latest 14 days and never exceeds 31 days">
+            <Download size={14} /> {exportLoading ? 'Preparing…' : 'Export CSV'}
           </button>
         </div>
       </div>
-      {rawMessage && (
+      {exportMessage && (
         <div className="filter-message filter-message-error" role="status">
           <AlertTriangle size={14} />
-          <span>{rawMessage}</span>
+          <span>{exportMessage}</span>
         </div>
       )}
       <div className="chart-controls">
           <Control label="Instrument">
-            <select value={instrument} onChange={event => { setInstrument(event.target.value); setRawMessage(''); }} className="control-input">
+            <select value={instrument} onChange={event => {
+              const nextInstrument = event.target.value;
+              setInstrument(nextInstrument);
+              setMeasurement('');
+              setMeasurements([]);
+              setExportMessage('');
+              fetchSeries({ inst: nextInstrument, s: start, e: end });
+            }} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
             </select>
           </Control>
@@ -1134,7 +1158,7 @@ function TimeSeriesChart() {
         <div className="chart-empty">Loading measurements…</div>
       ) : series.length ? (
         <div className="chart-plot"><ResponsiveContainer width="100%" height={320}>
-          <LineChart data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
+          <LineChart key={`${instrument}:${measurement}`} data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
             <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
             <XAxis dataKey="t" tickFormatter={fmtTick} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
             <YAxis tickFormatter={fmtNumber} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={false} width={64} />

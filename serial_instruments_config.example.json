@@ -1,0 +1,36 @@
+{
+  "raw_log_dir": "serial_logs",
+  "reconnect_seconds": 5,
+  "instruments": [
+    {
+      "id": "NO2-CAPS",
+      "name": "no2",
+      "port": "COM7",
+      "baud": 38400,
+      "parser": "no2",
+      "output_dir": "data/no2_caps",
+      "filename": "{date}_NO2-CAPS-serial.dat",
+      "active": true
+    },
+    {
+      "id": "NEPH-PM25",
+      "name": "neph",
+      "port": "COM8",
+      "baud": 38400,
+      "parser": "neph",
+      "output_dir": "data/nephlometer",
+      "filename": "{date}_Neph-serial.csv",
+      "active": true
+    },
+    {
+      "id": "CO2-LICOR",
+      "name": "co2",
+      "port": "COM9",
+      "baud": 38400,
+      "parser": "licor",
+      "output_dir": "data/co2_li_cor",
+      "filename": "{date}_CO2-serial.txt",
+      "active": true
+    }
+  ]
+}

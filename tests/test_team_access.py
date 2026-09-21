@@ -80,6 +80,20 @@ class TeamAccessTests(unittest.TestCase):
         row = "2026-09-17 13:13:50, 8.174, 25.114, 26.847, 39.478, 1011.836,00,07"
         self.assertTrue(lambda_api.is_data_row("NEPH-PM25", row))
 
+    def test_dashboard_counts_raw_serial_bronze_rows(self):
+        self.assertTrue(lambda_api.is_data_row(
+            "NO2-CAPS",
+            "3872505678.767,10.599,523.765,751.62,295.89,166273,1.32319,10104,485.763",
+        ))
+        self.assertTrue(lambda_api.is_data_row(
+            "NEPH-PM25",
+            "2026-09-18 12:00:00.123\t2026-09-17 13:13:50, 8.174, 25.114, 26.847, 39.478, 1011.836,00,07",
+        ))
+        self.assertTrue(lambda_api.is_data_row(
+            "CO2-LICOR",
+            "2026-09-18 12:00:00.123\t<li850><data></data></li850>",
+        ))
+
     def test_reviewer_flag_keeps_source_immutable_and_records_actor(self):
         result = lambda_api.lambda_handler(
             event(

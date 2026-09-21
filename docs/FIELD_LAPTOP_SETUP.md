@@ -31,6 +31,54 @@ field-laptop path. Use forward slashes in JSON, even on Windows:
 Keep the glob specific enough that it cannot match exports, backups, or other
 instrument files. The uploader discovers new rollover files automatically.
 
+## 2a. Record the serial instruments without PuTTY
+
+The uploader does not read COM ports itself. `scripts/log_serial_instruments.py`
+is the continuous recorder that replaces PuTTY for NO2-CAPS, NEPH-PM25, and
+CO2-LICOR. It writes daily files with the header
+`PC_Date_Time<TAB>Raw_Line` in folders already read by the uploader. `Raw_Line`
+is the exact instrument payload; no measurements are parsed or corrected before
+Bronze. Separate lossless diagnostic logs are retained under `serial_logs/`.
+
+Every acquisition row uses the field laptop's local clock in
+`YYYY-MM-DD HH:MM:SS.sss` form. In Silver this becomes the reporting time. This
+is important because the supplied captures
+showed a 12-hour nephelometer clock jump, NO2 reports 1904-epoch seconds, and
+LI-COR XML has no timestamp. For NO2 and the nephelometer, the original
+instrument time and `PC_minus_instrument_s` are retained as diagnostic columns;
+charts and time filters use the PC-local timestamp.
+
+Copy the example configuration:
+
+```powershell
+Copy-Item serial_instruments_config.example.json serial_instruments_config.json
+```
+
+Edit the copy and verify every COM port against Windows Device Manager. All
+three configured serial instruments use 38400 baud.
+
+Close PuTTY before the preflight—only one program can own each COM port—then
+validate the configuration and run a short manual test:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\log_serial_instruments.py --check
+.\.venv\Scripts\python.exe scripts\log_serial_instruments.py
+```
+
+Wait until each active instrument reports that its port is open and confirm new
+daily files appear under `data/`. Stop the manual test with `Ctrl+C`, then
+install the continuous logger at Windows logon:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_windows_serial_logger_task.ps1 -RunNow
+Get-ScheduledTaskInfo -TaskName DesMoinesSerialLogger
+Get-Content .\serial_collector.log -Tail 100
+```
+
+Keep the existing 15-minute uploader task as well: the serial logger creates
+local files continuously, while the uploader checkpoints and sends completed
+lines to S3. Do not run PuTTY logging on these ports after enabling this task.
+
 ## 3. Configure AWS credentials
 
 Preferred: configure the default AWS profile for the same Windows user that

@@ -22,7 +22,9 @@ Live dashboard: <https://deohs-des-moines-air.vercel.app>
 ```text
 Field laptop                            AWS Cloud                              Vercel
 ------------                            ---------                              ------
-Instrument files (data_glob)            S3 bucket                              React dashboard
+Serial instruments -> daily files       S3 bucket                              React dashboard
+scripts/log_serial_instruments.py             |                                      |
+Instrument files (data_glob)                   |                                      |
      |                                  des-moines-data-pipeline-austinlab           |
 scripts/upload_instrument_data.py  -->  {instrument}/bronze/...                      |
      |                                       |                                        |
@@ -45,10 +47,12 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 │   └── silver_builder.py       # rebuilds deduplicated silver CSVs from bronze
 ├── instruments_config.json     # local instrument config (gitignored)
 ├── instruments_config.example.json  # tracked template for the config above
+├── serial_instruments_config.example.json # COM-port logger template
 ├── aws_creds.json              # optional local credential fallback (gitignored)
 ├── requirements.txt
 ├── scripts/
 │   ├── upload_instrument_data.py     # the uploader (run from repo root)
+│   ├── log_serial_instruments.py     # continuous PuTTY replacement
 │   ├── deploy_aws.py                 # creates/updates all AWS resources
 │   ├── run_pipeline.sh / .bat        # wrappers the schedulers call
 │   ├── install_launchd_schedule.sh   # macOS scheduler installer
@@ -64,9 +68,14 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
   `instruments_config.json`, discovers source files with a **glob pattern**
   (`data_glob`), keeps a **byte offset per file**, buffers upload attempts in
   SQLite, and writes bronze batches to S3. Run it from the repository root.
+- `scripts/log_serial_instruments.py` continuously owns the NO2, nephelometer,
+  and LI-COR COM ports. It writes only a receipt timestamp and the exact raw
+  instrument line; the uploader sends this acquisition envelope to Bronze
+  unchanged. Silver owns parsing and scientific transformations.
 - `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
-  keeps only real data rows, removes duplicates, and writes a metadata sidecar
-  with the unique row count.
+  keeps only real data rows, removes duplicates, derives Duwamish PM2.5 from
+  corrected BScat, normalizes the SMPS Total Concentration header, and writes a
+  metadata sidecar with the unique row count.
 - `lambda_api.py` serves the dashboard JSON payload through API Gateway at
   `/air-quality/v1/summary`. On every request it scans the bronze prefix and counts the real
   data rows and bytes per instrument live (its `is_data_row()` logic skips
@@ -114,9 +123,11 @@ the next run.
 
 There are two schedules:
 
+- The serial logger runs continuously on the field laptop and replaces PuTTY
+  for the three serial instruments.
 - The laptop upload job runs on the field laptop because it reads local
   instrument files and uploads new bytes to S3 Bronze.
-- The cloud Silver builder runs daily in EventBridge and rebuilds the
+- The cloud Silver builder runs every 15 minutes in EventBridge and rebuilds the
   deduplicated Silver CSVs from Bronze.
 
 Run one upload pass manually:
@@ -194,13 +205,18 @@ use the `/air-quality/v1/keyed/...` prefix and require a personal key:
 GET  /air-quality/v1/keyed/summary
 GET  /air-quality/v1/keyed/observations?instrument=NO2-CAPS&start=...&end=...
 GET  /air-quality/v1/keyed/timeseries?instrument=SMPS&measurement=...
-GET  /air-quality/v1/keyed/observations/export?instrument=SMPS
+GET  /air-quality/v1/keyed/observations/export?instrument=SMPS&start=...&end=...
 POST /air-quality/v1/access-requests
 ```
 
 When API key registration is enabled, users request access, verify their email,
 and automatically receive a personal read-only key at that same address. Keys
 are rate-limited and are stored only as one-way keyed hashes.
+
+Observation exports default to the latest 14 days, are capped at a 31-day
+window and 250,000 rows, and are generated as temporary private S3 objects.
+Their signed URLs expire after five minutes and lifecycle cleanup removes the
+objects after one day.
 
 Review/admin routes are separate internal endpoints protected by Cognito JWTs
 and named team roles. The public Vercel views remain read-only.
@@ -242,7 +258,9 @@ ENABLE_COST_KPI=1 python3 scripts/deploy_aws.py
 ## Data layout (medallion)
 
 Today the pipeline has Bronze and Silver. Bronze stores raw instrument batches.
-Silver stores one deduplicated CSV and metadata file per instrument. Review
+Silver stores one cleaned, deduplicated CSV and metadata file per instrument.
+For NEPH-PM25 it preserves raw scattering, adds `BScat = raw / 100`, and adds
+`PM2.5 = (28.6 * BScat) + 2.6`; PM2.5 is the dashboard default. Review
 flags and corrections are saved as JSON sidecar records in S3, so we can mark
 bad time ranges or selected rows without rewriting the raw Bronze files.
 
@@ -263,7 +281,7 @@ Current layer status:
 | Layer | Status | What to add on the AWS side |
 |-------|--------|------------------------------|
 | Bronze | done | raw files, partitioned by year/month (optionally add an S3 lifecycle rule) |
-| Silver | done, CSV | daily Lambda rebuild that filters headers/comments, dedupes rows, and writes `{id}/silver/` |
+| Silver | done, CSV | 15-minute Lambda rebuild that filters headers/comments, dedupes rows, applies documented transforms, and writes `{id}/silver/` |
 | Review sidecars | deployed privately | Cognito-protected flags/corrections stored separately from immutable Bronze and Silver, with audit entries |
 | Gold | partial | only SMPS hourly summary was seen in S3; decide the required aggregates before expanding |
 | Query/catalog | optional | Athena and Glue Catalog can be added later if querying large historical data becomes important |

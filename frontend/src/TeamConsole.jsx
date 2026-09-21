@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { Activity, Database, Flag, KeyRound, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react';
 
@@ -28,6 +28,7 @@ export default function TeamConsole() {
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [flagRow, setFlagRow] = useState(null);
+  const loadRequestId = useRef(0);
 
   useEffect(() => {
     if (!manager) return;
@@ -59,6 +60,7 @@ export default function TeamConsole() {
 
   const load = useCallback(async () => {
     if (!user) return;
+    const requestId = ++loadRequestId.current;
     setLoading(true); setError(''); setNotice('');
     const path = tab === 'users'
       ? '/air-quality/internal/v1/api-users'
@@ -67,10 +69,15 @@ export default function TeamConsole() {
         : `/air-quality/internal/v1/observations?instrument=${encodeURIComponent(instrument)}&limit=50&order=desc`;
     try {
       const payload = await apiRequest(path);
-      setData(payload);
-      setViewer(payload.viewer || null);
-    } catch (e) { setError(e.message); setData(null); }
-    finally { setLoading(false); }
+      if (requestId === loadRequestId.current) {
+        setData(payload);
+        setViewer(payload.viewer || null);
+      }
+    } catch (e) {
+      if (requestId === loadRequestId.current) { setError(e.message); setData(null); }
+    } finally {
+      if (requestId === loadRequestId.current) setLoading(false);
+    }
   }, [apiRequest, instrument, tab, user]);
 
   useEffect(() => {

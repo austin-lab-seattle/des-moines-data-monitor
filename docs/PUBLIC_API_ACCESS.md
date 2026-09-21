@@ -207,14 +207,19 @@ response = requests.get(
 GET /air-quality/v1/keyed/observations/export
 ```
 
-Returns metadata and a short-lived export URL for the full cleaned observation
-CSV.
+Builds a bounded, date-filtered cleaned observation CSV and returns metadata
+plus a short-lived download URL. With no dates it exports the latest 14 days of
+available data. A request can span at most 31 days and contain at most 250,000
+rows; narrower ranges are required when a high-frequency instrument exceeds
+the row limit. The API never signs the full Silver object directly.
 
 Parameters:
 
 | Name | Required | Description |
 |------|----------|-------------|
 | `instrument` | Yes | Instrument ID. |
+| `start` | No | ISO timestamp. Defaults to 14 days before `end`. |
+| `end` | No | ISO timestamp. Defaults to the latest available observation. |
 
 Example:
 
@@ -228,7 +233,11 @@ HEADERS = {"x-api-key": os.environ["AQ_API_KEY"]}
 
 response = requests.get(
     f"{API_BASE_URL}/air-quality/v1/keyed/observations/export",
-    params={"instrument": "SMPS"},
+    params={
+        "instrument": "SMPS",
+        "start": "2026-09-01T00:00:00-07:00",
+        "end": "2026-09-14T23:59:59-07:00",
+    },
     headers=HEADERS,
     timeout=30,
 )
@@ -240,8 +249,9 @@ df = pd.read_csv(export_url)
 print(df.shape)
 ```
 
-Export URLs expire after a few minutes. Scripts should request a new URL each
-time they run.
+Export URLs expire after five minutes. Generated export objects are tagged for
+automatic deletion after one day. Scripts should request a new URL each time
+they run.
 
 ## Responsible Use
 

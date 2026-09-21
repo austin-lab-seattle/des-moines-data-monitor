@@ -12,27 +12,16 @@ CREDS_FILE = REPO_ROOT / "aws_creds.json"
 DEFAULT_REGION = "us-west-2"
 DEPLOY_REGION = os.environ.get("DEPLOY_AWS_REGION", DEFAULT_REGION)
 USE_CREDS_FILE = os.environ.get("USE_AWS_CREDS_FILE") == "1"
-ENABLE_COST_KPI = os.environ.get("ENABLE_COST_KPI") == "1"
-ENABLE_API_KEY_REGISTRATION = os.environ.get("ENABLE_API_KEY_REGISTRATION") == "1"
-PUBLIC_API_KEY_REQUIRED = os.environ.get("PUBLIC_API_KEY_REQUIRED") == "1"
+ENABLE_COST_KPI_RAW = os.environ.get("ENABLE_COST_KPI")
+ENABLE_API_KEY_REGISTRATION_RAW = os.environ.get("ENABLE_API_KEY_REGISTRATION")
+PUBLIC_API_KEY_REQUIRED_RAW = os.environ.get("PUBLIC_API_KEY_REQUIRED")
+ENABLE_COST_KPI = ENABLE_COST_KPI_RAW == "1"
+ENABLE_API_KEY_REGISTRATION = ENABLE_API_KEY_REGISTRATION_RAW == "1"
+PUBLIC_API_KEY_REQUIRED = PUBLIC_API_KEY_REQUIRED_RAW == "1"
 API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
 ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
 
 print("Starting AWS deployment script...")
-print(f"Internal cost KPI: {'enabled' if ENABLE_COST_KPI else 'disabled'}")
-print(f"API key registration: {'enabled' if ENABLE_API_KEY_REGISTRATION else 'disabled'}")
-print(f"Public API key enforcement: {'enabled' if PUBLIC_API_KEY_REQUIRED else 'disabled'}")
-
-if PUBLIC_API_KEY_REQUIRED and not API_KEY_HASH_PEPPER:
-    raise SystemExit(
-        "PUBLIC_API_KEY_REQUIRED=1 needs API_KEY_HASH_PEPPER. "
-        "Keep this secret in your shell or secret manager, never in the repository."
-    )
-if ENABLE_API_KEY_REGISTRATION and not ACCESS_REQUEST_FROM_EMAIL:
-    raise SystemExit(
-        "ENABLE_API_KEY_REGISTRATION=1 needs ACCESS_REQUEST_FROM_EMAIL "
-        "for automatic approved-key delivery."
-    )
 
 
 def build_session():
@@ -101,6 +90,47 @@ TEAM_AUTH_ISSUER = os.environ.get("TEAM_AUTH_ISSUER")
 TEAM_AUTH_AUDIENCE = os.environ.get("TEAM_AUTH_AUDIENCE")
 ENABLE_TEAM_CONSOLE = bool(TEAM_AUTH_ISSUER and TEAM_AUTH_AUDIENCE)
 
+# Preserve deployed feature flags and secrets unless this invocation explicitly
+# overrides them. This prevents a routine code deployment from silently turning
+# off API-key enforcement/registration or removing their IAM permissions.
+try:
+    existing_api_environment = lambda_client.get_function_configuration(
+        FunctionName=API_LAMBDA_NAME
+    ).get("Environment", {}).get("Variables", {})
+except lambda_client.exceptions.ResourceNotFoundException:
+    existing_api_environment = {}
+
+if ENABLE_COST_KPI_RAW is None:
+    ENABLE_COST_KPI = existing_api_environment.get("ENABLE_COST_KPI") == "1"
+if ENABLE_API_KEY_REGISTRATION_RAW is None:
+    ENABLE_API_KEY_REGISTRATION = (
+        existing_api_environment.get("ENABLE_API_KEY_REGISTRATION") == "1"
+    )
+if PUBLIC_API_KEY_REQUIRED_RAW is None:
+    PUBLIC_API_KEY_REQUIRED = existing_api_environment.get("PUBLIC_API_KEY_REQUIRED") == "1"
+API_KEY_HASH_PEPPER = API_KEY_HASH_PEPPER or existing_api_environment.get("API_KEY_HASH_PEPPER")
+ACCESS_REQUEST_FROM_EMAIL = (
+    ACCESS_REQUEST_FROM_EMAIL or existing_api_environment.get("ACCESS_REQUEST_FROM_EMAIL")
+)
+TEAM_AUTH_ISSUER = TEAM_AUTH_ISSUER or existing_api_environment.get("TEAM_AUTH_ISSUER")
+TEAM_AUTH_AUDIENCE = TEAM_AUTH_AUDIENCE or existing_api_environment.get("TEAM_AUTH_AUDIENCE")
+ENABLE_TEAM_CONSOLE = bool(TEAM_AUTH_ISSUER and TEAM_AUTH_AUDIENCE)
+
+print(f"Internal cost KPI: {'enabled' if ENABLE_COST_KPI else 'disabled'}")
+print(f"API key registration: {'enabled' if ENABLE_API_KEY_REGISTRATION else 'disabled'}")
+print(f"Public API key enforcement: {'enabled' if PUBLIC_API_KEY_REQUIRED else 'disabled'}")
+
+if PUBLIC_API_KEY_REQUIRED and not API_KEY_HASH_PEPPER:
+    raise SystemExit(
+        "PUBLIC_API_KEY_REQUIRED=1 needs API_KEY_HASH_PEPPER. "
+        "Keep this secret in your shell or secret manager, never in the repository."
+    )
+if ENABLE_API_KEY_REGISTRATION and not ACCESS_REQUEST_FROM_EMAIL:
+    raise SystemExit(
+        "ENABLE_API_KEY_REGISTRATION=1 needs ACCESS_REQUEST_FROM_EMAIL "
+        "for automatic approved-key delivery."
+    )
+
 
 def read_zip_bytes(zip_name, files):
     with zipfile.ZipFile(zip_name, "w") as z:
@@ -157,6 +187,37 @@ def ensure_bucket():
         print(f"Could not update bucket encryption; continuing: {e}")
 
 ensure_bucket()
+
+
+def ensure_generated_export_lifecycle():
+    """Expire temporary filtered exports without disturbing other bucket rules."""
+    rule_id = "ExpireGeneratedObservationExports"
+    try:
+        existing = s3_client.get_bucket_lifecycle_configuration(Bucket=BUCKET_NAME)
+        rules = [rule for rule in existing.get("Rules", []) if rule.get("ID") != rule_id]
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code")
+        if error_code not in {"NoSuchLifecycleConfiguration", "NoSuchLifecycle"}:
+            print(f"Could not read bucket lifecycle; continuing without changing it: {exc}")
+            return
+        rules = []
+    rules.append({
+        "ID": rule_id,
+        "Status": "Enabled",
+        "Filter": {"Tag": {"Key": "generated-export", "Value": "true"}},
+        "Expiration": {"Days": 1},
+    })
+    try:
+        s3_client.put_bucket_lifecycle_configuration(
+            Bucket=BUCKET_NAME,
+            LifecycleConfiguration={"Rules": rules},
+        )
+        print("Temporary generated exports will expire after one day.")
+    except Exception as exc:
+        print(f"Could not configure generated-export expiry; continuing: {exc}")
+
+
+ensure_generated_export_lifecycle()
 
 
 def ensure_table(name, attribute_definitions, key_schema, indexes=()):
@@ -301,7 +362,12 @@ inline_policy = {
     "Statement": [
         {
             "Effect": "Allow",
-            "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:PutObjectTagging",
+                "s3:ListBucket",
+            ],
             "Resource": [
                 f"arn:aws:s3:::{BUCKET_NAME}",
                 f"arn:aws:s3:::{BUCKET_NAME}/*"
@@ -376,11 +442,19 @@ def api_lambda_environment(existing_env=None):
         "API_KEYS_TABLE": API_KEYS_TABLE_NAME,
         "RATE_LIMITS_TABLE": RATE_LIMITS_TABLE_NAME,
         "ADMIN_AUDIT_TABLE": ADMIN_AUDIT_TABLE_NAME,
+        "API_EXPORT_DEFAULT_DAYS": "14",
+        "API_EXPORT_MAX_DAYS": "31",
+        "API_EXPORT_MAX_ROWS": "250000",
+        "DATA_TIMEZONE": "America/Los_Angeles",
     }
     if API_KEY_HASH_PEPPER:
         environment["API_KEY_HASH_PEPPER"] = API_KEY_HASH_PEPPER
     if ACCESS_REQUEST_FROM_EMAIL:
         environment["ACCESS_REQUEST_FROM_EMAIL"] = ACCESS_REQUEST_FROM_EMAIL
+    if TEAM_AUTH_ISSUER:
+        environment["TEAM_AUTH_ISSUER"] = TEAM_AUTH_ISSUER
+    if TEAM_AUTH_AUDIENCE:
+        environment["TEAM_AUTH_AUDIENCE"] = TEAM_AUTH_AUDIENCE
     return environment
 
 
