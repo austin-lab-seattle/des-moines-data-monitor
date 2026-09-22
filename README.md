@@ -22,7 +22,7 @@ Live dashboard: <https://deohs-des-moines-air.vercel.app>
 ```text
 Field laptop                            AWS Cloud                              Vercel
 ------------                            ---------                              ------
-Serial instruments -> daily files       S3 bucket                              React dashboard
+Serial instruments -> configured files  S3 bucket                              React dashboard
 scripts/log_serial_instruments.py             |                                      |
 Instrument files (data_glob)                   |                                      |
      |                                  des-moines-data-pipeline-austinlab           |

@@ -9,7 +9,7 @@
       "baud": 38400,
       "parser": "no2",
       "output_dir": "data/no2_caps",
-      "filename": "{date}_NO2-CAPS-serial.dat",
+      "filename": "no2.txt",
       "active": true
     },
     {
@@ -19,7 +19,7 @@
       "baud": 38400,
       "parser": "neph",
       "output_dir": "data/nephlometer",
-      "filename": "{date}_Neph-serial.csv",
+      "filename": "Neph.txt",
       "active": true
     },
     {
@@ -29,7 +29,7 @@
       "baud": 38400,
       "parser": "licor",
       "output_dir": "data/co2_li_cor",
-      "filename": "{date}_CO2-serial.txt",
+      "filename": "co2.txt",
       "active": true
     }
   ]

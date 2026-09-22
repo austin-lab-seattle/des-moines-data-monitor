@@ -67,11 +67,11 @@ across the field laptop, AWS, and Vercel:
 | Component | Where | Cadence | Job |
 |---|---|---|---|
 | `upload_instrument_data.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
-| `aq-silver-builder` | AWS Lambda | daily EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
+| `aq-silver-builder` | AWS Lambda | 15-minute EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
 | `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve public read APIs, and assemble dashboard JSON |
 | `frontend` | Vercel | browser | render the dashboard, poll the public summary endpoint, and provide the read-only Data Review UI after deployment |
 
-There are two schedules: the laptop upload schedule and the daily cloud Silver
+There are two schedules: the laptop upload schedule and the 15-minute cloud Silver
 builder schedule. The API still counts Bronze live whenever the dashboard asks.
 
 ---
@@ -625,7 +625,7 @@ no static key ever has to live in the repo; the field laptop can still drop an
 
 There are two active AWS Lambdas for this pipeline:
 
-- `aq-silver-builder` rebuilds the Silver layer from Bronze daily.
+- `aq-silver-builder` rebuilds the Silver layer from Bronze every 15 minutes.
 - `aq-dashboard-api` sits behind API Gateway and serves the public read API plus
   optional internal dashboard KPIs.
 

@@ -23,8 +23,10 @@ from pathlib import Path
 
 try:
     import serial
+    from serial.tools import list_ports
 except ImportError:  # Allows parser unit tests and --help without pyserial.
     serial = None
+    list_ports = None
 
 
 LOGGER = logging.getLogger("serial-instruments")
@@ -232,7 +234,7 @@ class DailyTextFile:
 
 
 class DailyInstrumentRaw:
-    """Append timestamped-but-otherwise-raw lines for Bronze ingestion."""
+    """Append raw envelopes to a fixed or date-expanded configured filename."""
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -289,9 +291,27 @@ def validate_config(config):
                 raise ValueError
         except (TypeError, ValueError):
             errors.append(f"{label}: baud must be a positive integer")
-        if "{date}" not in str(cfg.get("filename", "")):
-            errors.append(f"{label}: filename must contain {{date}} for daily rollover")
     return errors
+
+
+def list_available_ports():
+    """Print the same COM-port identity information shown by Device Manager."""
+    if list_ports is None:
+        LOGGER.error("pyserial is not installed; run pip install -r requirements.txt")
+        return 1
+    ports = sorted(list_ports.comports(), key=lambda item: item.device)
+    if not ports:
+        LOGGER.warning("No serial ports were detected.")
+        return 0
+    LOGGER.info("Detected %d serial port(s):", len(ports))
+    for port in ports:
+        LOGGER.info(
+            "  %-8s  %s  [%s]",
+            port.device,
+            port.description or "Unknown device",
+            port.hwid or "no hardware ID",
+        )
+    return 0
 
 
 def run_instrument(cfg, stop_event, raw_log_dir, reconnect_seconds):
@@ -391,6 +411,11 @@ def main():
     parser.add_argument(
         "--check", action="store_true", help="validate configuration without opening ports"
     )
+    parser.add_argument(
+        "--list-ports",
+        action="store_true",
+        help="list detected COM ports and Device Manager descriptions, then exit",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -398,6 +423,8 @@ def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler("serial_collector.log")],
     )
+    if args.list_ports:
+        return list_available_ports()
     try:
         config = load_config(args.config)
     except (OSError, json.JSONDecodeError) as exc:
@@ -415,7 +442,12 @@ def main():
         active = [cfg for cfg in config["instruments"] if cfg.get("active", True)]
         LOGGER.info("Serial configuration is valid for %d active instrument(s)", len(active))
         for cfg in active:
-            LOGGER.info("[%s] %s at %s baud", cfg["id"], cfg["port"], cfg["baud"])
+            filename = cfg["filename"].format(date=datetime.now().strftime("%Y-%m-%d"))
+            destination = Path(cfg["output_dir"]) / filename
+            LOGGER.info(
+                "[%s] %s at %s baud -> %s",
+                cfg["id"], cfg["port"], cfg["baud"], destination,
+            )
         return 0
     try:
         run(config)

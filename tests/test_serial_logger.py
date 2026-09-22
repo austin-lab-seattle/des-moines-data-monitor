@@ -23,6 +23,28 @@ class SerialLoggerParserTests(unittest.TestCase):
             self.assertEqual("PC_Date_Time\tRaw_Line", lines[0])
             self.assertEqual(f"2026-09-18 12:34:56.123\t{raw}", lines[1])
 
+    def test_fixed_intended_filename_is_supported(self):
+        with TemporaryDirectory() as root:
+            cfg = {
+                "id": "NEPH-PM25",
+                "name": "neph",
+                "port": "COM8",
+                "baud": 38400,
+                "parser": "neph",
+                "output_dir": root,
+                "filename": "Neph.txt",
+                "active": True,
+            }
+            self.assertEqual([], log_serial_instruments.validate_config({"instruments": [cfg]}))
+            output = log_serial_instruments.DailyInstrumentRaw(cfg)
+            output.write(datetime(2026, 9, 18, 12, 0), "raw-one")
+            output.write(datetime(2026, 9, 19, 12, 0), "raw-two")
+            output.handle.close()
+
+            lines = (Path(root) / "Neph.txt").read_text().splitlines()
+            self.assertEqual("PC_Date_Time\tRaw_Line", lines[0])
+            self.assertEqual(3, len(lines))
+
     def test_no2_parser_writes_pipeline_schema(self):
         moment = datetime(2026, 9, 18, 12, 34, 56)
         epoch_seconds = (moment - log_serial_instruments.EPOCH_1904).total_seconds()

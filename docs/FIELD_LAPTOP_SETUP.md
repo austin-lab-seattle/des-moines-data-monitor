@@ -35,7 +35,7 @@ instrument files. The uploader discovers new rollover files automatically.
 
 The uploader does not read COM ports itself. `scripts/log_serial_instruments.py`
 is the continuous recorder that replaces PuTTY for NO2-CAPS, NEPH-PM25, and
-CO2-LICOR. It writes daily files with the header
+CO2-LICOR. It writes the configured growing files with the header
 `PC_Date_Time<TAB>Raw_Line` in folders already read by the uploader. `Raw_Line`
 is the exact instrument payload; no measurements are parsed or corrected before
 Bronze. Separate lossless diagnostic logs are retained under `serial_logs/`.
@@ -48,14 +48,42 @@ LI-COR XML has no timestamp. For NO2 and the nephelometer, the original
 instrument time and `PC_minus_instrument_s` are retained as diagnostic columns;
 charts and time filters use the PC-local timestamp.
 
+List the ports from PowerShell without opening Device Manager:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\log_serial_instruments.py --list-ports
+```
+
+This prints entries such as `COM7  USB Serial Port (COM7)` plus the hardware
+ID. The equivalent built-in Windows query is:
+
+```powershell
+Get-CimInstance Win32_SerialPort | Format-Table DeviceID, Name, PNPDeviceID -AutoSize
+```
+
 Copy the example configuration:
 
 ```powershell
 Copy-Item serial_instruments_config.example.json serial_instruments_config.json
 ```
 
-Edit the copy and verify every COM port against Windows Device Manager. All
-three configured serial instruments use 38400 baud.
+Edit the copy and assign the detected COM port to each instrument. All three
+configured serial instruments use 38400 baud.
+
+The example writes directly to the intended growing files—there is no second
+renamed output copy:
+
+```text
+data/no2_caps/no2.txt
+data/nephlometer/Neph.txt
+data/co2_li_cor/co2.txt
+```
+
+Those paths are relative to the repository because the Windows launcher first
+changes into the repository root. If the field laptop uses another folder,
+put its full path in `output_dir`, for example `C:/InstrumentData/NO2`, while
+keeping the required filename unchanged. A filename containing `{date}` is also
+supported when daily rollover files are preferred, but it is not required.
 
 Close PuTTY before the preflight—only one program can own each COM port—then
 validate the configuration and run a short manual test:
@@ -65,8 +93,8 @@ validate the configuration and run a short manual test:
 .\.venv\Scripts\python.exe scripts\log_serial_instruments.py
 ```
 
-Wait until each active instrument reports that its port is open and confirm new
-daily files appear under `data/`. Stop the manual test with `Ctrl+C`, then
+Wait until each active instrument reports that its port is open and confirm the
+configured files under `data/` are updating. Stop the manual test with `Ctrl+C`, then
 install the continuous logger at Windows logon:
 
 ```powershell
