@@ -107,18 +107,17 @@ known parser and candidate port but has `serial.enabled: false`; change it to
 BC and SMPS have `acquisition_type: "file"` and no serial block. The configured
 serial-capable instruments use 38400 baud.
 
-The example writes directly to the intended growing files—there is no second
-renamed output copy:
+The example writes directly to the canonical growing files—there is no second
+renamed acquisition copy:
 
 ```text
-data/no2_caps/no2.txt
-data/nephlometer/Neph.txt
-data/co2_li_cor/co2.txt
+C:\des_moines\data\no2_caps\no2.txt
+C:\des_moines\data\nephlometer\Neph.txt
+C:\des_moines\data\co2_li_cor\co2.txt
 ```
 
-Those paths are relative to the repository because the Windows launcher first
-changes into the repository root. If the field laptop uses another folder,
-put its full path in `output_dir`, for example `C:/InstrumentData/NO2`, while
+The tracked example config uses absolute `C:/des_moines/data/...` output paths.
+If the field laptop uses another folder, put its full path in `output_dir` while
 keeping the required filename unchanged. A filename containing `{date}` is also
 supported when daily rollover files are preferred, but it is not required.
 
@@ -131,14 +130,16 @@ validate the configuration and run a short manual test:
 ```
 
 Wait until each active instrument reports that its port is open and confirm the
-configured files under `data/` are updating. Stop the manual test with `Ctrl+C`, then
-install both required tasks:
+configured files under `C:\des_moines\data` are updating. Stop the manual test
+with `Ctrl+C`, then
+install all three required tasks:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
 Get-ScheduledTaskInfo -TaskName DesMoinesSerialLogger
 Get-ScheduledTaskInfo -TaskName DesMoinesDataMonitorUpload
-Get-Content .\serial_collector.log -Tail 100
+Get-ScheduledTaskInfo -TaskName DesMoinesSharedDriveCopy
+Get-Content .\serial_collector.log -Tail 100  # manual-test log only
 ```
 
 The serial task creates local files continuously, while the upload task
@@ -199,15 +200,22 @@ Get-Content .\collector.log -Tail 100
 
 Exit code `0` means every active instrument completed and the pipeline status
 was written. A nonzero result means at least one instrument or the status write
-failed. Failed batches stay in `sensor_buffer.db` and are retried on the next
-run.
+failed. Failed batches stay in the SQLite buffer and are retried on the next
+run. The installer moves that buffer to
+`C:\des_moines\runtime\sensor_buffer.db` before registering the recurring
+tasks.
 
 Confirm the new upload timestamp and instrument counts at
 <https://deohs-des-moines-air.vercel.app> before scheduling the task.
 
-## 6. Install exactly two tasks
+## 6. Install exactly three tasks
 
-The combined installer creates or updates both required tasks and starts them:
+The combined installer creates or updates all required tasks and starts them.
+Its shared-copy defaults are `C:\des_moines\data` and:
+
+```text
+C:\Users\lab_admin\OneDrive - UW\Austin Lab-Des Moines Monitoring - Raw Data - Documents\Raw Data\des_moines\data
+```
 
 ```powershell
 powershell -ExecutionPolicy Bypass `
@@ -223,9 +231,11 @@ The tasks are:
 
 - `DesMoinesSerialLogger`: continuous acquisition from Windows startup for enabled serial instruments;
 - `DesMoinesDataMonitorUpload`: all-instrument AWS upload every 15 minutes.
+- `DesMoinesSharedDriveCopy`: stable local-data snapshots every 15 minutes,
+  starting six minutes after the AWS job to reduce simultaneous reads.
 
 The installer prompts once for the Windows password and stores it using Task
-Scheduler's protected credential storage so both tasks can run while
+Scheduler's protected credential storage so all three tasks can run while
 `lab_admin` is signed out. If the password changes, rerun the installer. The
 known legacy task `desmoines_data_upload` is stopped and removed, preventing a
 second uploader from reading the same files.
@@ -236,17 +246,18 @@ The upload task:
 - runs missed executions when Windows becomes available;
 - prevents overlapping uploader instances;
 - retries a failed process up to three times at five-minute intervals;
-- writes output to `collector.log` in the repository root.
+- writes output to `C:\des_moines\runtime\collector.log`.
 
 Omit `-RunWhenLoggedOff` only for a short interactive test. Do not select **Do
 not store password**: that uses an S4U logon without normal network-resource
 access. The tasks do not require **Run with highest privileges** and the
 installer uses limited privileges.
 
-Mapped drive letters and the interactive OneDrive/SharePoint sync client may be
-unavailable while the account is logged off. Keep the actively written
-instrument files and `C:\des_moines\aws_creds.json` on local disk; let
-SharePoint copy completed or rotated files separately.
+Mapped drive letters and the interactive OneDrive sync client may be unavailable
+while the account is logged off. The scheduled task writes snapshots to the
+local OneDrive folder using its full path; cloud synchronization may wait until
+OneDrive is running in the `lab_admin` session. Keep the actively written
+instrument files and `C:\des_moines\aws_creds.json` on local disk.
 
 ### Active-file and SharePoint safety
 
@@ -258,19 +269,23 @@ exclusive sharing mode, producing a sharing-violation error.
 
 The AWS uploader retries a locked file three times. If it remains locked, it
 leaves that file's byte checkpoint unchanged and retries it on the next
-15-minute run; it never skips the unread bytes. SharePoint should receive only
-completed/rotated files or a snapshot copied from the live directory, not own
-the active acquisition file itself.
+15-minute run; it never skips the unread bytes. The shared-copy task similarly
+defers locked or changing files, copies into a temporary destination, and only
+replaces the OneDrive file after a stable complete read. It never deletes local
+or shared files.
 
-## 7. Verify the scheduled task
+## 7. Verify the scheduled tasks
 
 ```powershell
 Get-ScheduledTask -TaskName DesMoinesDataMonitorUpload
 Get-ScheduledTaskInfo -TaskName DesMoinesDataMonitorUpload
 Get-ScheduledTask -TaskName DesMoinesSerialLogger
 Get-ScheduledTaskInfo -TaskName DesMoinesSerialLogger
-Get-Content .\collector.log -Tail 100
-Get-Content .\serial_collector.log -Tail 100
+Get-ScheduledTask -TaskName DesMoinesSharedDriveCopy
+Get-ScheduledTaskInfo -TaskName DesMoinesSharedDriveCopy
+Get-Content C:\des_moines\runtime\collector.log -Tail 100
+Get-Content C:\des_moines\runtime\serial_collector.log -Tail 100
+Get-Content C:\des_moines\runtime\logs\shared_drive_copy.log -Tail 100
 ```
 
 `LastTaskResult` should be `0`. Recheck the live dashboard after the next
@@ -279,7 +294,7 @@ log and the dashboard timestamp.
 
 ## Updating or removing the schedule
 
-Running the installer again safely updates both existing tasks:
+Running the installer again safely updates all existing tasks:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 30
@@ -288,7 +303,9 @@ powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1
 To disable it without deleting configuration:
 
 ```powershell
+Disable-ScheduledTask -TaskName DesMoinesSerialLogger
 Disable-ScheduledTask -TaskName DesMoinesDataMonitorUpload
+Disable-ScheduledTask -TaskName DesMoinesSharedDriveCopy
 ```
 
 To remove it:
@@ -296,7 +313,9 @@ To remove it:
 ```powershell
 Unregister-ScheduledTask -TaskName DesMoinesDataMonitorUpload -Confirm:$false
 Unregister-ScheduledTask -TaskName DesMoinesSerialLogger -Confirm:$false
+Unregister-ScheduledTask -TaskName DesMoinesSharedDriveCopy -Confirm:$false
 ```
 
-Do not delete `checkpoints/` or `sensor_buffer.db` during normal maintenance.
-They protect incremental progress and failed-upload recovery.
+Do not delete `C:\des_moines\runtime\checkpoints` or
+`C:\des_moines\runtime\sensor_buffer.db` during normal maintenance. They
+protect incremental progress and failed-upload recovery.

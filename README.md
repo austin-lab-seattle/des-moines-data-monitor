@@ -38,6 +38,18 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
                                         API Gateway  -------------------------------+
 ```
 
+## Field-laptop layout
+
+Runtime data and credentials stay outside the Git checkout:
+
+```text
+C:\des_moines\
+├── aws_creds.json
+├── data\                       # canonical raw instrument files
+├── runtime\                    # logs, checkpoints, buffer and serial receipts
+└── des-moines-data-monitor\    # Git checkout; code and local config only
+```
+
 ## Repository layout
 
 ```text
@@ -48,17 +60,15 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 ├── config/
 │   ├── instruments.json             # one local config for acquisition + upload (gitignored)
 │   └── instruments.example.json     # tracked template
-├── aws_creds.json              # optional local credential fallback (gitignored)
 ├── requirements.txt
 ├── scripts/
 │   ├── field/                        # acquisition, upload and laptop scheduling
 │   │   ├── acquire_serial.py         # continuous PuTTY replacement
 │   │   ├── upload_to_aws.py          # incremental Bronze uploader
-│   │   └── windows/install_tasks.ps1 # installs exactly two Windows tasks
+│   │   ├── copy_to_shared_drive.py   # stable, non-destructive OneDrive snapshots
+│   │   └── windows/install_tasks.ps1 # installs the three Windows field tasks
 │   ├── aws/                          # deploy and administrative commands
 │   └── quality/                      # read-only audit and smoke checks
-├── checkpoints/                # per-instrument, per-file byte offsets (gitignored)
-├── data/                       # local instrument files (gitignored)
 └── frontend/                   # Vite React dashboard (deployed via Vercel)
 ```
 
@@ -102,13 +112,14 @@ because each instrument is configured with a glob, not a single path:
 
 ```json
 { "id": "CO2-LICOR", "ingestion_type": "growing_file",
-  "data_glob": "data/co2_li_cor/*CO2-*.txt", "active": true }
+  "data_glob": "C:/des_moines/data/co2_li_cor/*CO2-*.txt", "active": true }
 ```
 
 The uploader then:
 
 - globs all matching files each run (a single string or a list of patterns);
-- tracks a byte offset **per file** in `checkpoints/{instrument}.json`
+- tracks a byte offset **per file** in
+  `C:\des_moines\runtime\checkpoints\{instrument}.json`
   (`{"files": {"<filename>": {"offset": N}}}`), so a brand-new file starts at 0
   while existing files continue where they left off — no re-uploads, no gaps;
 - holds back a trailing partial line until the instrument finishes writing it,
@@ -124,12 +135,14 @@ the next run.
 
 ## Scheduling
 
-There are two field-laptop tasks plus one cloud schedule:
+There are three field-laptop tasks plus one cloud schedule:
 
 - The serial logger runs continuously on the field laptop and replaces PuTTY
   for the enabled serial instruments (currently NO2 and the nephelometer).
 - The laptop upload job runs on the field laptop because it reads local
   instrument files and uploads new bytes to S3 Bronze.
+- The shared-drive copy job snapshots the same canonical local data tree into
+  the UW OneDrive folder without deleting destination files.
 - The cloud Silver builder runs every 15 minutes in EventBridge and rebuilds the
   deduplicated Silver CSVs from Bronze.
 
@@ -140,7 +153,7 @@ python scripts/field/upload_to_aws.py --check  # validates without uploading
 python scripts/field/upload_to_aws.py
 ```
 
-Install both Windows tasks (continuous serial logging and a 15-minute upload):
+Install all three Windows tasks (serial logging, AWS upload, and shared copy):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -AwsCredsFile "C:\des_moines\aws_creds.json" -UploadEveryMinutes 15 -RunWhenLoggedOff -RunAsUser "$env:COMPUTERNAME\lab_admin" -RunNow
@@ -181,10 +194,11 @@ and keep it scoped to least privilege (S3 write to the data bucket only).
 
 ## Local config
 
-The sensitive/local files are gitignored: `aws_creds*.json`,
-`config/instruments.json`, `checkpoints/`, `sensor_buffer.db`, `collector.log`,
-`data/`. Copy `config/instruments.example.json` to `config/instruments.json` and
-point each `data_glob` at the live file locations on the laptop.
+The sensitive/local files are gitignored, but the field installer also keeps
+them outside the checkout: credentials and canonical raw data live directly
+under `C:\des_moines`, while logs, checkpoints and the SQLite retry buffer live
+under `C:\des_moines\runtime`. Copy `config/instruments.example.json` to
+`config/instruments.json` and set the COM ports before installation.
 
 Current AWS target:
 

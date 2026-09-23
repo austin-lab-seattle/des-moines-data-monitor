@@ -1,7 +1,10 @@
 # Script inventory
 
-Run Python commands from the repository root. Field-laptop configuration lives
-in `config/instruments.json`; copy it from `config/instruments.example.json`.
+Run manual Python commands from the repository root. Field-laptop configuration
+lives in `config/instruments.json`; copy it from
+`config/instruments.example.json`. Windows scheduled tasks use
+`C:\des_moines\runtime` as their working directory so logs and state do not
+clutter the checkout.
 
 ## Field laptop
 
@@ -10,8 +13,10 @@ in `config/instruments.json`; copy it from `config/instruments.example.json`.
   confirmed. It can passively detect or explicitly update the COM-port mapping.
 - `field/upload_to_aws.py` incrementally reads all five instrument sources and
   uploads raw bytes to S3 Bronze without applying scientific transformations.
-- `field/windows/install_tasks.ps1` installs exactly two Windows tasks: the
-  continuous serial logger and the repeating AWS uploader.
+- `field/copy_to_shared_drive.py` makes non-destructive, stable snapshots from
+  `C:\des_moines\data` into the UW OneDrive shared folder.
+- `field/windows/install_tasks.ps1` installs the serial logger, AWS uploader,
+  and staggered shared-drive copy tasks.
 - `field/macos/install_upload_schedule.sh` and `field/macos/run_uploader.sh`
   provide the optional macOS upload schedule.
 

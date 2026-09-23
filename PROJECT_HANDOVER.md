@@ -20,13 +20,15 @@ Field laptop -> S3 Bronze -> Silver builder Lambda -> S3 Silver
 S3 Bronze/Silver -> API Lambda -> API Gateway -> Vercel dashboard
 ```
 
-- The Windows field laptop has exactly two scheduled tasks:
+- The Windows field laptop has three scheduled tasks:
   `DesMoinesSerialLogger` continuously runs `scripts/field/acquire_serial.py`,
   and `DesMoinesDataMonitorUpload` runs `scripts/field/upload_to_aws.py` every
-  15 minutes.
+  15 minutes. `DesMoinesSharedDriveCopy` separately snapshots the canonical
+  local data tree into the UW OneDrive shared folder.
 - Uploads are incremental by source filename and byte offset. Local checkpoints
   are mirrored to S3.
-- Failed uploads remain in `sensor_buffer.db` and retry on the next run.
+- Failed uploads remain in `C:\des_moines\runtime\sensor_buffer.db` and retry
+  on the next run.
 - The 15-minute Silver builder filters and deduplicates Bronze data.
 - The public dashboard reads the anonymous, read-only routes.
 - Researcher scripts use individually issued API keys on keyed routes.
@@ -41,11 +43,13 @@ the recurring task until:
 1. every `data_glob` matches only the intended instrument files;
 2. `python scripts/field/upload_to_aws.py --check` passes;
 3. one manual upload exits with code `0`;
-4. `collector.log` contains no upload errors; and
+4. `C:\des_moines\runtime\collector.log` contains no upload errors; and
 5. the live dashboard shows the expected new timestamp and counts.
 
-The task name is `DesMoinesDataMonitorUpload`. Its normal interval is 15
-minutes. Do not run two uploader instances at the same time.
+The managed tasks are `DesMoinesSerialLogger`,
+`DesMoinesDataMonitorUpload`, and `DesMoinesSharedDriveCopy`. The two periodic
+jobs normally run every 15 minutes and are staggered. Do not run two uploader
+instances at the same time.
 
 ## Public and researcher API
 
@@ -133,4 +137,5 @@ Production smoke checks should confirm:
   file. Inspect globs before the first real upload.
 - File identity is the basename. Replacing a file with different contents but
   the same name can confuse an existing checkpoint.
-- Do not delete `checkpoints/` or `sensor_buffer.db` during routine cleanup.
+- Do not delete `C:\des_moines\runtime\checkpoints` or
+  `C:\des_moines\runtime\sensor_buffer.db` during routine cleanup.

@@ -21,6 +21,13 @@ class InstrumentConfigTests(unittest.TestCase):
             {item["id"] for item in serial},
         )
         self.assertTrue(all(item["baud"] == 38400 for item in serial))
+        for instrument in instruments:
+            patterns = instrument["data_glob"]
+            if isinstance(patterns, str):
+                patterns = [patterns]
+            self.assertTrue(
+                all(pattern.startswith("C:/des_moines/data/") for pattern in patterns)
+            )
         self.assertEqual(
             {"NEPH-PM25", "NO2-CAPS"},
             {item["id"] for item in serial if item["active"]},

@@ -67,17 +67,26 @@ across the field laptop, AWS, and Vercel:
 | Component | Where | Cadence | Job |
 |---|---|---|---|
 | `upload_to_aws.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
+| `copy_to_shared_drive.py` | laptop | every 15 min, staggered | atomically snapshot stable local files into the UW OneDrive folder |
 | `aq-silver-builder` | AWS Lambda | 15-minute EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
 | `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve public read APIs, and assemble dashboard JSON |
 | `frontend` | Vercel | browser | render the dashboard, poll the public summary endpoint, and provide the read-only Data Review UI after deployment |
 
-There are two field-laptop tasks (continuous serial acquisition and the
-15-minute upload) plus the 15-minute cloud Silver builder schedule. The API
-still counts Bronze live whenever the dashboard asks.
+There are three field-laptop tasks (continuous serial acquisition, AWS upload,
+and shared-drive copy) plus the 15-minute cloud Silver builder schedule. The
+API still counts Bronze live whenever the dashboard asks.
 
 ---
 
-## 2. Repository layout
+## 2. Field and repository layout
+
+```text
+C:\des_moines\
+├── aws_creds.json
+├── data\                           # canonical raw instrument files
+├── runtime\                        # logs, checkpoints and SQLite retry buffer
+└── des-moines-data-monitor\        # Git checkout
+```
 
 ```text
 .
@@ -87,24 +96,21 @@ still counts Bronze live whenever the dashboard asks.
 ├── config/
 │   ├── instruments.json             # LOCAL unified config (gitignored)
 │   └── instruments.example.json     # tracked template
-├── aws_creds.json                   # OPTIONAL local credential fallback (gitignored)
 ├── requirements.txt                 # boto3
 ├── scripts/
 │   ├── field/                       # acquisition, upload and laptop schedules
 │   ├── aws/                         # AWS deployment and administration
 │   └── quality/                     # read-only audits and smoke tests
-├── checkpoints/                     # per-instrument, per-file byte offsets (gitignored)
-├── data/                            # local instrument files (gitignored)
 └── frontend/                        # Vite React dashboard (deployed via Vercel)
 ```
 
-**Runtime artifacts** (all gitignored): `sensor_buffer.db`, `collector.log`,
-`checkpoints/`, `data/`, `aws_creds.json`, `config/instruments.json`.
+The local unified config remains gitignored at `config/instruments.json`.
+Scheduled tasks use `C:\des_moines\runtime` as their working directory, so the
+uploader's relative logs, checkpoints and buffer stay outside the checkout.
 
-> **Why run from the repo root?** The uploader uses CWD-relative paths for the
-> config, credentials, log, SQLite DB, and checkpoints. Scheduled-task actions
-> set the repository as their working directory, so all relative paths resolve
-> consistently regardless of where Task Scheduler itself runs.
+The installer passes absolute paths for the config, credentials, raw-data tree
+and OneDrive destination. This keeps code, raw data and mutable runtime state
+separate.
 
 ---
 
@@ -125,11 +131,11 @@ still counts Bronze live whenever the dashboard asks.
         "port": "COM9",
         "baud": 38400,
         "parser": "licor",
-        "output_dir": "data/co2_li_cor",
+        "output_dir": "C:/des_moines/data/co2_li_cor",
         "filename": "co2.txt"
       },
       "ingestion_type": "growing_file",
-      "data_glob": ["data/co2_li_cor/*CO2-*.txt", "data/co2_li_cor/co2.txt"],
+      "data_glob": ["C:/des_moines/data/co2_li_cor/*CO2-*.txt", "C:/des_moines/data/co2_li_cor/co2.txt"],
       "active": true
     }
   ],
@@ -849,7 +855,7 @@ sqlite3 sensor_buffer.db "SELECT instrument_id, COUNT(*) , SUM(uploaded) FROM bu
 
 ## 18. End-to-end worked example: a CO2 file rollover
 
-Setup: `data_glob = data/co2_li_cor/*CO2-*.txt`. The instrument has been writing
+Setup: `data_glob = C:/des_moines/data/co2_li_cor/*CO2-*.txt`. The instrument has been writing
 `2026Feb12-25_CO2-46_Duwamish.txt` and we're caught up (offset = file size). Today
 it starts a new file `2026Apr12-28_CO2-46_Duwamish.txt`.
 

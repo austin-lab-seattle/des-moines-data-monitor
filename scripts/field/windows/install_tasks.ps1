@@ -2,7 +2,11 @@ param(
     [int]$UploadEveryMinutes = 15,
     [string]$UploadTaskName = "DesMoinesDataMonitorUpload",
     [string]$SerialTaskName = "DesMoinesSerialLogger",
+    [string]$SharedCopyTaskName = "DesMoinesSharedDriveCopy",
     [string]$AwsCredsFile = "C:\des_moines\aws_creds.json",
+    [string]$LocalDataRoot = "C:\des_moines\data",
+    [string]$SharedDataRoot = "C:\Users\lab_admin\OneDrive - UW\Austin Lab-Des Moines Monitoring - Raw Data - Documents\Raw Data\des_moines\data",
+    [string]$RuntimeRoot = "C:\des_moines\runtime",
     [switch]$RunWhenLoggedOff,
     [string]$RunAsUser = "$env:USERDOMAIN\$env:USERNAME",
     [switch]$RunNow
@@ -16,6 +20,7 @@ $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $UnifiedConfig = Join-Path $RepoRoot "config\instruments.json"
 $UploadScript = Join-Path $RepoRoot "scripts\field\upload_to_aws.py"
 $SerialScript = Join-Path $RepoRoot "scripts\field\acquire_serial.py"
+$SharedCopyScript = Join-Path $RepoRoot "scripts\field\copy_to_shared_drive.py"
 
 if ($UploadEveryMinutes -lt 1) {
     throw "UploadEveryMinutes must be at least 1."
@@ -31,12 +36,71 @@ $ConfigPath = $UnifiedConfig
 if (-not (Test-Path -LiteralPath $AwsCredsFile -PathType Leaf)) {
     throw "AWS credentials file not found: $AwsCredsFile"
 }
+if (-not (Test-Path -LiteralPath $LocalDataRoot -PathType Container)) {
+    throw "Local data directory not found: $LocalDataRoot"
+}
+New-Item -ItemType Directory -Force $SharedDataRoot | Out-Null
+$RuntimeLogs = Join-Path $RuntimeRoot "logs"
+New-Item -ItemType Directory -Force $RuntimeLogs | Out-Null
+$SharedCopyLog = Join-Path $RuntimeLogs "shared_drive_copy.log"
+
+# Migrate the known repository-relative example paths to the canonical local
+# data tree. Absolute or custom paths are left untouched.
+$ConfigObject = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+$ConfigChanged = $false
+$DataRootForward = $LocalDataRoot -replace "\\", "/"
+function Convert-CanonicalDataPath {
+    param([string]$Value)
+    if (-not $Value) {
+        return $Value
+    }
+    $Normalized = $Value -replace "\\", "/"
+    if ($Normalized.StartsWith("data/")) {
+        $script:ConfigChanged = $true
+        return "$DataRootForward/$($Normalized.Substring(5))"
+    }
+    return $Value
+}
+foreach ($Instrument in $ConfigObject.instruments) {
+    if ($Instrument.data_glob -is [string]) {
+        $Instrument.data_glob = Convert-CanonicalDataPath $Instrument.data_glob
+    } elseif ($null -ne $Instrument.data_glob) {
+        $Instrument.data_glob = @(
+            $Instrument.data_glob | ForEach-Object { Convert-CanonicalDataPath $_ }
+        )
+    }
+    if ($null -ne $Instrument.serial -and $Instrument.serial.output_dir) {
+        $Instrument.serial.output_dir = Convert-CanonicalDataPath $Instrument.serial.output_dir
+    }
+}
+if ($ConfigChanged) {
+    Copy-Item -LiteralPath $ConfigPath -Destination "$ConfigPath.bak-data-root" -Force
+    $ConfigJson = $ConfigObject | ConvertTo-Json -Depth 20
+    $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        $ConfigPath,
+        $ConfigJson + [Environment]::NewLine,
+        $Utf8NoBom
+    )
+    Write-Host "Updated relative instrument paths to $LocalDataRoot"
+}
+
+$OldRepoData = Join-Path $RepoRoot "data"
+if (Test-Path -LiteralPath $OldRepoData -PathType Container) {
+    $OldRepoFile = Get-ChildItem -LiteralPath $OldRepoData -File -Recurse | Select-Object -First 1
+    if ($OldRepoFile) {
+        Write-Warning (
+            "Old files still exist under $OldRepoData. The tasks now use $LocalDataRoot. " +
+            "Merge those historical files into the canonical data folder after checking for duplicates."
+        )
+    }
+}
 
 $TaskPassword = $null
 if ($RunWhenLoggedOff) {
     $TaskCredential = Get-Credential `
         -UserName $RunAsUser `
-        -Message "Enter the Windows password used to run both Des Moines tasks while logged off."
+        -Message "Enter the Windows password used to run all three Des Moines tasks while logged off."
     if (-not $TaskCredential) {
         throw "Windows task credentials were not provided."
     }
@@ -69,7 +133,7 @@ function Register-DesMoinesTask {
     Register-ScheduledTask @Registration | Out-Null
 }
 
-Write-Host "Running serial and upload preflights..."
+Write-Host "Running serial, upload and shared-copy preflights..."
 & $PythonExe $SerialScript --config $ConfigPath --check
 if ($LASTEXITCODE -ne 0) {
     throw "Serial preflight failed."
@@ -82,11 +146,59 @@ $UploadArguments = @(
 if ($LASTEXITCODE -ne 0) {
     throw "Upload preflight failed."
 }
+& $PythonExe $SharedCopyScript `
+    --source $LocalDataRoot `
+    --destination $SharedDataRoot `
+    --log-file $SharedCopyLog `
+    --check
+if ($LASTEXITCODE -ne 0) {
+    throw "Shared-drive copy preflight failed."
+}
+
+# Stop any old processes before relocating their state. Existing tasks remain
+# registered until all replacements have been created successfully.
+foreach ($TaskToStop in @($SerialTaskName, $UploadTaskName, $SharedCopyTaskName, "desmoines_data_upload")) {
+    Stop-ScheduledTask -TaskName $TaskToStop -ErrorAction SilentlyContinue
+}
+
+function Move-LegacyRuntimeItem {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Source)) {
+        return
+    }
+    if (Test-Path -LiteralPath $Destination) {
+        Write-Warning "Kept legacy runtime item because destination already exists: $Source"
+        return
+    }
+    $DestinationParent = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Force $DestinationParent | Out-Null
+    Move-Item -LiteralPath $Source -Destination $Destination
+    Write-Host "Moved runtime state: $Source -> $Destination"
+}
+
+Move-LegacyRuntimeItem `
+    -Source (Join-Path $RepoRoot "checkpoints") `
+    -Destination (Join-Path $RuntimeRoot "checkpoints")
+Move-LegacyRuntimeItem `
+    -Source (Join-Path $RepoRoot "sensor_buffer.db") `
+    -Destination (Join-Path $RuntimeRoot "sensor_buffer.db")
+Move-LegacyRuntimeItem `
+    -Source (Join-Path $RepoRoot "collector.log") `
+    -Destination (Join-Path $RuntimeRoot "collector.log")
+Move-LegacyRuntimeItem `
+    -Source (Join-Path $RepoRoot "serial_collector.log") `
+    -Destination (Join-Path $RuntimeRoot "serial_collector.log")
+Move-LegacyRuntimeItem `
+    -Source (Join-Path $RepoRoot "serial_logs") `
+    -Destination (Join-Path $RuntimeRoot "serial_logs")
 
 $SerialAction = New-ScheduledTaskAction `
     -Execute $PythonExe `
     -Argument "`"$SerialScript`" --config `"$ConfigPath`"" `
-    -WorkingDirectory $RepoRoot
+    -WorkingDirectory $RuntimeRoot
 if ($RunWhenLoggedOff) {
     $SerialTrigger = New-ScheduledTaskTrigger -AtStartup
 } else {
@@ -115,7 +227,7 @@ $UploadArgumentString = (
 $UploadAction = New-ScheduledTaskAction `
     -Execute $PythonExe `
     -Argument $UploadArgumentString `
-    -WorkingDirectory $RepoRoot
+    -WorkingDirectory $RuntimeRoot
 $UploadTrigger = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddMinutes(1) `
@@ -137,7 +249,36 @@ Register-DesMoinesTask `
     -Settings $UploadSettings `
     -Description "Uploads completed instrument lines to AWS S3 Bronze every $UploadEveryMinutes minutes."
 
-# Remove the known hand-created predecessor only after both replacement tasks
+$SharedCopyArgumentString = (
+    "`"$SharedCopyScript`" --source `"$LocalDataRoot`" " +
+    "--destination `"$SharedDataRoot`" --log-file `"$SharedCopyLog`""
+)
+$SharedCopyAction = New-ScheduledTaskAction `
+    -Execute $PythonExe `
+    -Argument $SharedCopyArgumentString `
+    -WorkingDirectory $RuntimeRoot
+$SharedCopyTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes(7) `
+    -RepetitionInterval (New-TimeSpan -Minutes $UploadEveryMinutes) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+$SharedCopySettings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 5) `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries
+
+Register-DesMoinesTask `
+    -TaskName $SharedCopyTaskName `
+    -Action $SharedCopyAction `
+    -Trigger $SharedCopyTrigger `
+    -Settings $SharedCopySettings `
+    -Description "Copies stable local instrument snapshots into the UW OneDrive shared folder."
+
+# Remove the known hand-created predecessor only after all replacement tasks
 # have registered successfully, so a credential/registration error cannot leave
 # the laptop with no uploader at all.
 $LegacyTaskNames = @("desmoines_data_upload")
@@ -150,14 +291,31 @@ foreach ($LegacyTaskName in $LegacyTaskNames) {
     }
 }
 
-Write-Host "Installed exactly two tasks:"
+$LegacyConfigDirectory = Join-Path $RuntimeRoot "legacy-config"
+New-Item -ItemType Directory -Force $LegacyConfigDirectory | Out-Null
+foreach ($LegacyConfigName in @("instruments_config.json", "serial_instruments_config.json")) {
+    $LegacyConfigPath = Join-Path $RepoRoot $LegacyConfigName
+    if (Test-Path -LiteralPath $LegacyConfigPath -PathType Leaf) {
+        $ArchivedConfigPath = Join-Path $LegacyConfigDirectory $LegacyConfigName
+        if (-not (Test-Path -LiteralPath $ArchivedConfigPath)) {
+            Move-Item -LiteralPath $LegacyConfigPath -Destination $ArchivedConfigPath
+            Write-Host "Archived obsolete config: $LegacyConfigPath"
+        } else {
+            Write-Warning "Legacy config already archived; left local file untouched: $LegacyConfigPath"
+        }
+    }
+}
+
+Write-Host "Installed exactly three tasks:"
 if ($RunWhenLoggedOff) {
     Write-Host "  $SerialTaskName - continuous, starts with Windows"
 } else {
     Write-Host "  $SerialTaskName - continuous, starts at logon"
 }
 Write-Host "  $UploadTaskName - every $UploadEveryMinutes minutes"
+Write-Host "  $SharedCopyTaskName - every $UploadEveryMinutes minutes, staggered by 6 minutes"
 Write-Host "Upload credentials: $AwsCredsFile"
+Write-Host "Shared copy: $LocalDataRoot -> $SharedDataRoot"
 if ($RunWhenLoggedOff) {
     Write-Host "Windows account: $RunAsUser (runs whether logged on or not)"
 } else {
@@ -167,8 +325,9 @@ if ($RunWhenLoggedOff) {
 if ($RunNow) {
     Start-ScheduledTask -TaskName $SerialTaskName
     Start-ScheduledTask -TaskName $UploadTaskName
-    Write-Host "Started both tasks. PuTTY must remain closed for the serial ports."
+    Start-ScheduledTask -TaskName $SharedCopyTaskName
+    Write-Host "Started all three tasks. PuTTY must remain closed for the serial ports."
 }
 
-Get-ScheduledTask -TaskName $SerialTaskName, $UploadTaskName |
+Get-ScheduledTask -TaskName $SerialTaskName, $UploadTaskName, $SharedCopyTaskName |
     Select-Object TaskName, State

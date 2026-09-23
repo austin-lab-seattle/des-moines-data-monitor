@@ -10,7 +10,7 @@
       "location": "Duwamish",
       "acquisition_type": "file",
       "ingestion_type": "growing_file",
-      "data_glob": "data/black_carbon/*MA200*.csv",
+      "data_glob": "C:/des_moines/data/black_carbon/*MA200*.csv",
       "active": true
     },
     {
@@ -24,13 +24,13 @@
         "port": "COM9",
         "baud": 38400,
         "parser": "licor",
-        "output_dir": "data/co2_li_cor",
+        "output_dir": "C:/des_moines/data/co2_li_cor",
         "filename": "co2.txt"
       },
       "ingestion_type": "growing_file",
       "data_glob": [
-        "data/co2_li_cor/*CO2-*.txt",
-        "data/co2_li_cor/co2.txt"
+        "C:/des_moines/data/co2_li_cor/*CO2-*.txt",
+        "C:/des_moines/data/co2_li_cor/co2.txt"
       ],
       "active": true
     },
@@ -45,13 +45,13 @@
         "port": "COM8",
         "baud": 38400,
         "parser": "neph",
-        "output_dir": "data/nephlometer",
+        "output_dir": "C:/des_moines/data/nephlometer",
         "filename": "Neph.txt"
       },
       "ingestion_type": "growing_file",
       "data_glob": [
-        "data/nephlometer/*Neph*.csv",
-        "data/nephlometer/Neph.txt"
+        "C:/des_moines/data/nephlometer/*Neph*.csv",
+        "C:/des_moines/data/nephlometer/Neph.txt"
       ],
       "active": true
     },
@@ -66,13 +66,13 @@
         "port": "COM7",
         "baud": 38400,
         "parser": "no2",
-        "output_dir": "data/no2_caps",
+        "output_dir": "C:/des_moines/data/no2_caps",
         "filename": "no2.txt"
       },
       "ingestion_type": "growing_file",
       "data_glob": [
-        "data/no2_caps/*NO2-CAPS*.dat",
-        "data/no2_caps/no2.txt"
+        "C:/des_moines/data/no2_caps/*NO2-CAPS*.dat",
+        "C:/des_moines/data/no2_caps/no2.txt"
       ],
       "active": true
     },
@@ -82,7 +82,7 @@
       "location": "Duwamish",
       "acquisition_type": "file",
       "ingestion_type": "growing_file",
-      "data_glob": "data/smps/*SMPS*.csv",
+      "data_glob": "C:/des_moines/data/smps/*SMPS*.csv",
       "active": true
     }
   ],
