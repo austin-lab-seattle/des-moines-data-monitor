@@ -148,8 +148,8 @@ still counts Bronze live whenever the dashboard asks.
 | `data_glob` | **Glob pattern (string or list)** that matches the instrument's source file(s). This is what makes rotation/renaming transparent. |
 | `data_file` | *Legacy* single path. Still accepted (treated as a one-element glob) for backward compatibility. |
 | `active` | If `false`, the instrument is skipped entirely. |
-| `acquisition_type` | `serial` for NO2/NEPH/CO2; `file` for BC/SMPS. |
-| `serial` | COM port, 38400 baud, parser and local output path; present only for serial instruments. |
+| `acquisition_type` | `serial` for serial-capable sources; `file` for BC/SMPS. |
+| `serial` | Enable flag, COM port, 38400 baud, parser and local output path. NO2/NEPH are enabled; LI-COR remains disabled until confirmed. |
 | `s3_bucket` | Destination bucket. |
 | `aws_region` | Default region when using the boto3 credential chain. |
 | `pipeline_status_key` | S3 key for the run summary object. |

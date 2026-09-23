@@ -35,8 +35,10 @@ instrument files. The uploader discovers new rollover files automatically.
 ## 2a. Record the serial instruments without PuTTY
 
 The uploader does not read COM ports itself. `scripts/field/acquire_serial.py`
-is the continuous recorder that replaces PuTTY for NO2-CAPS, NEPH-PM25, and
-CO2-LICOR. It writes the configured growing files with the header
+is the continuous recorder that replaces PuTTY for the confirmed NO2-CAPS and
+NEPH-PM25 serial streams. LI-COR format detection and configuration are present,
+but serial acquisition is disabled until its connection method is confirmed.
+The logger writes the configured growing files with the header
 `PC_Date_Time<TAB>Raw_Line` in folders already read by the uploader. `Raw_Line`
 is the exact instrument payload; no measurements are parsed or corrected before
 Bronze. Separate lossless diagnostic logs are retained under `serial_logs/`.
@@ -74,9 +76,9 @@ Stop-ScheduledTask -TaskName DesMoinesSerialLogger -ErrorAction SilentlyContinue
 ```
 
 The output identifies the distinctive CAPS numeric record, nephelometer dated
-CSV record, and LI-COR XML record. Detection is report-only by default. To save
+CSV record, and LI-COR XML record if present. Detection is report-only by default. To save
 the mapping, rerun with `--apply-detected-ports`; it changes the configuration
-only when all three active serial instruments are uniquely identified and saves
+only when every enabled serial instrument is uniquely identified and saves
 the previous file as `config\instruments.json.bak`:
 
 ```powershell
@@ -99,9 +101,11 @@ or a manual change, run
 `unknown` result means no complete recognized record arrived; try 30 seconds.
 
 In the same `config/instruments.json`, assign the detected COM port inside the
-`serial` block for CO2, NEPH and NO2. BC and SMPS have
-`acquisition_type: "file"` and therefore have no serial block. All three serial
-instruments use 38400 baud.
+`serial` block. NEPH and NO2 have `serial.enabled: true`. CO2-LICOR retains a
+known parser and candidate port but has `serial.enabled: false`; change it to
+`true` only after confirming that LI-COR should also be acquired directly.
+BC and SMPS have `acquisition_type: "file"` and no serial block. The configured
+serial-capable instruments use 38400 baud.
 
 The example writes directly to the intended growing files—there is no second
 renamed output copy:
@@ -215,7 +219,7 @@ powershell -ExecutionPolicy Bypass `
 
 The tasks are:
 
-- `DesMoinesSerialLogger`: continuous at-logon acquisition for NO2, NEPH and CO2;
+- `DesMoinesSerialLogger`: continuous at-logon acquisition for enabled serial instruments;
 - `DesMoinesDataMonitorUpload`: all-instrument AWS upload every 15 minutes.
 
 The upload task:

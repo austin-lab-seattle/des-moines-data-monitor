@@ -5,9 +5,9 @@ in `config/instruments.json`; copy it from `config/instruments.example.json`.
 
 ## Field laptop
 
-- `field/acquire_serial.py` continuously records NO2, NEPH and CO2 at 38400
-  baud. It replaces PuTTY, writes the configured local acquisition files, and
-  can passively detect or explicitly update the COM-port mapping.
+- `field/acquire_serial.py` continuously records enabled 38400-baud serial
+  instruments. NO2 and NEPH are enabled; LI-COR support remains disabled until
+  confirmed. It can passively detect or explicitly update the COM-port mapping.
 - `field/upload_to_aws.py` incrementally reads all five instrument sources and
   uploads raw bytes to S3 Bronze without applying scientific transformations.
 - `field/windows/install_tasks.ps1` installs exactly two Windows tasks: the

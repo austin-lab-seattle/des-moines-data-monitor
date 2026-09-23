@@ -63,7 +63,7 @@ Register-ScheduledTask `
     -Action $SerialAction `
     -Trigger $SerialTrigger `
     -Settings $SerialSettings `
-    -Description "Continuously records NO2, NEPH and CO2 serial data to local acquisition files." `
+    -Description "Continuously records the enabled serial instruments to local acquisition files." `
     -Force | Out-Null
 
 $UploadArgumentString = (

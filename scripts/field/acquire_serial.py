@@ -316,11 +316,20 @@ def serial_instrument_configs(config):
     for instrument in config.get("instruments") or []:
         serial_config = instrument.get("serial")
         if serial_config is not None:
-            selected.append({
+            serial_enabled = serial_config.get("enabled")
+            if serial_enabled is None:
+                # Safe migration for unified configs created before the enable
+                # flag existed: NO2 and NEPH were confirmed, LI-COR was not.
+                serial_enabled = instrument.get("id") in {"NO2-CAPS", "NEPH-PM25"}
+            flattened = {
                 "id": instrument.get("id"),
-                "active": instrument.get("active", True),
                 **serial_config,
-            })
+            }
+            flattened["active"] = (
+                instrument.get("active", True)
+                and serial_enabled
+            )
+            selected.append(flattened)
         elif instrument.get("port"):
             # Temporary compatibility with serial_instruments_config.json.
             selected.append(dict(instrument))

@@ -68,8 +68,9 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
   `config/instruments.json`, discovers source files with a **glob pattern**
   (`data_glob`), keeps a **byte offset per file**, buffers upload attempts in
   SQLite, and writes bronze batches to S3. Run it from the repository root.
-- `scripts/field/acquire_serial.py` continuously owns the NO2, nephelometer,
-  and LI-COR COM ports. It writes only a receipt timestamp and the exact raw
+- `scripts/field/acquire_serial.py` continuously owns the enabled serial ports.
+  NO2 and the nephelometer are enabled; LI-COR detection/support is present but
+  disabled until its acquisition method is confirmed. It writes only a receipt timestamp and the exact raw
   instrument line; the uploader sends this acquisition envelope to Bronze
   unchanged. Silver owns parsing and scientific transformations. Its
   `--detect-ports` mode can passively identify the three wire formats, and
@@ -126,7 +127,7 @@ the next run.
 There are two field-laptop tasks plus one cloud schedule:
 
 - The serial logger runs continuously on the field laptop and replaces PuTTY
-  for the three serial instruments.
+  for the enabled serial instruments (currently NO2 and the nephelometer).
 - The laptop upload job runs on the field laptop because it reads local
   instrument files and uploads new bytes to S3 Bronze.
 - The cloud Silver builder runs every 15 minutes in EventBridge and rebuilds the

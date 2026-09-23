@@ -19,6 +19,7 @@
       "location": "Duwamish",
       "acquisition_type": "serial",
       "serial": {
+        "enabled": false,
         "name": "co2",
         "port": "COM9",
         "baud": 38400,
@@ -39,6 +40,7 @@
       "location": "Duwamish",
       "acquisition_type": "serial",
       "serial": {
+        "enabled": true,
         "name": "neph",
         "port": "COM8",
         "baud": 38400,
@@ -59,6 +61,7 @@
       "location": "Duwamish",
       "acquisition_type": "serial",
       "serial": {
+        "enabled": true,
         "name": "no2",
         "port": "COM7",
         "baud": 38400,
