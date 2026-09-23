@@ -19,6 +19,9 @@ Copy-Item config\instruments.example.json config\instruments.json
 If the repository is already installed, use `git pull origin main` instead of
 cloning it again. A virtual environment is optional: the task installer uses
 `.venv` when present and otherwise locates the installed Python 3 interpreter.
+If `config\instruments.json` is still absent when the installer runs, it creates
+it automatically and preserves COM assignments from the retired
+`serial_instruments_config.json` when that file exists.
 
 ## 2. Configure the instrument paths
 

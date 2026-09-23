@@ -162,7 +162,9 @@ powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1
 The Windows installer does not require a virtual environment. It uses `.venv`
 when one already exists, otherwise it locates the installed Python 3
 interpreter. Pass `-PythonExe "C:\path\to\python.exe"` only when an explicit
-interpreter is needed.
+interpreter is needed. On a first run it also creates the gitignored unified
+config from the tracked template and preserves legacy COM-port assignments when
+the old serial config is present.
 
 Install a macOS launchd job that runs every 900 seconds:
 

@@ -18,6 +18,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..\..\..")
 $UnifiedConfig = Join-Path $RepoRoot "config\instruments.json"
+$UnifiedConfigExample = Join-Path $RepoRoot "config\instruments.example.json"
 $UploadScript = Join-Path $RepoRoot "scripts\field\upload_to_aws.py"
 $SerialScript = Join-Path $RepoRoot "scripts\field\acquire_serial.py"
 $SharedCopyScript = Join-Path $RepoRoot "scripts\field\copy_to_shared_drive.py"
@@ -74,8 +75,48 @@ if ($LASTEXITCODE -ne 0) {
 if ($UploadEveryMinutes -lt 1) {
     throw "UploadEveryMinutes must be at least 1."
 }
-if (-not (Test-Path $UnifiedConfig)) {
-    throw "Missing config\instruments.json. Copy config\instruments.example.json and set ports/paths first."
+if (-not (Test-Path -LiteralPath $UnifiedConfig -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $UnifiedConfigExample -PathType Leaf)) {
+        throw "Missing both config\instruments.json and its tracked example. Run git pull and retry."
+    }
+    Copy-Item -LiteralPath $UnifiedConfigExample -Destination $UnifiedConfig
+    Write-Host "Created local unified config: $UnifiedConfig"
+
+    # Preserve only known-safe COM assignments from the retired serial config.
+    # Enable flags and paths remain controlled by the current unified template.
+    $LegacySerialConfig = Join-Path $RepoRoot "serial_instruments_config.json"
+    if (Test-Path -LiteralPath $LegacySerialConfig -PathType Leaf) {
+        try {
+            $NewConfigObject = Get-Content -LiteralPath $UnifiedConfig -Raw | ConvertFrom-Json
+            $LegacySerialObject = Get-Content -LiteralPath $LegacySerialConfig -Raw | ConvertFrom-Json
+            $MigratedPorts = @()
+            foreach ($LegacyInstrument in $LegacySerialObject.instruments) {
+                if (-not $LegacyInstrument.id -or -not $LegacyInstrument.port) {
+                    continue
+                }
+                $TargetInstrument = $NewConfigObject.instruments |
+                    Where-Object { $_.id -eq $LegacyInstrument.id } |
+                    Select-Object -First 1
+                if ($TargetInstrument -and $TargetInstrument.serial) {
+                    $TargetInstrument.serial.port = [string]$LegacyInstrument.port
+                    $MigratedPorts += "$($LegacyInstrument.id)=$($LegacyInstrument.port)"
+                }
+            }
+            if ($MigratedPorts.Count -gt 0) {
+                $ConfigJson = $NewConfigObject | ConvertTo-Json -Depth 20
+                $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                [System.IO.File]::WriteAllText(
+                    $UnifiedConfig,
+                    $ConfigJson + [Environment]::NewLine,
+                    $Utf8NoBom
+                )
+                Write-Host "Preserved legacy COM assignments: $($MigratedPorts -join ', ')"
+            }
+        } catch {
+            Write-Warning "Could not read the legacy serial config; using current template ports. $($_.Exception.Message)"
+        }
+    }
+    Write-Warning "A first-run config was created. Use acquire_serial.py --detect-ports later if the COM assignments need verification."
 }
 $ConfigPath = $UnifiedConfig
 
