@@ -159,6 +159,11 @@ Install all three Windows tasks (serial logging, AWS upload, and shared copy):
 powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -AwsCredsFile "C:\des_moines\aws_creds.json" -UploadEveryMinutes 15 -RunWhenLoggedOff -RunAsUser "$env:COMPUTERNAME\lab_admin" -RunNow
 ```
 
+The Windows installer does not require a virtual environment. It uses `.venv`
+when one already exists, otherwise it locates the installed Python 3
+interpreter. Pass `-PythonExe "C:\path\to\python.exe"` only when an explicit
+interpreter is needed.
+
 Install a macOS launchd job that runs every 900 seconds:
 
 ```bash

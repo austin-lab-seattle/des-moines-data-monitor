@@ -7,6 +7,7 @@ param(
     [string]$LocalDataRoot = "C:\des_moines\data",
     [string]$SharedDataRoot = "C:\Users\lab_admin\OneDrive - UW\Austin Lab-Des Moines Monitoring - Raw Data - Documents\Raw Data\des_moines\data",
     [string]$RuntimeRoot = "C:\des_moines\runtime",
+    [string]$PythonExe = "",
     [switch]$RunWhenLoggedOff,
     [string]$RunAsUser = "$env:USERDOMAIN\$env:USERNAME",
     [switch]$RunNow
@@ -16,17 +17,62 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..\..\..")
-$PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $UnifiedConfig = Join-Path $RepoRoot "config\instruments.json"
 $UploadScript = Join-Path $RepoRoot "scripts\field\upload_to_aws.py"
 $SerialScript = Join-Path $RepoRoot "scripts\field\acquire_serial.py"
 $SharedCopyScript = Join-Path $RepoRoot "scripts\field\copy_to_shared_drive.py"
 
+function Resolve-PythonExecutable {
+    param([string]$RequestedPath)
+
+    if ($RequestedPath) {
+        if (-not (Test-Path -LiteralPath $RequestedPath -PathType Leaf)) {
+            throw "Configured Python executable does not exist: $RequestedPath"
+        }
+        return (Resolve-Path -LiteralPath $RequestedPath).Path
+    }
+
+    # Preserve existing installations that already use a repository venv, but
+    # do not require one. A normal system Python is valid for field laptops.
+    $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $VenvPython).Path
+    }
+
+    foreach ($CommandName in @("py.exe", "python.exe")) {
+        $PythonCommand = Get-Command $CommandName -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $PythonCommand) {
+            continue
+        }
+        if ($CommandName -eq "py.exe") {
+            $ResolvedPython = & $PythonCommand.Source -3 -c "import sys; print(sys.executable)" 2>$null |
+                Select-Object -Last 1
+        } else {
+            $ResolvedPython = & $PythonCommand.Source -c "import sys; print(sys.executable)" 2>$null |
+                Select-Object -Last 1
+        }
+        if ($LASTEXITCODE -eq 0 -and $ResolvedPython) {
+            $ResolvedPython = "$ResolvedPython".Trim()
+            if (Test-Path -LiteralPath $ResolvedPython -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $ResolvedPython).Path
+            }
+        }
+    }
+
+    throw "Python 3 was not found. Install Python 3 for the lab_admin account and rerun this command."
+}
+
+$PythonExe = Resolve-PythonExecutable $PythonExe
+$RequirementsFile = Join-Path $RepoRoot "requirements.txt"
+Write-Host "Using Python: $PythonExe"
+& $PythonExe -c "import boto3, serial"
+if ($LASTEXITCODE -ne 0) {
+    throw "Required Python packages are missing. Run: `"$PythonExe`" -m pip install -r `"$RequirementsFile`""
+}
+
 if ($UploadEveryMinutes -lt 1) {
     throw "UploadEveryMinutes must be at least 1."
-}
-if (-not (Test-Path $PythonExe)) {
-    throw "Missing $PythonExe. Create .venv and install requirements.txt first."
 }
 if (-not (Test-Path $UnifiedConfig)) {
     throw "Missing config\instruments.json. Copy config\instruments.example.json and set ports/paths first."

@@ -11,14 +11,14 @@ Open PowerShell as the Windows account that will own the scheduled task:
 ```powershell
 git clone https://github.com/austin-lab-seattle/des-moines-data-monitor.git
 cd des-moines-data-monitor
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+py -3 -m pip install --user -r requirements.txt
 New-Item -ItemType Directory -Force config | Out-Null
 Copy-Item config\instruments.example.json config\instruments.json
 ```
 
 If the repository is already installed, use `git pull origin main` instead of
-cloning it again.
+cloning it again. A virtual environment is optional: the task installer uses
+`.venv` when present and otherwise locates the installed Python 3 interpreter.
 
 ## 2. Configure the instrument paths
 
@@ -54,7 +54,7 @@ charts and time filters use the PC-local timestamp.
 List the ports from PowerShell without opening Device Manager:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py --list-ports
+py -3 scripts\field\acquire_serial.py --list-ports
 ```
 
 This prints entries such as `COM7  USB Serial Port (COM7)` plus the hardware
@@ -70,7 +70,7 @@ serial task and close PuTTY first, then run:
 
 ```powershell
 Stop-ScheduledTask -TaskName DesMoinesSerialLogger -ErrorAction SilentlyContinue
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+py -3 scripts\field\acquire_serial.py `
     --detect-ports `
     --probe-seconds 15
 ```
@@ -82,7 +82,7 @@ only when every enabled serial instrument is uniquely identified and saves
 the previous file as `config\instruments.json.bak`:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+py -3 scripts\field\acquire_serial.py `
     --apply-detected-ports `
     --probe-seconds 15
 ```
@@ -90,7 +90,7 @@ the previous file as `config\instruments.json.bak`:
 To change one port manually without editing JSON:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+py -3 scripts\field\acquire_serial.py `
     --set-port "NO2-CAPS=COM7"
 ```
 
@@ -125,8 +125,8 @@ Close PuTTY before the preflight—only one program can own each COM port—then
 validate the configuration and run a short manual test:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py --check
-.\.venv\Scripts\python.exe scripts\field\acquire_serial.py
+py -3 scripts\field\acquire_serial.py --check
+py -3 scripts\field\acquire_serial.py
 ```
 
 Wait until each active instrument reports that its port is open and confirm the
@@ -177,7 +177,7 @@ environment variable and `aws configure` are not required.
 ## 4. Run the no-upload preflight
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py `
+py -3 scripts\field\upload_to_aws.py `
     --aws-creds-file "C:\des_moines\aws_creds.json" `
     --check
 ```
@@ -192,7 +192,7 @@ The first real run may upload every complete line in a newly discovered file.
 Confirm the globs and expected source filenames before running it:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py `
+py -3 scripts\field\upload_to_aws.py `
     --aws-creds-file "C:\des_moines\aws_creds.json"
 $LASTEXITCODE
 Get-Content .\collector.log -Tail 100
