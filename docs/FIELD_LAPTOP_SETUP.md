@@ -62,6 +62,42 @@ ID. The equivalent built-in Windows query is:
 Get-CimInstance Win32_SerialPort | Format-Table DeviceID, Name, PNPDeviceID -AutoSize
 ```
 
+The logger can also identify the instrument connected to each port by passively
+sampling its data format. It sends no commands to the instruments. Stop the
+serial task and close PuTTY first, then run:
+
+```powershell
+Stop-ScheduledTask -TaskName DesMoinesSerialLogger -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+    --detect-ports `
+    --probe-seconds 15
+```
+
+The output identifies the distinctive CAPS numeric record, nephelometer dated
+CSV record, and LI-COR XML record. Detection is report-only by default. To save
+the mapping, rerun with `--apply-detected-ports`; it changes the configuration
+only when all three active serial instruments are uniquely identified and saves
+the previous file as `config\instruments.json.bak`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+    --apply-detected-ports `
+    --probe-seconds 15
+```
+
+To change one port manually without editing JSON:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py `
+    --set-port "NO2-CAPS=COM7"
+```
+
+Use `NEPH-PM25` and `CO2-LICOR` for the other instrument IDs. After detection
+or a manual change, run
+`Start-ScheduledTask -TaskName DesMoinesSerialLogger`. A port reported as
+`unavailable` is normally still owned by PuTTY or the running logger. An
+`unknown` result means no complete recognized record arrived; try 30 seconds.
+
 In the same `config/instruments.json`, assign the detected COM port inside the
 `serial` block for CO2, NEPH and NO2. BC and SMPS have
 `acquisition_type: "file"` and therefore have no serial block. All three serial

@@ -71,7 +71,9 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 - `scripts/field/acquire_serial.py` continuously owns the NO2, nephelometer,
   and LI-COR COM ports. It writes only a receipt timestamp and the exact raw
   instrument line; the uploader sends this acquisition envelope to Bronze
-  unchanged. Silver owns parsing and scientific transformations.
+  unchanged. Silver owns parsing and scientific transformations. Its
+  `--detect-ports` mode can passively identify the three wire formats, and
+  `--apply-detected-ports` saves only a complete, unambiguous mapping.
 - `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
   keeps only real data rows, removes duplicates, derives Duwamish PM2.5 from
   corrected BScat, normalizes the SMPS Total Concentration header, and writes a

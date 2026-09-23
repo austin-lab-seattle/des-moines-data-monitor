@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import threading
 import time
@@ -204,6 +205,35 @@ PARSERS = {
     "licor": (parse_licor, LICOR_COLUMNS),
 }
 
+PARSER_INSTRUMENT_IDS = {
+    "no2": "NO2-CAPS",
+    "neph": "NEPH-PM25",
+    "licor": "CO2-LICOR",
+}
+
+
+def identify_serial_samples(samples):
+    """Classify a small passive serial sample using instrument wire formats."""
+    nonempty = [sample.strip() for sample in samples if sample.strip()]
+    scores = {parser_name: 0 for parser_name in PARSERS}
+    for sample in nonempty:
+        for parser_name, (parse, _columns) in PARSERS.items():
+            if parse(sample) is not None:
+                scores[parser_name] += 1
+
+    # LI-COR XML may be split across serial reads. Its tags are sufficiently
+    # distinctive to classify the joined capture when one complete element is
+    # present even if no individual readline() result contained the whole XML.
+    joined = "".join(nonempty)
+    if scores["licor"] == 0 and parse_licor(joined) is not None:
+        scores["licor"] = 1
+
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_parser, best_score = ranked[0]
+    if best_score == 0 or (len(ranked) > 1 and ranked[1][1] == best_score):
+        return None, scores
+    return best_parser, scores
+
 
 class DailyTextFile:
     """Append-only text file that rolls over at local midnight."""
@@ -262,14 +292,19 @@ class DailyInstrumentRaw:
         self.handle.flush()
 
 
-def load_config(path=CONFIG_FILE):
+def resolved_config_path(path=CONFIG_FILE):
     if not os.path.exists(path) and path == DEFAULT_CONFIG_FILE and os.path.exists(LEGACY_CONFIG_FILE):
         LOGGER.warning(
             "Using legacy %s; migrate its serial settings into %s.",
             LEGACY_CONFIG_FILE,
             DEFAULT_CONFIG_FILE,
         )
-        path = LEGACY_CONFIG_FILE
+        return LEGACY_CONFIG_FILE
+    return path
+
+
+def load_config(path=CONFIG_FILE):
+    path = resolved_config_path(path)
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     return payload
@@ -336,6 +371,161 @@ def list_available_ports():
             port.hwid or "no hardware ID",
         )
     return 0
+
+
+def probe_serial_port(port, baud, probe_seconds):
+    """Passively capture a short sample from one port without sending commands."""
+    samples = []
+    deadline = time.monotonic() + probe_seconds
+    try:
+        with serial.Serial(
+            port=port,
+            baudrate=int(baud),
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            timeout=min(1.0, max(0.1, probe_seconds)),
+            xonxoff=False,
+            rtscts=False,
+            dsrdtr=False,
+        ) as connection:
+            while time.monotonic() < deadline:
+                raw = connection.readline()
+                if raw:
+                    samples.append(raw.decode("ascii", errors="replace").strip())
+    except Exception as exc:
+        return {
+            "port": port,
+            "parser": None,
+            "samples": samples,
+            "scores": {},
+            "error": str(exc),
+        }
+
+    parser_name, scores = identify_serial_samples(samples)
+    return {
+        "port": port,
+        "parser": parser_name,
+        "samples": samples,
+        "scores": scores,
+        "error": None,
+    }
+
+
+def detect_serial_ports(config, probe_seconds):
+    """Probe enumerated ports and return their likely instrument identities."""
+    if serial is None or list_ports is None:
+        raise RuntimeError("pyserial is not installed; run pip install -r requirements.txt")
+    ports = sorted(list_ports.comports(), key=lambda item: item.device)
+    if not ports:
+        LOGGER.warning("No serial ports were detected.")
+        return []
+
+    serial_configs = serial_instrument_configs(config)
+    bauds = sorted({int(item["baud"]) for item in serial_configs}) or [38400]
+    if len(bauds) != 1:
+        raise RuntimeError(
+            "automatic detection currently requires one shared baud rate; "
+            f"configured rates: {bauds}"
+        )
+    baud = bauds[0]
+    LOGGER.info(
+        "Passively probing %d port(s) at %d baud for %.1f seconds each. "
+        "PuTTY and DesMoinesSerialLogger must be stopped.",
+        len(ports),
+        baud,
+        probe_seconds,
+    )
+
+    results = []
+    for port in ports:
+        result = probe_serial_port(port.device, baud, probe_seconds)
+        result["description"] = port.description or "Unknown device"
+        results.append(result)
+        if result["error"]:
+            LOGGER.warning(
+                "%s (%s): unavailable: %s",
+                port.device,
+                result["description"],
+                result["error"],
+            )
+            continue
+        parser_name = result["parser"]
+        if parser_name:
+            instrument_id = PARSER_INSTRUMENT_IDS[parser_name]
+            matches = result["scores"][parser_name]
+            LOGGER.info(
+                "%s (%s) -> %s [%d matching sample(s), %d non-empty read(s)]",
+                port.device,
+                result["description"],
+                instrument_id,
+                matches,
+                len(result["samples"]),
+            )
+        else:
+            LOGGER.warning(
+                "%s (%s) -> unknown [%d non-empty read(s)]",
+                port.device,
+                result["description"],
+                len(result["samples"]),
+            )
+    return results
+
+
+def detected_port_updates(results):
+    """Return only one-to-one, unambiguous instrument-to-port detections."""
+    candidates = {}
+    for result in results:
+        parser_name = result.get("parser")
+        if parser_name:
+            candidates.setdefault(parser_name, []).append(result["port"])
+    return {
+        PARSER_INSTRUMENT_IDS[parser_name]: ports[0]
+        for parser_name, ports in candidates.items()
+        if len(ports) == 1
+    }
+
+
+def update_config_ports(config, config_path, updates):
+    """Validate and atomically save explicit or detected COM-port updates."""
+    known_ids = {
+        instrument.get("id")
+        for instrument in config.get("instruments", [])
+        if instrument.get("serial") is not None or instrument.get("port")
+    }
+    unknown = sorted(set(updates) - known_ids)
+    if unknown:
+        raise ValueError(f"unknown serial instrument id(s): {', '.join(unknown)}")
+
+    for instrument in config.get("instruments", []):
+        if instrument.get("id") in updates:
+            if instrument.get("serial") is not None:
+                instrument["serial"]["port"] = updates[instrument["id"]]
+            else:
+                instrument["port"] = updates[instrument["id"]]
+    errors = validate_config(config)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+    path = Path(config_path)
+    backup = path.with_name(path.name + ".bak")
+    temporary = path.with_name(path.name + ".tmp")
+    shutil.copy2(path, backup)
+    temporary.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+    LOGGER.info("Updated %s; previous configuration saved to %s", path, backup)
+
+
+def parse_port_updates(values):
+    updates = {}
+    for value in values or []:
+        if "=" not in value:
+            raise ValueError(f"invalid port assignment {value!r}; use INSTRUMENT_ID=COM_PORT")
+        instrument_id, port = (part.strip() for part in value.split("=", 1))
+        if not instrument_id or not port:
+            raise ValueError(f"invalid port assignment {value!r}; use INSTRUMENT_ID=COM_PORT")
+        updates[instrument_id] = port
+    return updates
 
 
 def run_instrument(cfg, stop_event, raw_log_dir, reconnect_seconds):
@@ -435,13 +625,36 @@ def run(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default=CONFIG_FILE, help="serial logger JSON config")
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--check", action="store_true", help="validate configuration without opening ports"
     )
-    parser.add_argument(
+    modes.add_argument(
         "--list-ports",
         action="store_true",
         help="list detected COM ports and Device Manager descriptions, then exit",
+    )
+    modes.add_argument(
+        "--detect-ports",
+        action="store_true",
+        help="passively sample every port and report the likely instrument",
+    )
+    modes.add_argument(
+        "--apply-detected-ports",
+        action="store_true",
+        help="detect ports and update config only if every serial instrument is unique",
+    )
+    modes.add_argument(
+        "--set-port",
+        action="append",
+        metavar="INSTRUMENT_ID=COM_PORT",
+        help="manually update one port in the config; may be repeated",
+    )
+    parser.add_argument(
+        "--probe-seconds",
+        type=float,
+        default=12.0,
+        help="seconds to sample each port during detection (default: 12)",
     )
     args = parser.parse_args()
 
@@ -452,16 +665,68 @@ def main():
     )
     if args.list_ports:
         return list_available_ports()
+    if args.probe_seconds < 1:
+        LOGGER.error("--probe-seconds must be at least 1")
+        return 1
     try:
-        config = load_config(args.config)
+        config_path = resolved_config_path(args.config)
+        config = load_config(config_path)
     except (OSError, json.JSONDecodeError) as exc:
         LOGGER.error("Could not read %s: %s", args.config, exc)
         return 1
+
+    if args.set_port:
+        try:
+            updates = parse_port_updates(args.set_port)
+            update_config_ports(config, config_path, updates)
+        except (OSError, ValueError) as exc:
+            LOGGER.error("Could not update serial ports: %s", exc)
+            return 1
+        for instrument_id, port in updates.items():
+            LOGGER.info("%s -> %s", instrument_id, port)
+        return 0
+
     errors = validate_config(config)
     if errors:
         for error in errors:
             LOGGER.error(error)
         return 1
+    if args.detect_ports or args.apply_detected_ports:
+        try:
+            results = detect_serial_ports(config, args.probe_seconds)
+        except (RuntimeError, ValueError) as exc:
+            LOGGER.error("Port detection failed: %s", exc)
+            return 1
+        updates = detected_port_updates(results)
+        active_ids = {
+            cfg["id"]
+            for cfg in serial_instrument_configs(config)
+            if cfg.get("active", True)
+        }
+        unresolved = sorted(active_ids - set(updates))
+        if unresolved:
+            LOGGER.warning(
+                "Could not uniquely identify: %s. Increase --probe-seconds and "
+                "confirm the logger and PuTTY are stopped.",
+                ", ".join(unresolved),
+            )
+        if args.apply_detected_ports:
+            if unresolved:
+                LOGGER.error("Configuration was not changed because detection was incomplete.")
+                return 1
+            try:
+                update_config_ports(config, config_path, updates)
+            except (OSError, ValueError) as exc:
+                LOGGER.error("Could not save detected ports: %s", exc)
+                return 1
+            for instrument_id, port in sorted(updates.items()):
+                LOGGER.info("Saved %s -> %s", instrument_id, port)
+        elif updates:
+            LOGGER.info(
+                "Detection is report-only. Re-run with --apply-detected-ports "
+                "to save a complete unique mapping."
+            )
+        return 0
     if serial is None:
         LOGGER.error("pyserial is not installed; run pip install -r requirements.txt")
         return 1

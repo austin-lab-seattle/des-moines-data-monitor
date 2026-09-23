@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -89,6 +90,87 @@ class SerialLoggerParserTests(unittest.TestCase):
         self.assertEqual(["2026-09-18", "12:34:56", "421.3"], row[:3])
         self.assertEqual("0.75", row[-1])
         self.assertTrue(lambda_api.is_data_row("CO2-LICOR", "\t".join(row)))
+
+    def test_sample_formats_identify_each_serial_instrument(self):
+        no2 = (
+            "3872505678.767,10.599,523.765,751.62,295.89,"
+            "166273,1.32319,10104,485.763"
+        )
+        neph = (
+            "2026-09-17 00:44:50, 9.605, 25.810, 27.790, "
+            "37.961, 1012.294,00,07"
+        )
+        licor = (
+            "<li850><data><celltemp>27.6</celltemp><cellpres>101.3</cellpres>"
+            "<co2>648.2</co2><co2abs>0.13</co2abs><h2o>6.8</h2o>"
+            "<h2oabs>0.06</h2oabs><h2odewpoint>1.6</h2odewpoint>"
+            "<ivolt>11.9</ivolt><raw><co2>1</co2><co2ref>2</co2ref>"
+            "<h2o>3</h2o><h2oref>4</h2oref></raw><flowrate>0.05</flowrate>"
+            "</data></li850>"
+        )
+
+        for sample, expected in ((no2, "no2"), (neph, "neph"), (licor, "licor")):
+            parser_name, scores = log_serial_instruments.identify_serial_samples(
+                ["startup noise", sample]
+            )
+            self.assertEqual(expected, parser_name)
+            self.assertEqual(1, scores[expected])
+
+    def test_split_licor_xml_is_identified(self):
+        samples = [
+            "<li850><data><celltemp>25.1</celltemp><cellpres>101.2</cellpres>",
+            "<co2>421.3</co2><co2abs>0.08</co2abs><h2o>6.8</h2o>",
+            "<h2oabs>0.01</h2oabs><h2odewpoint>1.7</h2odewpoint>",
+            "<ivolt>12</ivolt><raw><co2>1</co2><co2ref>2</co2ref>",
+            "<h2o>3</h2o><h2oref>4</h2oref></raw><flowrate>0.75</flowrate>",
+            "</data></li850>",
+        ]
+        parser_name, scores = log_serial_instruments.identify_serial_samples(samples)
+        self.assertEqual("licor", parser_name)
+        self.assertEqual(1, scores["licor"])
+
+    def test_duplicate_instrument_detections_are_not_safe_to_apply(self):
+        updates = log_serial_instruments.detected_port_updates([
+            {"port": "COM7", "parser": "no2"},
+            {"port": "COM10", "parser": "no2"},
+            {"port": "COM8", "parser": "neph"},
+            {"port": "COM9", "parser": "licor"},
+        ])
+        self.assertNotIn("NO2-CAPS", updates)
+        self.assertEqual("COM8", updates["NEPH-PM25"])
+        self.assertEqual("COM9", updates["CO2-LICOR"])
+
+    def test_manual_port_update_preserves_nonserial_instruments_and_creates_backup(self):
+        with TemporaryDirectory() as root:
+            path = Path(root) / "instruments.json"
+            config = {
+                "instruments": [
+                    {
+                        "id": "NO2-CAPS",
+                        "active": True,
+                        "serial": {
+                            "name": "no2",
+                            "port": "COM7",
+                            "baud": 38400,
+                            "parser": "no2",
+                            "output_dir": "data/no2_caps",
+                            "filename": "no2.txt",
+                        },
+                    },
+                    {"id": "SMPS", "active": True, "acquisition_type": "file"},
+                ]
+            }
+            path.write_text(json.dumps(config))
+
+            log_serial_instruments.update_config_ports(
+                config, path, {"NO2-CAPS": "COM11"}
+            )
+
+            saved = json.loads(path.read_text())
+            original = json.loads(Path(f"{path}.bak").read_text())
+            self.assertEqual("COM11", saved["instruments"][0]["serial"]["port"])
+            self.assertEqual("COM7", original["instruments"][0]["serial"]["port"])
+            self.assertNotIn("serial", saved["instruments"][1])
 
 
 if __name__ == "__main__":

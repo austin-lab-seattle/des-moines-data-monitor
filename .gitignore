@@ -52,4 +52,5 @@ Thumbs.db
 instruments_config.json
 serial_instruments_config.json
 config/instruments.json
+config/instruments.json.bak*
 .vercel
