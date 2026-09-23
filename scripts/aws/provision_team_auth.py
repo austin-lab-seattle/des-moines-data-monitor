@@ -14,7 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 CREDS_FILE = ROOT / "aws_creds.json"
 HOSTED_UI_CSS_FILE = ROOT / "infra" / "cognito" / "team-login.css"
 HOSTED_UI_LOGO_FILE = ROOT / "infra" / "cognito" / "team-login-logo.png"

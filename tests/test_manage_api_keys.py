@@ -2,7 +2,7 @@ import contextlib
 import io
 import unittest
 
-from scripts import manage_api_keys
+from scripts.aws import manage_api_keys
 
 
 class FakeDynamoDb:

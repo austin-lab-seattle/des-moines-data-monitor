@@ -11,7 +11,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CREDS_FILE = ROOT / "aws_creds.json"
 REGION = "us-west-2"
 ACCOUNT_ID = "213598695875"

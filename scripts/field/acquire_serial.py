@@ -30,9 +30,9 @@ except ImportError:  # Allows parser unit tests and --help without pyserial.
 
 
 LOGGER = logging.getLogger("serial-instruments")
-CONFIG_FILE = os.environ.get(
-    "SERIAL_INSTRUMENT_CONFIG", "serial_instruments_config.json"
-)
+DEFAULT_CONFIG_FILE = "config/instruments.json"
+LEGACY_CONFIG_FILE = "serial_instruments_config.json"
+CONFIG_FILE = os.environ.get("INSTRUMENT_CONFIG", DEFAULT_CONFIG_FILE)
 EPOCH_1904 = datetime(1904, 1, 1)
 
 NO2_COLUMNS = [
@@ -263,16 +263,40 @@ class DailyInstrumentRaw:
 
 
 def load_config(path=CONFIG_FILE):
+    if not os.path.exists(path) and path == DEFAULT_CONFIG_FILE and os.path.exists(LEGACY_CONFIG_FILE):
+        LOGGER.warning(
+            "Using legacy %s; migrate its serial settings into %s.",
+            LEGACY_CONFIG_FILE,
+            DEFAULT_CONFIG_FILE,
+        )
+        path = LEGACY_CONFIG_FILE
     with open(path, encoding="utf-8") as handle:
         payload = json.load(handle)
     return payload
 
 
+def serial_instrument_configs(config):
+    """Return flattened serial settings from unified or legacy configuration."""
+    selected = []
+    for instrument in config.get("instruments") or []:
+        serial_config = instrument.get("serial")
+        if serial_config is not None:
+            selected.append({
+                "id": instrument.get("id"),
+                "active": instrument.get("active", True),
+                **serial_config,
+            })
+        elif instrument.get("port"):
+            # Temporary compatibility with serial_instruments_config.json.
+            selected.append(dict(instrument))
+    return selected
+
+
 def validate_config(config):
     errors = []
-    instruments = config.get("instruments")
+    instruments = serial_instrument_configs(config)
     if not isinstance(instruments, list) or not instruments:
-        return ["instruments must be a non-empty list"]
+        return ["at least one instrument must contain a serial configuration"]
     seen_ports = set()
     required = ("id", "name", "port", "baud", "parser", "output_dir", "filename")
     for index, cfg in enumerate(instruments):
@@ -375,9 +399,12 @@ def run(config):
     if serial is None:
         raise RuntimeError("pyserial is not installed; run pip install -r requirements.txt")
     stop_event = threading.Event()
-    raw_log_dir = config.get("raw_log_dir", "serial_logs")
-    reconnect_seconds = max(1, int(config.get("reconnect_seconds", 5)))
-    instruments = [cfg for cfg in config["instruments"] if cfg.get("active", True)]
+    settings = config.get("serial_settings") or config
+    raw_log_dir = settings.get("raw_log_dir", "serial_logs")
+    reconnect_seconds = max(1, int(settings.get("reconnect_seconds", 5)))
+    instruments = [
+        cfg for cfg in serial_instrument_configs(config) if cfg.get("active", True)
+    ]
     if not instruments:
         raise RuntimeError("no active serial instruments are configured")
 
@@ -439,7 +466,9 @@ def main():
         LOGGER.error("pyserial is not installed; run pip install -r requirements.txt")
         return 1
     if args.check:
-        active = [cfg for cfg in config["instruments"] if cfg.get("active", True)]
+        active = [
+            cfg for cfg in serial_instrument_configs(config) if cfg.get("active", True)
+        ]
         LOGGER.info("Serial configuration is valid for %d active instrument(s)", len(active))
         for cfg in active:
             filename = cfg["filename"].format(date=datetime.now().strftime("%Y-%m-%d"))

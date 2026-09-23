@@ -45,7 +45,8 @@ docs/team-email-update-*.md
 .DS_Store
 Thumbs.db
 
-# Local instrument config (copy instruments_config.example.json and edit data_glob paths)
+# Local instrument config (copy config/instruments.example.json and edit ports/paths)
 instruments_config.json
 serial_instruments_config.json
+config/instruments.json
 .vercel

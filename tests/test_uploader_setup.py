@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts import upload_instrument_data
+from scripts.field import upload_to_aws as upload_instrument_data
 
 
 class UploaderSetupTests(unittest.TestCase):
@@ -59,6 +59,37 @@ class UploaderSetupTests(unittest.TestCase):
                 mock.patch.object(upload_instrument_data, "create_s3_client"),
             ):
                 self.assertTrue(upload_instrument_data.validate_setup())
+
+    def test_transient_file_lock_is_retried_without_losing_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "live.txt"
+            source.write_bytes(b"first\nsecond\n")
+            real_open = open
+            attempts = 0
+
+            def flaky_open(path, mode="r", *args, **kwargs):
+                nonlocal attempts
+                if Path(path) == source and mode == "rb":
+                    attempts += 1
+                    if attempts < 3:
+                        raise PermissionError("sharing violation")
+                return real_open(path, mode, *args, **kwargs)
+
+            with (
+                mock.patch("builtins.open", side_effect=flaky_open),
+                mock.patch.object(upload_instrument_data.time, "sleep"),
+            ):
+                data, used, new, held, size = upload_instrument_data.read_new_bytes(
+                    str(source), 0
+                )
+
+            self.assertEqual(3, attempts)
+            self.assertEqual("first\nsecond\n", data)
+            expected_size = len(source.read_bytes())
+            self.assertEqual(
+                (0, expected_size, 0, expected_size),
+                (used, new, held, size),
+            )
 
 
 if __name__ == "__main__":

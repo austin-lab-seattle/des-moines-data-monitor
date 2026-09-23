@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import lambda_api
-from scripts import log_serial_instruments
+from scripts.field import acquire_serial as log_serial_instruments
 
 
 class SerialLoggerParserTests(unittest.TestCase):

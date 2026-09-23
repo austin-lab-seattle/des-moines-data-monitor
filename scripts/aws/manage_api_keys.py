@@ -6,10 +6,10 @@ It uses the operator's AWS identity to review access requests, issue a read-only
 key once, email it automatically, and revoke a key when needed.
 
 Examples:
-    python3 scripts/manage_api_keys.py list-pending
-    python3 scripts/manage_api_keys.py approve --request-id <request-id>
-    python3 scripts/manage_api_keys.py list-active
-    python3 scripts/manage_api_keys.py revoke --key-id <key-id>
+    python scripts/aws/manage_api_keys.py list-pending
+    python scripts/aws/manage_api_keys.py approve --request-id <request-id>
+    python scripts/aws/manage_api_keys.py list-active
+    python scripts/aws/manage_api_keys.py revoke --key-id <key-id>
 
 Set API_KEY_HASH_PEPPER and ACCESS_REQUEST_FROM_EMAIL in the operator's secure
 shell or secret manager before issuing a key. Approved keys are emailed only to

@@ -1,4 +1,5 @@
 import boto3
+import io
 import json
 import os
 import time
@@ -7,7 +8,7 @@ from pathlib import Path
 
 from botocore.exceptions import ClientError
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 CREDS_FILE = REPO_ROOT / "aws_creds.json"
 DEFAULT_REGION = "us-west-2"
 DEPLOY_REGION = os.environ.get("DEPLOY_AWS_REGION", DEFAULT_REGION)
@@ -132,12 +133,13 @@ if ENABLE_API_KEY_REGISTRATION and not ACCESS_REQUEST_FROM_EMAIL:
     )
 
 
-def read_zip_bytes(zip_name, files):
-    with zipfile.ZipFile(zip_name, "w") as z:
+def build_zip_bytes(files):
+    """Package Lambda code in memory; do not leave deployment ZIPs in the repo."""
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as z:
         for source, arcname in files:
             z.write(source, arcname=arcname)
-    with open(zip_name, "rb") as f:
-        return f.read()
+    return output.getvalue()
 
 
 def ensure_bucket():
@@ -534,8 +536,7 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
 
 
 print("\nPackaging the dashboard API Lambda...")
-api_zip_bytes = read_zip_bytes(
-    str(REPO_ROOT / "lambda_api.zip"),
+api_zip_bytes = build_zip_bytes(
     [(REPO_ROOT / "lambda_api.py", "lambda_api.py")],
 )
 
@@ -547,8 +548,7 @@ api_lambda_arn = create_or_update_lambda(
     30,
 )
 
-silver_zip_bytes = read_zip_bytes(
-    str(REPO_ROOT / "silver_builder.zip"),
+silver_zip_bytes = build_zip_bytes(
     [(REPO_ROOT / "lambda" / "silver_builder.py", "silver_builder.py")],
 )
 silver_lambda_arn = create_or_update_lambda(

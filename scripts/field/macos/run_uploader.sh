@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 cd "$REPO_ROOT"
 export PYTHONUNBUFFERED=1
@@ -13,4 +13,4 @@ else
   PYTHON_EXE="python3"
 fi
 
-"$PYTHON_EXE" scripts/upload_instrument_data.py
+"$PYTHON_EXE" scripts/field/upload_to_aws.py

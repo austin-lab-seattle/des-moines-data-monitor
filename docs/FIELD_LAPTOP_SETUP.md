@@ -13,7 +13,8 @@ git clone https://github.com/austin-lab-seattle/des-moines-data-monitor.git
 cd des-moines-data-monitor
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item instruments_config.example.json instruments_config.json
+New-Item -ItemType Directory -Force config | Out-Null
+Copy-Item config\instruments.example.json config\instruments.json
 ```
 
 If the repository is already installed, use `git pull origin main` instead of
@@ -21,7 +22,7 @@ cloning it again.
 
 ## 2. Configure the instrument paths
 
-Edit `instruments_config.json`. Replace each example `data_glob` with the real
+Edit `config/instruments.json`. Replace each example `data_glob` with the real
 field-laptop path. Use forward slashes in JSON, even on Windows:
 
 ```json
@@ -33,7 +34,7 @@ instrument files. The uploader discovers new rollover files automatically.
 
 ## 2a. Record the serial instruments without PuTTY
 
-The uploader does not read COM ports itself. `scripts/log_serial_instruments.py`
+The uploader does not read COM ports itself. `scripts/field/acquire_serial.py`
 is the continuous recorder that replaces PuTTY for NO2-CAPS, NEPH-PM25, and
 CO2-LICOR. It writes the configured growing files with the header
 `PC_Date_Time<TAB>Raw_Line` in folders already read by the uploader. `Raw_Line`
@@ -51,7 +52,7 @@ charts and time filters use the PC-local timestamp.
 List the ports from PowerShell without opening Device Manager:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\log_serial_instruments.py --list-ports
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py --list-ports
 ```
 
 This prints entries such as `COM7  USB Serial Port (COM7)` plus the hardware
@@ -61,14 +62,10 @@ ID. The equivalent built-in Windows query is:
 Get-CimInstance Win32_SerialPort | Format-Table DeviceID, Name, PNPDeviceID -AutoSize
 ```
 
-Copy the example configuration:
-
-```powershell
-Copy-Item serial_instruments_config.example.json serial_instruments_config.json
-```
-
-Edit the copy and assign the detected COM port to each instrument. All three
-configured serial instruments use 38400 baud.
+In the same `config/instruments.json`, assign the detected COM port inside the
+`serial` block for CO2, NEPH and NO2. BC and SMPS have
+`acquisition_type: "file"` and therefore have no serial block. All three serial
+instruments use 38400 baud.
 
 The example writes directly to the intended growing files—there is no second
 renamed output copy:
@@ -89,23 +86,24 @@ Close PuTTY before the preflight—only one program can own each COM port—then
 validate the configuration and run a short manual test:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\log_serial_instruments.py --check
-.\.venv\Scripts\python.exe scripts\log_serial_instruments.py
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py --check
+.\.venv\Scripts\python.exe scripts\field\acquire_serial.py
 ```
 
 Wait until each active instrument reports that its port is open and confirm the
 configured files under `data/` are updating. Stop the manual test with `Ctrl+C`, then
-install the continuous logger at Windows logon:
+install both required tasks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_windows_serial_logger_task.ps1 -RunNow
+powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
 Get-ScheduledTaskInfo -TaskName DesMoinesSerialLogger
+Get-ScheduledTaskInfo -TaskName DesMoinesDataMonitorUpload
 Get-Content .\serial_collector.log -Tail 100
 ```
 
-Keep the existing 15-minute uploader task as well: the serial logger creates
-local files continuously, while the uploader checkpoints and sends completed
-lines to S3. Do not run PuTTY logging on these ports after enabling this task.
+The serial task creates local files continuously, while the upload task
+checkpoints and sends completed lines to S3. Do not run PuTTY logging on these
+ports after enabling the serial task.
 
 ## 3. Configure AWS credentials
 
@@ -120,8 +118,20 @@ Use region `us-west-2`. The credential should be a dedicated upload-only IAM
 identity with access to the Des Moines S3 bucket, not a personal administrator
 credential.
 
-Temporary fallback: create a local `aws_creds.json` in the repository root. It
-must contain only valid JSON:
+JSON fallback: set `AWS_CREDS_FILE` to the protected file outside the repository.
+For the current deployment this is configured machine-wide from an elevated
+PowerShell window:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "AWS_CREDS_FILE",
+    "C:\des_moines\aws_creds.json",
+    "Machine"
+)
+$env:AWS_CREDS_FILE = "C:\des_moines\aws_creds.json"
+```
+
+The file must contain only valid JSON:
 
 ```json
 {
@@ -131,13 +141,12 @@ must contain only valid JSON:
 }
 ```
 
-Both `aws_creds.json` and `instruments_config.json` are gitignored. Never commit
-or email them.
+`config/instruments.json` is gitignored. Never commit or email credentials.
 
 ## 4. Run the no-upload preflight
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\upload_instrument_data.py --check
+.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py --check
 ```
 
 This verifies the JSON configuration, active instrument globs, matched files,
@@ -150,7 +159,7 @@ The first real run may upload every complete line in a newly discovered file.
 Confirm the globs and expected source filenames before running it:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\upload_instrument_data.py
+.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py
 $LASTEXITCODE
 Get-Content .\collector.log -Tail 100
 ```
@@ -163,15 +172,20 @@ run.
 Confirm the new upload timestamp and instrument counts at
 <https://deohs-des-moines-air.vercel.app> before scheduling the task.
 
-## 6. Install the recurring task
+## 6. Install exactly two tasks
 
-Install a 15-minute task and start its first run:
+The combined installer creates or updates both required tasks and starts them:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1 -EveryMinutes 15 -RunNow
+powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
 ```
 
-The task is named `DesMoinesDataMonitorUpload`. It:
+The tasks are:
+
+- `DesMoinesSerialLogger`: continuous at-logon acquisition for NO2, NEPH and CO2;
+- `DesMoinesDataMonitorUpload`: all-instrument AWS upload every 15 minutes.
+
+The upload task:
 
 - starts one minute after installation and repeats every 15 minutes;
 - runs missed executions when Windows becomes available;
@@ -184,12 +198,29 @@ while that user is signed out, open Task Scheduler, open the task's Properties,
 choose **Run whether user is logged on or not**, and provide the dedicated task
 account credentials when Windows requests them.
 
+### Active-file and SharePoint safety
+
+Keep live instrument output in a local, non-synchronized acquisition directory
+whenever possible. Do not point the instrument, SharePoint/OneDrive and the AWS
+uploader at a file that the sync client rewrites or renames in place. Two readers
+normally coexist, but on Windows the instrument or sync client can request an
+exclusive sharing mode, producing a sharing-violation error.
+
+The AWS uploader retries a locked file three times. If it remains locked, it
+leaves that file's byte checkpoint unchanged and retries it on the next
+15-minute run; it never skips the unread bytes. SharePoint should receive only
+completed/rotated files or a snapshot copied from the live directory, not own
+the active acquisition file itself.
+
 ## 7. Verify the scheduled task
 
 ```powershell
 Get-ScheduledTask -TaskName DesMoinesDataMonitorUpload
 Get-ScheduledTaskInfo -TaskName DesMoinesDataMonitorUpload
+Get-ScheduledTask -TaskName DesMoinesSerialLogger
+Get-ScheduledTaskInfo -TaskName DesMoinesSerialLogger
 Get-Content .\collector.log -Tail 100
+Get-Content .\serial_collector.log -Tail 100
 ```
 
 `LastTaskResult` should be `0`. Recheck the live dashboard after the next
@@ -198,10 +229,10 @@ log and the dashboard timestamp.
 
 ## Updating or removing the schedule
 
-Running the installer again safely updates the existing task:
+Running the installer again safely updates both existing tasks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install_windows_task.ps1 -EveryMinutes 30
+powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 30
 ```
 
 To disable it without deleting configuration:
@@ -214,6 +245,7 @@ To remove it:
 
 ```powershell
 Unregister-ScheduledTask -TaskName DesMoinesDataMonitorUpload -Confirm:$false
+Unregister-ScheduledTask -TaskName DesMoinesSerialLogger -Confirm:$false
 ```
 
 Do not delete `checkpoints/` or `sensor_buffer.db` during normal maintenance.

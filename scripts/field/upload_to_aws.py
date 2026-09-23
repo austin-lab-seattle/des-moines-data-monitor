@@ -19,7 +19,7 @@ To make that robust this module:
 
 Run from the repository root:
 
-    python3 scripts/upload_instrument_data.py
+    python scripts/field/upload_to_aws.py
 """
 
 import argparse
@@ -54,11 +54,27 @@ def log(level, instrument_id, msg):
     getattr(logger, level)(f"[{instrument_id}] {msg}")
 
 
-CONFIG_FILE = os.environ.get("INSTRUMENT_CONFIG", "instruments_config.json")
+DEFAULT_CONFIG_FILE = "config/instruments.json"
+LEGACY_CONFIG_FILE = "instruments_config.json"
+CONFIG_FILE = os.environ.get("INSTRUMENT_CONFIG", DEFAULT_CONFIG_FILE)
+
+
+def resolved_config_file():
+    """Use the unified config, with a temporary fallback for existing laptops."""
+    if os.path.exists(CONFIG_FILE):
+        return CONFIG_FILE
+    if CONFIG_FILE == DEFAULT_CONFIG_FILE and os.path.exists(LEGACY_CONFIG_FILE):
+        logger.warning(
+            "Using legacy %s; copy it to %s before the compatibility fallback is removed.",
+            LEGACY_CONFIG_FILE,
+            DEFAULT_CONFIG_FILE,
+        )
+        return LEGACY_CONFIG_FILE
+    return CONFIG_FILE
 
 
 def load_config():
-    with open(CONFIG_FILE, "r") as f:
+    with open(resolved_config_file(), "r") as f:
         return json.load(f)
 
 
@@ -355,14 +371,26 @@ def read_new_bytes(path, offset):
     * A trailing partial line (no newline yet) is held back: ``held_bytes`` is
       its length and it is excluded from ``data``/``new_offset``.
     """
-    file_size = os.path.getsize(path)
-    used_offset = offset
-    if used_offset > file_size:
-        used_offset = 0
-
-    with open(path, "rb") as f:
-        f.seek(used_offset)
-        raw = f.read()
+    # Instruments and sync clients can briefly deny reads on Windows. Retry the
+    # open without changing any checkpoint; an exhausted lock is retried by the
+    # next scheduled upload, so no bytes are skipped.
+    last_error = None
+    for attempt, delay in enumerate((0.25, 1.0, 2.0), start=1):
+        try:
+            with open(path, "rb") as f:
+                file_size = os.fstat(f.fileno()).st_size
+                used_offset = 0 if offset > file_size else offset
+                f.seek(used_offset)
+                raw = f.read()
+            break
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(delay)
+    else:
+        raise SourceFileTemporarilyUnavailable(path, last_error) from last_error
 
     if not raw:
         return "", used_offset, used_offset, 0, file_size
@@ -380,6 +408,16 @@ def read_new_bytes(path, offset):
     new_offset = used_offset + len(complete)
     data = complete.decode("utf-8", errors="replace")
     return data, used_offset, new_offset, held_bytes, file_size
+
+
+class SourceFileTemporarilyUnavailable(RuntimeError):
+    """The writer or sync client currently holds an incompatible file lock."""
+
+    def __init__(self, path, cause):
+        super().__init__(
+            f"{path} could not be read after 3 attempts ({cause}); "
+            "checkpoint was not advanced"
+        )
 
 
 def build_s3_key(instrument_id, source_basename, now):
@@ -459,10 +497,29 @@ def handle_instrument(instrument, s3, config, loop, executor):
                 base = os.path.basename(path)
                 current_offset = file_offsets.get(base, {}).get("offset", 0)
 
-                data, used_offset, new_offset, held_bytes, file_size = (
-                    await loop.run_in_executor(
-                        executor, read_new_bytes, path, current_offset)
-                )
+                try:
+                    data, used_offset, new_offset, held_bytes, file_size = (
+                        await loop.run_in_executor(
+                            executor, read_new_bytes, path, current_offset)
+                    )
+                except SourceFileTemporarilyUnavailable as exc:
+                    had_error = True
+                    log(
+                        "warning",
+                        instrument_id,
+                        f"{base}: temporarily locked by the instrument or sync client; "
+                        f"leaving checkpoint at {current_offset} and retrying next run. {exc}",
+                    )
+                    continue
+                except FileNotFoundError:
+                    had_error = True
+                    log(
+                        "warning",
+                        instrument_id,
+                        f"{base}: disappeared during discovery/read (possibly a sync rename); "
+                        "checkpoint unchanged and retrying next run.",
+                    )
+                    continue
 
                 if used_offset < current_offset:
                     log("warning", instrument_id,
@@ -561,7 +618,7 @@ def validate_setup():
     try:
         config = load_config()
     except Exception as exc:
-        logger.error("Could not read %s: %s", CONFIG_FILE, exc)
+        logger.error("Could not read %s: %s", resolved_config_file(), exc)
         return False
 
     required = ("s3_bucket", "aws_region", "pipeline_status_key", "instruments")
@@ -662,10 +719,22 @@ async def main():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upload instrument data to S3 Bronze.")
     parser.add_argument(
+        "--config",
+        default=CONFIG_FILE,
+        help="instrument JSON config (default: config/instruments.json)",
+    )
+    parser.add_argument(
+        "--aws-creds-file",
+        default=CREDS_FILE,
+        help="optional JSON credential fallback (default: AWS_CREDS_FILE or aws_creds.json)",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="validate local configuration, files, and credentials without uploading",
     )
     arguments = parser.parse_args()
+    CONFIG_FILE = arguments.config
+    CREDS_FILE = arguments.aws_creds_file
     succeeded = validate_setup() if arguments.check else asyncio.run(main())
     raise SystemExit(0 if succeeded else 1)

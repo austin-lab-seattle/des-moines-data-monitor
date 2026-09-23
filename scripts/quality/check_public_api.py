@@ -5,8 +5,8 @@ Reads the dashboard summary and a few latest cleaned observations without
 changing S3.
 
 Usage:
-    python3 scripts/check_public_api.py
-    python3 scripts/check_public_api.py --instrument NO2-CAPS --limit 5
+    python scripts/quality/check_public_api.py
+    python scripts/quality/check_public_api.py --instrument NO2-CAPS --limit 5
 """
 
 import argparse
@@ -85,7 +85,7 @@ def print_observations(api_base, instrument, limit, start, end, api_key):
 
     if status == 404:
         print("Observations route is not available at this API URL yet.")
-        print("Deploy the updated AWS routes with: python3 scripts/deploy_aws.py")
+        print("Deploy the updated AWS routes with: python scripts/aws/deploy_backend.py")
         print(json.dumps(payload, indent=2))
         return False
 

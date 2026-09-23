@@ -3,7 +3,7 @@ set -euo pipefail
 
 INTERVAL_SECONDS="${1:-900}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$PLIST_DIR/edu.uw.deohs.des-moines-data-monitor.plist"
 
@@ -19,7 +19,7 @@ cat > "$PLIST_PATH" <<PLIST
   <string>edu.uw.deohs.des-moines-data-monitor</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$REPO_ROOT/scripts/run_pipeline.sh</string>
+    <string>$REPO_ROOT/scripts/field/macos/run_uploader.sh</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$REPO_ROOT</string>

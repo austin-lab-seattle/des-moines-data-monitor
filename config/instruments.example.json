@@ -1,9 +1,14 @@
 {
+  "serial_settings": {
+    "raw_log_dir": "serial_logs",
+    "reconnect_seconds": 5
+  },
   "instruments": [
     {
       "id": "BC-MA200",
       "display_name": "Black Carbon MA200",
       "location": "Duwamish",
+      "acquisition_type": "file",
       "ingestion_type": "growing_file",
       "data_glob": "data/black_carbon/*MA200*.csv",
       "active": true
@@ -12,6 +17,15 @@
       "id": "CO2-LICOR",
       "display_name": "CO2 Li-Cor",
       "location": "Duwamish",
+      "acquisition_type": "serial",
+      "serial": {
+        "name": "co2",
+        "port": "COM9",
+        "baud": 38400,
+        "parser": "licor",
+        "output_dir": "data/co2_li_cor",
+        "filename": "co2.txt"
+      },
       "ingestion_type": "growing_file",
       "data_glob": [
         "data/co2_li_cor/*CO2-*.txt",
@@ -23,6 +37,15 @@
       "id": "NEPH-PM25",
       "display_name": "Nephelometer PM25",
       "location": "Duwamish",
+      "acquisition_type": "serial",
+      "serial": {
+        "name": "neph",
+        "port": "COM8",
+        "baud": 38400,
+        "parser": "neph",
+        "output_dir": "data/nephlometer",
+        "filename": "Neph.txt"
+      },
       "ingestion_type": "growing_file",
       "data_glob": [
         "data/nephlometer/*Neph*.csv",
@@ -34,6 +57,15 @@
       "id": "NO2-CAPS",
       "display_name": "NO2 CAPS",
       "location": "Duwamish",
+      "acquisition_type": "serial",
+      "serial": {
+        "name": "no2",
+        "port": "COM7",
+        "baud": 38400,
+        "parser": "no2",
+        "output_dir": "data/no2_caps",
+        "filename": "no2.txt"
+      },
       "ingestion_type": "growing_file",
       "data_glob": [
         "data/no2_caps/*NO2-CAPS*.dat",
@@ -45,6 +77,7 @@
       "id": "SMPS",
       "display_name": "SMPS",
       "location": "Duwamish",
+      "acquisition_type": "file",
       "ingestion_type": "growing_file",
       "data_glob": "data/smps/*SMPS*.csv",
       "active": true

@@ -20,12 +20,14 @@ Field laptop -> S3 Bronze -> Silver builder Lambda -> S3 Silver
 S3 Bronze/Silver -> API Lambda -> API Gateway -> Vercel dashboard
 ```
 
-- The Windows field laptop runs `scripts/upload_instrument_data.py` every
+- The Windows field laptop has exactly two scheduled tasks:
+  `DesMoinesSerialLogger` continuously runs `scripts/field/acquire_serial.py`,
+  and `DesMoinesDataMonitorUpload` runs `scripts/field/upload_to_aws.py` every
   15 minutes.
 - Uploads are incremental by source filename and byte offset. Local checkpoints
   are mirrored to S3.
 - Failed uploads remain in `sensor_buffer.db` and retry on the next run.
-- The daily Silver builder filters and deduplicates Bronze data.
+- The 15-minute Silver builder filters and deduplicates Bronze data.
 - The public dashboard reads the anonymous, read-only routes.
 - Researcher scripts use individually issued API keys on keyed routes.
 - The private Team Console uses Cognito accounts, MFA, role claims, and audit
@@ -37,7 +39,7 @@ Follow [`docs/FIELD_LAPTOP_SETUP.md`](docs/FIELD_LAPTOP_SETUP.md). Do not instal
 the recurring task until:
 
 1. every `data_glob` matches only the intended instrument files;
-2. `python scripts/upload_instrument_data.py --check` passes;
+2. `python scripts/field/upload_to_aws.py --check` passes;
 3. one manual upload exits with code `0`;
 4. `collector.log` contains no upload errors; and
 5. the live dashboard shows the expected new timestamp and counts.
@@ -95,7 +97,7 @@ matter.
 
 ## Security rules
 
-- Never commit `aws_creds.json`, `instruments_config.json`, `.env` files,
+- Never commit `aws_creds.json`, `config/instruments.json`, `.env` files,
   checkpoints, field data, SQLite buffers, API keys, or generated logs.
 - Never put an API key or authentication token in a URL.
 - Keep the public dashboard and anonymous API routes read-only.
@@ -108,8 +110,8 @@ matter.
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 scripts/audit_public_exposure.py
-python3 -m py_compile lambda_api.py scripts/*.py
+python scripts/quality/audit_public_exposure.py
+python -m compileall -q lambda scripts lambda_api.py
 cd frontend && npm run lint && npm run build
 ```
 

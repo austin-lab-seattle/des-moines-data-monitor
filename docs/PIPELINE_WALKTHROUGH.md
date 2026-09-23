@@ -7,7 +7,7 @@ record generation, review sidecars, failure isolation, and every edge case we
 could think of.
 
 This document describes the code in
-[`scripts/upload_instrument_data.py`](../scripts/upload_instrument_data.py) and
+[`scripts/field/upload_to_aws.py`](../scripts/field/upload_to_aws.py) and
 [`lambda_api.py`](../lambda_api.py).
 
 ---
@@ -49,10 +49,10 @@ across the field laptop, AWS, and Vercel:
  instrument files                     S3 bucket                                React dashboard
    (data_glob)                        des-moines-data-pipeline-austinlab
        │                                    │
- upload_instrument_data.py  ─PUT──►  {instrument}/bronze/year=/month=/...
+ upload_to_aws.py           ─PUT──►  {instrument}/bronze/year=/month=/...
        │                                    │
  per-file checkpoints                 aq-silver-builder Lambda
- + SQLite buffer                      daily rebuild into {instrument}/silver/
+ + SQLite buffer                      15-min rebuild into {instrument}/silver/
        │                                    │
  checkpoint mirror  ◄────────────►    aq-dashboard-api Lambda
  {instrument}/checkpoints/              • /air-quality/v1/summary
@@ -66,13 +66,14 @@ across the field laptop, AWS, and Vercel:
 
 | Component | Where | Cadence | Job |
 |---|---|---|---|
-| `upload_instrument_data.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
+| `upload_to_aws.py` | laptop | every 15 min (scheduler) | read **new** bytes from local files, write raw batches to S3 bronze |
 | `aq-silver-builder` | AWS Lambda | 15-minute EventBridge schedule | rebuild deduplicated Silver CSVs and metadata from Bronze |
 | `aq-dashboard-api` | AWS Lambda | on request | count Bronze rows/bytes live, read Silver counts, serve public read APIs, and assemble dashboard JSON |
 | `frontend` | Vercel | browser | render the dashboard, poll the public summary endpoint, and provide the read-only Data Review UI after deployment |
 
-There are two schedules: the laptop upload schedule and the 15-minute cloud Silver
-builder schedule. The API still counts Bronze live whenever the dashboard asks.
+There are two field-laptop tasks (continuous serial acquisition and the
+15-minute upload) plus the 15-minute cloud Silver builder schedule. The API
+still counts Bronze live whenever the dashboard asks.
 
 ---
 
@@ -83,34 +84,33 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
 ├── lambda_api.py                    # dashboard API Lambda: public API + dashboard summary
 ├── lambda/
 │   └── silver_builder.py            # deduplicates Bronze into Silver CSVs
-├── instruments_config.json          # LOCAL instrument config (gitignored)
-├── instruments_config.example.json  # tracked template
+├── config/
+│   ├── instruments.json             # LOCAL unified config (gitignored)
+│   └── instruments.example.json     # tracked template
 ├── aws_creds.json                   # OPTIONAL local credential fallback (gitignored)
 ├── requirements.txt                 # boto3
 ├── scripts/
-│   ├── upload_instrument_data.py    # THE UPLOADER (run from repo root)
-│   ├── deploy_aws.py                # creates/updates all AWS resources
-│   ├── run_pipeline.sh / .bat       # wrappers the schedulers invoke
-│   ├── install_launchd_schedule.sh  # macOS scheduler installer
-│   └── install_windows_task.ps1     # Windows scheduler installer
+│   ├── field/                       # acquisition, upload and laptop schedules
+│   ├── aws/                         # AWS deployment and administration
+│   └── quality/                     # read-only audits and smoke tests
 ├── checkpoints/                     # per-instrument, per-file byte offsets (gitignored)
 ├── data/                            # local instrument files (gitignored)
 └── frontend/                        # Vite React dashboard (deployed via Vercel)
 ```
 
 **Runtime artifacts** (all gitignored): `sensor_buffer.db`, `collector.log`,
-`checkpoints/`, `data/`, `aws_creds.json`, `instruments_config.json`.
+`checkpoints/`, `data/`, `aws_creds.json`, `config/instruments.json`.
 
 > **Why run from the repo root?** The uploader uses CWD-relative paths for the
-> config, credentials, log, SQLite DB, and checkpoints. The scheduler wrappers
-> `cd` to the repo root before launching it, so all relative paths resolve
-> consistently regardless of where the scheduler itself lives.
+> config, credentials, log, SQLite DB, and checkpoints. Scheduled-task actions
+> set the repository as their working directory, so all relative paths resolve
+> consistently regardless of where Task Scheduler itself runs.
 
 ---
 
 ## 3. Configuration reference
 
-`instruments_config.json` (copy from `instruments_config.example.json`):
+`config/instruments.json` (copy from `config/instruments.example.json`):
 
 ```json
 {
@@ -119,8 +119,17 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
       "id": "CO2-LICOR",
       "display_name": "CO2 Li-Cor",
       "location": "Duwamish",
+      "acquisition_type": "serial",
+      "serial": {
+        "name": "co2",
+        "port": "COM9",
+        "baud": 38400,
+        "parser": "licor",
+        "output_dir": "data/co2_li_cor",
+        "filename": "co2.txt"
+      },
       "ingestion_type": "growing_file",
-      "data_glob": "data/co2_li_cor/*CO2-*.txt",
+      "data_glob": ["data/co2_li_cor/*CO2-*.txt", "data/co2_li_cor/co2.txt"],
       "active": true
     }
   ],
@@ -139,6 +148,8 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
 | `data_glob` | **Glob pattern (string or list)** that matches the instrument's source file(s). This is what makes rotation/renaming transparent. |
 | `data_file` | *Legacy* single path. Still accepted (treated as a one-element glob) for backward compatibility. |
 | `active` | If `false`, the instrument is skipped entirely. |
+| `acquisition_type` | `serial` for NO2/NEPH/CO2; `file` for BC/SMPS. |
+| `serial` | COM port, 38400 baud, parser and local output path; present only for serial instruments. |
 | `s3_bucket` | Destination bucket. |
 | `aws_region` | Default region when using the boto3 credential chain. |
 | `pipeline_status_key` | S3 key for the run summary object. |
@@ -147,7 +158,7 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
 
 | Variable | Default | Controls |
 |---|---|---|
-| `INSTRUMENT_CONFIG` | `instruments_config.json` | config path |
+| `INSTRUMENT_CONFIG` | `config/instruments.json` | config path |
 | `AWS_CREDS_FILE` | `aws_creds.json` | credential fallback path |
 | `SENSOR_BUFFER_DB` | `sensor_buffer.db` | SQLite buffer path |
 | `CHECKPOINTS_DIR` | `checkpoints` | local checkpoint directory |
@@ -161,7 +172,7 @@ builder schedule. The API still counts Bronze live whenever the dashboard asks.
 
 ```text
 main()
- ├─ load_config()                      read instruments_config.json
+ ├─ load_config()                      read config/instruments.json
  ├─ init_db()                          create/upgrade the SQLite buffer schema
  ├─ create_s3_client(config)           resolve credentials, build the S3 client
  ├─ active = [i for i if active]       drop inactive instruments
@@ -597,12 +608,12 @@ objects, so Bronze and Silver source files are not rewritten by the review UI.
 
 ## 13. Credentials resolution
 
-Both the uploader and `deploy_aws.py` resolve credentials the same way:
+The field uploader resolves credentials this way:
 
 ```text
 1. boto3 default chain (env vars → AWS profile → IAM role)   ← preferred
-2. aws_creds.json (if the chain found nothing and the file exists)  ← fallback
-3. otherwise: warn (uploader) / exit 1 (deploy)
+2. AWS_CREDS_FILE (if the chain found nothing and the file exists)  ← fallback
+3. otherwise: report a credential error and do not upload
 ```
 
 ```python
@@ -790,8 +801,8 @@ Legend: ✅ handled, ⚠️ known limitation / needs operator awareness.
 
 ```bash
 cd <repo root>
-python3 scripts/upload_instrument_data.py --check  # no-upload preflight
-python3 scripts/upload_instrument_data.py
+python scripts/field/upload_to_aws.py --check  # no-upload preflight
+python scripts/field/upload_to_aws.py
 tail -f collector.log         # watch results
 ```
 
@@ -802,9 +813,9 @@ complete first-install and Task Scheduler checklist.
 
 ```bash
 # macOS (every 900s)
-bash scripts/install_launchd_schedule.sh 900
+bash scripts/field/macos/install_upload_schedule.sh 900
 # Windows (every 15 min)
-powershell -ExecutionPolicy Bypass -File scripts/install_windows_task.ps1 -EveryMinutes 15
+powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -UploadEveryMinutes 15
 ```
 
 ### Verify in S3

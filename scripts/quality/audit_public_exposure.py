@@ -15,7 +15,7 @@ frontend bundle:
 
 Run from the repo root:
 
-    python3 scripts/audit_public_exposure.py
+    python scripts/quality/audit_public_exposure.py
 
 Git-ignored files are skipped (they never reach the public repo). Every finding
 is tagged TRACKED (already public on GitHub) or UNTRACKED (public only if
@@ -29,7 +29,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 
 FRONTEND_SURFACE = ["frontend/src", "frontend/dist"]
 DOCS_SURFACE = [
@@ -194,25 +194,25 @@ def check_backend_guardrails():
 
 
 def check_deploy_guardrails():
-    deploy = REPO / "scripts" / "deploy_aws.py"
+    deploy = REPO / "scripts" / "aws" / "deploy_backend.py"
     text = read(deploy)
     if not deploy.exists():
         return
 
     if "ce:GetCostAndUsage" in text and "ENABLE_COST_KPI" not in text:
-        add("HIGH", "cost-exposure", "scripts/deploy_aws.py",
+        add("HIGH", "cost-exposure", "scripts/aws/deploy_backend.py",
             "Deploy policy grants billing read access without the explicit ENABLE_COST_KPI opt-in guard.")
     allows_post = re.search(r'"AllowMethods"\s*:\s*\[[^\]]*"POST"', text, re.S)
     has_access_request_route = "POST /air-quality/v1/access-requests" in text
     if allows_post and not has_access_request_route:
-        add("HIGH", "browser-write-cors", "scripts/deploy_aws.py",
+        add("HIGH", "browser-write-cors", "scripts/aws/deploy_backend.py",
             "API Gateway CORS allows browser POST calls without a narrowly scoped access-request route.")
     credential_headers = re.search(
         r'"AllowHeaders"\s*:\s*\[[^\]]*(x-api-key|authorization)', text, re.S | re.I
     )
     wildcard_origin = re.search(r'"AllowOrigins"\s*:\s*\[[^\]]*"\*"', text, re.S)
     if credential_headers and wildcard_origin:
-        add("HIGH", "browser-write-cors", "scripts/deploy_aws.py",
+        add("HIGH", "browser-write-cors", "scripts/aws/deploy_backend.py",
             "API Gateway allows browser credential headers from every origin.")
 
 

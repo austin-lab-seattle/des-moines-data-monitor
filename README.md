@@ -23,10 +23,10 @@ Live dashboard: <https://deohs-des-moines-air.vercel.app>
 Field laptop                            AWS Cloud                              Vercel
 ------------                            ---------                              ------
 Serial instruments -> configured files  S3 bucket                              React dashboard
-scripts/log_serial_instruments.py             |                                      |
+scripts/field/acquire_serial.py                |                                      |
 Instrument files (data_glob)                   |                                      |
      |                                  des-moines-data-pipeline-austinlab           |
-scripts/upload_instrument_data.py  -->  {instrument}/bronze/...                      |
+scripts/field/upload_to_aws.py     -->  {instrument}/bronze/...                      |
      |                                       |                                        |
 per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                     |
                                              |                                        |
@@ -45,18 +45,18 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 ├── lambda_api.py               # dashboard API Lambda: public API + summary payload
 ├── lambda/
 │   └── silver_builder.py       # rebuilds deduplicated silver CSVs from bronze
-├── instruments_config.json     # local instrument config (gitignored)
-├── instruments_config.example.json  # tracked template for the config above
-├── serial_instruments_config.example.json # COM-port logger template
+├── config/
+│   ├── instruments.json             # one local config for acquisition + upload (gitignored)
+│   └── instruments.example.json     # tracked template
 ├── aws_creds.json              # optional local credential fallback (gitignored)
 ├── requirements.txt
 ├── scripts/
-│   ├── upload_instrument_data.py     # the uploader (run from repo root)
-│   ├── log_serial_instruments.py     # continuous PuTTY replacement
-│   ├── deploy_aws.py                 # creates/updates all AWS resources
-│   ├── run_pipeline.sh / .bat        # wrappers the schedulers call
-│   ├── install_launchd_schedule.sh   # macOS scheduler installer
-│   └── install_windows_task.ps1      # Windows scheduler installer
+│   ├── field/                        # acquisition, upload and laptop scheduling
+│   │   ├── acquire_serial.py         # continuous PuTTY replacement
+│   │   ├── upload_to_aws.py          # incremental Bronze uploader
+│   │   └── windows/install_tasks.ps1 # installs exactly two Windows tasks
+│   ├── aws/                          # deploy and administrative commands
+│   └── quality/                      # read-only audit and smoke checks
 ├── checkpoints/                # per-instrument, per-file byte offsets (gitignored)
 ├── data/                       # local instrument files (gitignored)
 └── frontend/                   # Vite React dashboard (deployed via Vercel)
@@ -64,11 +64,11 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
 
 ## Components
 
-- `scripts/upload_instrument_data.py` reads all active instruments from
-  `instruments_config.json`, discovers source files with a **glob pattern**
+- `scripts/field/upload_to_aws.py` reads all active instruments from
+  `config/instruments.json`, discovers source files with a **glob pattern**
   (`data_glob`), keeps a **byte offset per file**, buffers upload attempts in
   SQLite, and writes bronze batches to S3. Run it from the repository root.
-- `scripts/log_serial_instruments.py` continuously owns the NO2, nephelometer,
+- `scripts/field/acquire_serial.py` continuously owns the NO2, nephelometer,
   and LI-COR COM ports. It writes only a receipt timestamp and the exact raw
   instrument line; the uploader sends this acquisition envelope to Bronze
   unchanged. Silver owns parsing and scientific transformations.
@@ -81,7 +81,7 @@ per-file checkpoints + SQLite buffer    aq-silver-builder Lambda                
   data rows and bytes per instrument live (its `is_data_row()` logic skips
   headers and comment lines), reads Silver row counts from metadata, and exposes
   public read-only API routes for the dashboard and cleaned data access.
-- `scripts/deploy_aws.py` creates or updates the bucket, Lambda role, the API
+- `scripts/aws/deploy_backend.py` creates or updates the bucket, Lambda role, the API
   Lambda, and the API Gateway.
 - `frontend/` is the Vite React dashboard deployed through the existing Vercel
   project.
@@ -121,7 +121,7 @@ the next run.
 
 ## Scheduling
 
-There are two schedules:
+There are two field-laptop tasks plus one cloud schedule:
 
 - The serial logger runs continuously on the field laptop and replaces PuTTY
   for the three serial instruments.
@@ -133,27 +133,20 @@ There are two schedules:
 Run one upload pass manually:
 
 ```bash
-python3 scripts/upload_instrument_data.py --check  # validates without uploading
-python3 scripts/upload_instrument_data.py
+python scripts/field/upload_to_aws.py --check  # validates without uploading
+python scripts/field/upload_to_aws.py
 ```
 
-Install a Windows Task Scheduler job that runs every 15 minutes:
+Install both Windows tasks (continuous serial logging and a 15-minute upload):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/install_windows_task.ps1 -EveryMinutes 15
+powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
 ```
 
 Install a macOS launchd job that runs every 900 seconds:
 
 ```bash
-bash scripts/install_launchd_schedule.sh 900
-```
-
-Run the wrappers directly:
-
-```bash
-scripts/run_pipeline.sh        # macOS/Linux
-scripts\run_pipeline.bat       # Windows
+bash scripts/field/macos/install_upload_schedule.sh 900
 ```
 
 Use a 15-minute upload interval while instruments are actively writing. A 30- or
@@ -165,10 +158,10 @@ scheduled task.
 
 ## AWS credentials
 
-Both the uploader and `deploy_aws.py` use the **standard boto3 credential
-chain** first — environment variables, a shared AWS profile, or an attached IAM
-role — and fall back to `aws_creds.json` only if the chain finds nothing. Prefer
-one of:
+Both the uploader and `scripts/aws/deploy_backend.py` use the **standard boto3
+credential chain** first — environment variables, a shared AWS profile, or an
+attached IAM role — and fall back to `AWS_CREDS_FILE` (or `aws_creds.json`) only
+if the chain finds nothing. Prefer one of:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -185,8 +178,8 @@ plus whatever the deploy user needs).
 ## Local config
 
 The sensitive/local files are gitignored: `aws_creds.json`,
-`instruments_config.json`, `checkpoints/`, `sensor_buffer.db`, `collector.log`,
-`data/`. Copy `instruments_config.example.json` to `instruments_config.json` and
+`config/instruments.json`, `checkpoints/`, `sensor_buffer.db`, `collector.log`,
+`data/`. Copy `config/instruments.example.json` to `config/instruments.json` and
 point each `data_glob` at the live file locations on the laptop.
 
 Current AWS target:
@@ -225,9 +218,9 @@ and named team roles. The public Vercel views remain read-only.
 
 ```bash
 python3 -m pip install -r requirements.txt   # install deps
-python3 scripts/upload_instrument_data.py     # one upload pass
-python3 scripts/deploy_aws.py                 # deploy/update AWS resources
-python3 scripts/check_public_api.py --limit 5 # verify public API reads
+python scripts/field/upload_to_aws.py                 # one upload pass
+python scripts/aws/deploy_backend.py                  # deploy/update AWS resources
+python scripts/quality/check_public_api.py --limit 5  # verify public API reads
 cd frontend && npm install && npm run dev     # run the dashboard locally
 ```
 
@@ -236,7 +229,7 @@ To enable access requests after SES has a verified sender address:
 ```bash
 export ACCESS_REQUEST_FROM_EMAIL="elaustin@uw.edu"
 export API_KEY_HASH_PEPPER="set-this-from-a-secret-manager"
-ENABLE_API_KEY_REGISTRATION=1 python3 scripts/deploy_aws.py
+ENABLE_API_KEY_REGISTRATION=1 python scripts/aws/deploy_backend.py
 ```
 
 After the user opens the verification link, SES emails the key to that verified
@@ -247,12 +240,12 @@ Keep `PUBLIC_API_KEY_REQUIRED=0` until the public dashboard has a server-side
 data proxy. A static browser dashboard cannot keep a shared key secret.
 
 For Vercel, set `VITE_API_URL` to the API Gateway summary URL printed by
-`scripts/deploy_aws.py`.
+`scripts/aws/deploy_backend.py`.
 
 For an internal dashboard deployment that should show AWS MTD cost in Overview:
 
 ```bash
-ENABLE_COST_KPI=1 python3 scripts/deploy_aws.py
+ENABLE_COST_KPI=1 python scripts/aws/deploy_backend.py
 ```
 
 ## Data layout (medallion)
@@ -294,11 +287,11 @@ over large Silver/Gold datasets.
 
 ## Operational walkthrough
 
-1. Confirm `instruments_config.json` `data_glob` patterns match the live files.
-2. Run `python3 scripts/upload_instrument_data.py` once and check `collector.log`.
+1. Confirm `config/instruments.json` `data_glob` patterns match the live files.
+2. Run `python scripts/field/upload_to_aws.py` once and check `collector.log`.
 3. Confirm S3 has `{instrument_id}/bronze/...` files and
    `{instrument_id}/checkpoints/checkpoint.json`.
-4. Run `python3 scripts/deploy_aws.py` after Lambda/API changes.
+4. Run `python scripts/aws/deploy_backend.py` after Lambda/API changes.
 5. Open the API Gateway summary URL and confirm JSON contains `kpis`,
    `refreshTime`, and all five instruments with Bronze and Silver row counts.
 6. Set Vercel `VITE_API_URL` to that summary URL and redeploy the frontend.
