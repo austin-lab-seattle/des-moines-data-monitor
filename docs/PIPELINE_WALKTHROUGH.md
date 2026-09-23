@@ -159,7 +159,7 @@ still counts Bronze live whenever the dashboard asks.
 | Variable | Default | Controls |
 |---|---|---|
 | `INSTRUMENT_CONFIG` | `config/instruments.json` | config path |
-| `AWS_CREDS_FILE` | `aws_creds.json` | credential fallback path |
+| `AWS_CREDS_FILE` | — | explicit credential file; authoritative when set |
 | `SENSOR_BUFFER_DB` | `sensor_buffer.db` | SQLite buffer path |
 | `CHECKPOINTS_DIR` | `checkpoints` | local checkpoint directory |
 | `AWS_REGION` | — | region for the credential chain |
@@ -611,12 +611,16 @@ objects, so Bronze and Silver source files are not rewritten by the review UI.
 The field uploader resolves credentials this way:
 
 ```text
-1. boto3 default chain (env vars → AWS profile → IAM role)   ← preferred
-2. AWS_CREDS_FILE (if the chain found nothing and the file exists)  ← fallback
-3. otherwise: report a credential error and do not upload
+1. --aws-creds-file or AWS_CREDS_FILE, when configured   ← authoritative
+2. boto3 default chain (env vars → AWS profile → IAM role)
+3. legacy repository-root aws_creds.json fallback
+4. otherwise: report a credential error and do not upload
 ```
 
 ```python
+if PREFER_CREDS_FILE:
+    creds = load_aws_credentials()
+    return boto3.client("s3", ...)
 session = boto3.Session()
 if session.get_credentials() is not None:
     return session.client("s3", region_name=session.region_name or region)
@@ -625,10 +629,10 @@ if os.path.exists(CREDS_FILE):
     return boto3.client("s3", aws_access_key_id=…, aws_secret_access_key=…, region_name=…)
 ```
 
-Region precedence: `config.aws_region` → `AWS_REGION` env → `us-west-2`. Keeping
-the standard chain first means production hosts can use an IAM role or profile and
-no static key ever has to live in the repo; the field laptop can still drop an
-`aws_creds.json` (gitignored) if that is simpler.
+Region precedence: the explicit JSON file's `region`, otherwise
+`config.aws_region` → `AWS_REGION` env → `us-west-2`. Production hosts can use
+an IAM role or profile without a static key. The Windows task passes
+`C:\des_moines\aws_creds.json` explicitly.
 
 ---
 
@@ -955,8 +959,9 @@ out of public API documentation.
 Not today. It only becomes useful once Silver/Gold Parquet exists to query.
 
 **Q: Where do credentials come from?**
-The standard boto3 chain first (env / profile / role), then `aws_creds.json` as a
-fallback. Nothing secret needs to be committed.
+An explicit `--aws-creds-file` or `AWS_CREDS_FILE` first, then the standard
+boto3 chain, then the legacy repository-root `aws_creds.json` fallback. Nothing
+secret needs to be committed.
 
 **Q: What happens if the laptop dies?**
 Re-run on a fresh machine — offsets recover from the S3 checkpoint mirror, so

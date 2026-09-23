@@ -1,8 +1,8 @@
 # Environment variables
 .env
 
-# AWS credentials
-aws_creds.json
+# AWS credentials (at any depth; real credentials never belong in Git)
+aws_creds*.json
 
 # Python
 __pycache__/
@@ -19,6 +19,8 @@ ENV/
 .vscode/
 .idea/
 .claude/
+CLAUDE_CODE_HANDOVER.md
+*_CODE_HANDOVER.md
 *.swp
 *.swo
 
@@ -40,6 +42,7 @@ serial_logs/
 docs/dashboard-review-screenshot-*.png
 docs/meeting-progress-*.html
 docs/team-email-update-*.md
+tmp/
 
 # OS
 .DS_Store

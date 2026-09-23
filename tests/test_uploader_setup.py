@@ -91,6 +91,50 @@ class UploaderSetupTests(unittest.TestCase):
                 (used, new, held, size),
             )
 
+    def test_explicit_credentials_file_wins_over_default_chain(self):
+        with tempfile.TemporaryDirectory() as root:
+            credentials_path = Path(root) / "aws_creds.json"
+            credentials_path.write_text(json.dumps({
+                "aws_access_key_id": "test-access-key",
+                "aws_secret_access_key": "test-secret-key",
+                "region": "us-west-2",
+            }))
+            session = mock.Mock()
+            session.get_credentials.return_value = object()
+            explicit_client = mock.Mock()
+            fake_boto3 = types.SimpleNamespace(
+                Session=mock.Mock(return_value=session),
+                client=mock.Mock(return_value=explicit_client),
+            )
+
+            with (
+                mock.patch.object(upload_instrument_data, "boto3", fake_boto3),
+                mock.patch.object(
+                    upload_instrument_data, "CREDS_FILE", str(credentials_path)
+                ),
+                mock.patch.object(upload_instrument_data, "PREFER_CREDS_FILE", True),
+            ):
+                client = upload_instrument_data.create_s3_client({
+                    "aws_region": "us-east-1"
+                })
+
+            self.assertIs(explicit_client, client)
+            fake_boto3.client.assert_called_once_with(
+                "s3",
+                aws_access_key_id="test-access-key",
+                aws_secret_access_key="test-secret-key",
+                region_name="us-west-2",
+            )
+            session.client.assert_not_called()
+
+    def test_missing_explicit_credentials_file_fails_clearly(self):
+        with (
+            mock.patch.object(upload_instrument_data, "CREDS_FILE", "missing.json"),
+            mock.patch.object(upload_instrument_data, "PREFER_CREDS_FILE", True),
+        ):
+            with self.assertRaisesRegex(FileNotFoundError, "configured AWS credential"):
+                upload_instrument_data.create_s3_client({"aws_region": "us-west-2"})
+
 
 if __name__ == "__main__":
     unittest.main()

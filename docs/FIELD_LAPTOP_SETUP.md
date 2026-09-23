@@ -107,28 +107,13 @@ ports after enabling the serial task.
 
 ## 3. Configure AWS credentials
 
-Preferred: configure the default AWS profile for the same Windows user that
-runs the task:
+The field laptop uses this protected file outside the repository:
 
 ```powershell
-aws configure
-```
-
-Use region `us-west-2`. The credential should be a dedicated upload-only IAM
-identity with access to the Des Moines S3 bucket, not a personal administrator
-credential.
-
-JSON fallback: set `AWS_CREDS_FILE` to the protected file outside the repository.
-For the current deployment this is configured machine-wide from an elevated
-PowerShell window:
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-    "AWS_CREDS_FILE",
-    "C:\des_moines\aws_creds.json",
-    "Machine"
-)
-$env:AWS_CREDS_FILE = "C:\des_moines\aws_creds.json"
+$credsPath = "C:\des_moines\aws_creds.json"
+if (-not (Test-Path -LiteralPath $credsPath -PathType Leaf)) {
+    throw "Credentials file not found: $credsPath"
+}
 ```
 
 The file must contain only valid JSON:
@@ -141,12 +126,19 @@ The file must contain only valid JSON:
 }
 ```
 
-`config/instruments.json` is gitignored. Never commit or email credentials.
+Use a dedicated upload-only IAM identity with access to the Des Moines S3
+bucket, not a personal administrator credential. Credential JSON files and
+`config/instruments.json` are gitignored. Never commit or email credentials.
+
+The installer passes this path directly to the upload task. A machine-wide
+environment variable and `aws configure` are not required.
 
 ## 4. Run the no-upload preflight
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py --check
+.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py `
+    --aws-creds-file "C:\des_moines\aws_creds.json" `
+    --check
 ```
 
 This verifies the JSON configuration, active instrument globs, matched files,
@@ -159,7 +151,8 @@ The first real run may upload every complete line in a newly discovered file.
 Confirm the globs and expected source filenames before running it:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py
+.\.venv\Scripts\python.exe scripts\field\upload_to_aws.py `
+    --aws-creds-file "C:\des_moines\aws_creds.json"
 $LASTEXITCODE
 Get-Content .\collector.log -Tail 100
 ```
@@ -177,7 +170,11 @@ Confirm the new upload timestamp and instrument counts at
 The combined installer creates or updates both required tasks and starts them:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\field\windows\install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
+powershell -ExecutionPolicy Bypass `
+    -File scripts\field\windows\install_tasks.ps1 `
+    -AwsCredsFile "C:\des_moines\aws_creds.json" `
+    -UploadEveryMinutes 15 `
+    -RunNow
 ```
 
 The tasks are:

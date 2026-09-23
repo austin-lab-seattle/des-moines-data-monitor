@@ -2,6 +2,7 @@ param(
     [int]$UploadEveryMinutes = 15,
     [string]$UploadTaskName = "DesMoinesDataMonitorUpload",
     [string]$SerialTaskName = "DesMoinesSerialLogger",
+    [string]$AwsCredsFile = "C:\des_moines\aws_creds.json",
     [switch]$RunNow
 )
 
@@ -25,19 +26,8 @@ if (-not (Test-Path $UnifiedConfig)) {
 }
 $ConfigPath = $UnifiedConfig
 
-# A machine-level AWS_CREDS_FILE may have been set after this PowerShell process
-# started. Copy it into the current environment so preflight and child tasks see it.
-if (-not $env:AWS_CREDS_FILE) {
-    $ConfiguredCreds = [Environment]::GetEnvironmentVariable("AWS_CREDS_FILE", "Machine")
-    if (-not $ConfiguredCreds) {
-        $ConfiguredCreds = [Environment]::GetEnvironmentVariable("AWS_CREDS_FILE", "User")
-    }
-    if ($ConfiguredCreds) {
-        $env:AWS_CREDS_FILE = $ConfiguredCreds
-    }
-}
-if ($env:AWS_CREDS_FILE -and -not (Test-Path -LiteralPath $env:AWS_CREDS_FILE)) {
-    throw "AWS_CREDS_FILE does not exist: $env:AWS_CREDS_FILE"
+if (-not (Test-Path -LiteralPath $AwsCredsFile -PathType Leaf)) {
+    throw "AWS credentials file not found: $AwsCredsFile"
 }
 
 Write-Host "Running serial and upload preflights..."
@@ -45,10 +35,10 @@ Write-Host "Running serial and upload preflights..."
 if ($LASTEXITCODE -ne 0) {
     throw "Serial preflight failed."
 }
-$UploadArguments = @("--config", $ConfigPath)
-if ($env:AWS_CREDS_FILE) {
-    $UploadArguments += @("--aws-creds-file", $env:AWS_CREDS_FILE)
-}
+$UploadArguments = @(
+    "--config", $ConfigPath,
+    "--aws-creds-file", $AwsCredsFile
+)
 & $PythonExe $UploadScript @UploadArguments --check
 if ($LASTEXITCODE -ne 0) {
     throw "Upload preflight failed."
@@ -76,10 +66,10 @@ Register-ScheduledTask `
     -Description "Continuously records NO2, NEPH and CO2 serial data to local acquisition files." `
     -Force | Out-Null
 
-$UploadArgumentString = "`"$UploadScript`" --config `"$ConfigPath`""
-if ($env:AWS_CREDS_FILE) {
-    $UploadArgumentString += " --aws-creds-file `"$env:AWS_CREDS_FILE`""
-}
+$UploadArgumentString = (
+    "`"$UploadScript`" --config `"$ConfigPath`" " +
+    "--aws-creds-file `"$AwsCredsFile`""
+)
 $UploadAction = New-ScheduledTaskAction `
     -Execute $PythonExe `
     -Argument $UploadArgumentString `
@@ -109,11 +99,7 @@ Register-ScheduledTask `
 Write-Host "Installed exactly two tasks:"
 Write-Host "  $SerialTaskName - continuous, starts at logon"
 Write-Host "  $UploadTaskName - every $UploadEveryMinutes minutes"
-if ($env:AWS_CREDS_FILE) {
-    Write-Host "Upload credentials: $env:AWS_CREDS_FILE"
-} else {
-    Write-Host "Upload credentials: standard AWS profile/environment chain"
-}
+Write-Host "Upload credentials: $AwsCredsFile"
 
 if ($RunNow) {
     Start-ScheduledTask -TaskName $SerialTaskName

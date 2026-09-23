@@ -140,7 +140,7 @@ python scripts/field/upload_to_aws.py
 Install both Windows tasks (continuous serial logging and a 15-minute upload):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -UploadEveryMinutes 15 -RunNow
+powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -AwsCredsFile "C:\des_moines\aws_creds.json" -UploadEveryMinutes 15 -RunNow
 ```
 
 Install a macOS launchd job that runs every 900 seconds:
@@ -158,10 +158,12 @@ scheduled task.
 
 ## AWS credentials
 
-Both the uploader and `scripts/aws/deploy_backend.py` use the **standard boto3
-credential chain** first — environment variables, a shared AWS profile, or an
-attached IAM role — and fall back to `AWS_CREDS_FILE` (or `aws_creds.json`) only
-if the chain finds nothing. Prefer one of:
+On the field laptop, the task installer passes
+`C:\des_moines\aws_creds.json` directly to the uploader. An explicitly supplied
+`--aws-creds-file` is authoritative, so Task Scheduler does not depend on
+whether it inherited a newly configured environment variable.
+
+Other environments may use the standard boto3 credential chain:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -171,13 +173,12 @@ export AWS_DEFAULT_REGION=us-west-2
 aws configure --profile des-moines    # then export AWS_PROFILE=des-moines
 ```
 
-If you keep using `aws_creds.json`, it stays gitignored. Rotate that IAM key
-periodically and keep it scoped to least privilege (S3 write to the data bucket,
-plus whatever the deploy user needs).
+All `aws_creds*.json` files are gitignored. Rotate the field IAM key periodically
+and keep it scoped to least privilege (S3 write to the data bucket only).
 
 ## Local config
 
-The sensitive/local files are gitignored: `aws_creds.json`,
+The sensitive/local files are gitignored: `aws_creds*.json`,
 `config/instruments.json`, `checkpoints/`, `sensor_buffer.db`, `collector.log`,
 `data/`. Copy `config/instruments.example.json` to `config/instruments.json` and
 point each `data_glob` at the live file locations on the laptop.

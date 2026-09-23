@@ -78,12 +78,14 @@ def load_config():
         return json.load(f)
 
 
-CREDS_FILE = os.environ.get("AWS_CREDS_FILE", "aws_creds.json")
+CONFIGURED_CREDS_FILE = os.environ.get("AWS_CREDS_FILE")
+CREDS_FILE = CONFIGURED_CREDS_FILE or "aws_creds.json"
+PREFER_CREDS_FILE = bool(CONFIGURED_CREDS_FILE)
 DEFAULT_REGION = "us-west-2"
 
 
 def load_aws_credentials():
-    """Load AWS credentials from the local aws_creds.json fallback file."""
+    """Load and validate credentials from the selected JSON file."""
     with open(CREDS_FILE, "r") as f:
         creds = json.load(f)
     return {
@@ -96,12 +98,23 @@ def load_aws_credentials():
 def create_s3_client(config):
     """Create an S3 client.
 
-    Prefers the standard boto3 credential chain (environment variables, shared
-    AWS config/credentials, or an attached IAM role). Falls back to the local
-    aws_creds.json file only when the chain finds nothing, which keeps the
-    field-laptop setup working without committing static keys to the project.
+    An explicitly configured credential file is authoritative. Otherwise use
+    the standard boto3 chain and retain the legacy repository-root JSON file as
+    a final compatibility fallback.
     """
     region = config.get("aws_region") or os.environ.get("AWS_REGION") or DEFAULT_REGION
+
+    if PREFER_CREDS_FILE:
+        if not os.path.isfile(CREDS_FILE):
+            raise FileNotFoundError(f"configured AWS credential file is missing: {CREDS_FILE}")
+        creds = load_aws_credentials()
+        logger.info("Using explicitly configured AWS credentials from %s", CREDS_FILE)
+        return boto3.client(
+            "s3",
+            aws_access_key_id=creds["aws_access_key_id"],
+            aws_secret_access_key=creds["aws_secret_access_key"],
+            region_name=creds["region"],
+        )
 
     session = boto3.Session()
     if session.get_credentials() is not None:
@@ -660,13 +673,6 @@ def validate_setup():
         )
 
     try:
-        credential_session = boto3.Session()
-        if credential_session.get_credentials() is None:
-            if not os.path.exists(CREDS_FILE):
-                raise RuntimeError(
-                    f"no standard AWS credentials and {CREDS_FILE} does not exist"
-                )
-            load_aws_credentials()
         create_s3_client(config)
         logger.info("AWS credential configuration loaded; no network request was made.")
     except Exception as exc:
@@ -725,8 +731,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--aws-creds-file",
-        default=CREDS_FILE,
-        help="optional JSON credential fallback (default: AWS_CREDS_FILE or aws_creds.json)",
+        help=(
+            "JSON credential file to use explicitly "
+            "(default: AWS_CREDS_FILE, then the standard AWS credential chain)"
+        ),
     )
     parser.add_argument(
         "--check",
@@ -735,6 +743,8 @@ if __name__ == "__main__":
     )
     arguments = parser.parse_args()
     CONFIG_FILE = arguments.config
-    CREDS_FILE = arguments.aws_creds_file
+    if arguments.aws_creds_file:
+        CREDS_FILE = arguments.aws_creds_file
+        PREFER_CREDS_FILE = True
     succeeded = validate_setup() if arguments.check else asyncio.run(main())
     raise SystemExit(0 if succeeded else 1)
