@@ -214,13 +214,21 @@ powershell -ExecutionPolicy Bypass `
     -File scripts\field\windows\install_tasks.ps1 `
     -AwsCredsFile "C:\des_moines\aws_creds.json" `
     -UploadEveryMinutes 15 `
+    -RunWhenLoggedOff `
+    -RunAsUser "$env:COMPUTERNAME\lab_admin" `
     -RunNow
 ```
 
 The tasks are:
 
-- `DesMoinesSerialLogger`: continuous at-logon acquisition for enabled serial instruments;
+- `DesMoinesSerialLogger`: continuous acquisition from Windows startup for enabled serial instruments;
 - `DesMoinesDataMonitorUpload`: all-instrument AWS upload every 15 minutes.
+
+The installer prompts once for the Windows password and stores it using Task
+Scheduler's protected credential storage so both tasks can run while
+`lab_admin` is signed out. If the password changes, rerun the installer. The
+known legacy task `desmoines_data_upload` is stopped and removed, preventing a
+second uploader from reading the same files.
 
 The upload task:
 
@@ -230,10 +238,15 @@ The upload task:
 - retries a failed process up to three times at five-minute intervals;
 - writes output to `collector.log` in the repository root.
 
-By default, Windows registers it for the current user. If uploads must continue
-while that user is signed out, open Task Scheduler, open the task's Properties,
-choose **Run whether user is logged on or not**, and provide the dedicated task
-account credentials when Windows requests them.
+Omit `-RunWhenLoggedOff` only for a short interactive test. Do not select **Do
+not store password**: that uses an S4U logon without normal network-resource
+access. The tasks do not require **Run with highest privileges** and the
+installer uses limited privileges.
+
+Mapped drive letters and the interactive OneDrive/SharePoint sync client may be
+unavailable while the account is logged off. Keep the actively written
+instrument files and `C:\des_moines\aws_creds.json` on local disk; let
+SharePoint copy completed or rotated files separately.
 
 ### Active-file and SharePoint safety
 

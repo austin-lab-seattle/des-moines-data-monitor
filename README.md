@@ -143,7 +143,7 @@ python scripts/field/upload_to_aws.py
 Install both Windows tasks (continuous serial logging and a 15-minute upload):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -AwsCredsFile "C:\des_moines\aws_creds.json" -UploadEveryMinutes 15 -RunNow
+powershell -ExecutionPolicy Bypass -File scripts/field/windows/install_tasks.ps1 -AwsCredsFile "C:\des_moines\aws_creds.json" -UploadEveryMinutes 15 -RunWhenLoggedOff -RunAsUser "$env:COMPUTERNAME\lab_admin" -RunNow
 ```
 
 Install a macOS launchd job that runs every 900 seconds:

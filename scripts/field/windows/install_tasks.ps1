@@ -3,6 +3,8 @@ param(
     [string]$UploadTaskName = "DesMoinesDataMonitorUpload",
     [string]$SerialTaskName = "DesMoinesSerialLogger",
     [string]$AwsCredsFile = "C:\des_moines\aws_creds.json",
+    [switch]$RunWhenLoggedOff,
+    [string]$RunAsUser = "$env:USERDOMAIN\$env:USERNAME",
     [switch]$RunNow
 )
 
@@ -30,6 +32,43 @@ if (-not (Test-Path -LiteralPath $AwsCredsFile -PathType Leaf)) {
     throw "AWS credentials file not found: $AwsCredsFile"
 }
 
+$TaskPassword = $null
+if ($RunWhenLoggedOff) {
+    $TaskCredential = Get-Credential `
+        -UserName $RunAsUser `
+        -Message "Enter the Windows password used to run both Des Moines tasks while logged off."
+    if (-not $TaskCredential) {
+        throw "Windows task credentials were not provided."
+    }
+    $RunAsUser = $TaskCredential.UserName
+    $TaskPassword = $TaskCredential.GetNetworkCredential().Password
+}
+
+function Register-DesMoinesTask {
+    param(
+        [string]$TaskName,
+        $Action,
+        $Trigger,
+        $Settings,
+        [string]$Description
+    )
+
+    $Registration = @{
+        TaskName = $TaskName
+        Action = $Action
+        Trigger = $Trigger
+        Settings = $Settings
+        Description = $Description
+        Force = $true
+    }
+    if ($RunWhenLoggedOff) {
+        $Registration.User = $RunAsUser
+        $Registration.Password = $TaskPassword
+        $Registration.RunLevel = "Limited"
+    }
+    Register-ScheduledTask @Registration | Out-Null
+}
+
 Write-Host "Running serial and upload preflights..."
 & $PythonExe $SerialScript --config $ConfigPath --check
 if ($LASTEXITCODE -ne 0) {
@@ -48,7 +87,11 @@ $SerialAction = New-ScheduledTaskAction `
     -Execute $PythonExe `
     -Argument "`"$SerialScript`" --config `"$ConfigPath`"" `
     -WorkingDirectory $RepoRoot
-$SerialTrigger = New-ScheduledTaskTrigger -AtLogOn
+if ($RunWhenLoggedOff) {
+    $SerialTrigger = New-ScheduledTaskTrigger -AtStartup
+} else {
+    $SerialTrigger = New-ScheduledTaskTrigger -AtLogOn
+}
 $SerialSettings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -MultipleInstances IgnoreNew `
@@ -58,13 +101,12 @@ $SerialSettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries
 
-Register-ScheduledTask `
+Register-DesMoinesTask `
     -TaskName $SerialTaskName `
     -Action $SerialAction `
     -Trigger $SerialTrigger `
     -Settings $SerialSettings `
-    -Description "Continuously records the enabled serial instruments to local acquisition files." `
-    -Force | Out-Null
+    -Description "Continuously records the enabled serial instruments to local acquisition files."
 
 $UploadArgumentString = (
     "`"$UploadScript`" --config `"$ConfigPath`" " +
@@ -88,18 +130,39 @@ $UploadSettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries
 
-Register-ScheduledTask `
+Register-DesMoinesTask `
     -TaskName $UploadTaskName `
     -Action $UploadAction `
     -Trigger $UploadTrigger `
     -Settings $UploadSettings `
-    -Description "Uploads completed instrument lines to AWS S3 Bronze every $UploadEveryMinutes minutes." `
-    -Force | Out-Null
+    -Description "Uploads completed instrument lines to AWS S3 Bronze every $UploadEveryMinutes minutes."
+
+# Remove the known hand-created predecessor only after both replacement tasks
+# have registered successfully, so a credential/registration error cannot leave
+# the laptop with no uploader at all.
+$LegacyTaskNames = @("desmoines_data_upload")
+foreach ($LegacyTaskName in $LegacyTaskNames) {
+    $LegacyTask = Get-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
+    if ($LegacyTask) {
+        Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false
+        Write-Host "Removed legacy task: $LegacyTaskName"
+    }
+}
 
 Write-Host "Installed exactly two tasks:"
-Write-Host "  $SerialTaskName - continuous, starts at logon"
+if ($RunWhenLoggedOff) {
+    Write-Host "  $SerialTaskName - continuous, starts with Windows"
+} else {
+    Write-Host "  $SerialTaskName - continuous, starts at logon"
+}
 Write-Host "  $UploadTaskName - every $UploadEveryMinutes minutes"
 Write-Host "Upload credentials: $AwsCredsFile"
+if ($RunWhenLoggedOff) {
+    Write-Host "Windows account: $RunAsUser (runs whether logged on or not)"
+} else {
+    Write-Host "Windows account: current interactive user"
+}
 
 if ($RunNow) {
     Start-ScheduledTask -TaskName $SerialTaskName
