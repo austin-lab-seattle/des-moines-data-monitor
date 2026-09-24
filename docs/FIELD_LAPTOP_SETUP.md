@@ -35,11 +35,11 @@ field-laptop path. Use forward slashes in JSON, even on Windows:
 Keep the glob specific enough that it cannot match exports, backups, or other
 instrument files. The uploader discovers new rollover files automatically.
 
-## 2a. Record the serial instruments without PuTTY
+## 2a. Record the serial instruments
 
 The uploader does not read COM ports itself. `scripts/field/acquire_serial.py`
-is the continuous recorder that replaces PuTTY for the confirmed NO2-CAPS and
-NEPH-PM25 serial streams. LI-COR format detection and configuration are present,
+is the continuous recorder for the confirmed NO2-CAPS and NEPH-PM25 serial
+streams. LI-COR format detection and configuration are present,
 but serial acquisition is disabled until its connection method is confirmed.
 The logger writes the configured growing files with the header
 `PC_Date_Time<TAB>Raw_Line` in folders already read by the uploader. `Raw_Line`
@@ -69,7 +69,7 @@ Get-CimInstance Win32_SerialPort | Format-Table DeviceID, Name, PNPDeviceID -Aut
 
 The logger can also identify the instrument connected to each port by passively
 sampling its data format. It sends no commands to the instruments. Stop the
-serial task and close PuTTY first, then run:
+serial task first, then run:
 
 ```powershell
 Stop-ScheduledTask -TaskName DesMoinesSerialLogger -ErrorAction SilentlyContinue
@@ -100,7 +100,7 @@ py -3 scripts\field\acquire_serial.py `
 Use `NEPH-PM25` and `CO2-LICOR` for the other instrument IDs. After detection
 or a manual change, run
 `Start-ScheduledTask -TaskName DesMoinesSerialLogger`. A port reported as
-`unavailable` is normally still owned by PuTTY or the running logger. An
+`unavailable` is normally still owned by the running logger or another process. An
 `unknown` result means no complete recognized record arrived; try 30 seconds.
 
 In the same `config/instruments.json`, assign the detected COM port inside the
@@ -124,8 +124,8 @@ If the field laptop uses another folder, put its full path in `output_dir` while
 keeping the required filename unchanged. A filename containing `{date}` is also
 supported when daily rollover files are preferred, but it is not required.
 
-Close PuTTY before the preflight—only one program can own each COM port—then
-validate the configuration and run a short manual test:
+Stop the scheduled serial logger before the preflight—only one program can own
+each COM port—then validate the configuration and run a short manual test:
 
 ```powershell
 py -3 scripts\field\acquire_serial.py --check
@@ -146,8 +146,8 @@ Get-Content .\serial_collector.log -Tail 100  # manual-test log only
 ```
 
 The serial task creates local files continuously, while the upload task
-checkpoints and sends completed lines to S3. Do not run PuTTY logging on these
-ports after enabling the serial task.
+checkpoints and sends completed lines to S3. Do not run a second serial reader
+on these ports while the serial task is enabled.
 
 ## 3. Configure AWS credentials
 

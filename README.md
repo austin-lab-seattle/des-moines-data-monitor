@@ -63,7 +63,7 @@ C:\des_moines\
 ├── requirements.txt
 ├── scripts/
 │   ├── field/                        # acquisition, upload and laptop scheduling
-│   │   ├── acquire_serial.py         # continuous PuTTY replacement
+│   │   ├── acquire_serial.py         # continuous serial acquisition
 │   │   ├── upload_to_aws.py          # incremental Bronze uploader
 │   │   ├── copy_to_shared_drive.py   # stable, non-destructive OneDrive snapshots
 │   │   └── windows/install_tasks.ps1 # installs the three Windows field tasks
@@ -137,8 +137,8 @@ the next run.
 
 There are three field-laptop tasks plus one cloud schedule:
 
-- The serial logger runs continuously on the field laptop and replaces PuTTY
-  for the enabled serial instruments (currently NO2 and the nephelometer).
+- The serial logger runs continuously on the field laptop for the enabled
+  serial instruments (currently NO2 and the nephelometer).
 - The laptop upload job runs on the field laptop because it reads local
   instrument files and uploads new bytes to S3 Bronze.
 - The shared-drive copy job snapshots the same canonical local data tree into

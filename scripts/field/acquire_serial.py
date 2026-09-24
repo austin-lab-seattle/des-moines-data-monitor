@@ -1,11 +1,11 @@
-"""Continuously log field instruments from serial ports without PuTTY.
+"""Continuously log field instruments from serial ports.
 
 The logger writes a lossless acquisition envelope under ``data/``: a PC-local
 receipt timestamp plus the exact decoded instrument line. The existing uploader
 sends that envelope to S3 Bronze unchanged. Parsing, date normalization, and
 science transformations belong to the Silver builder, not this field process.
 
-Only one process can own a serial port. Close PuTTY before starting this logger.
+Only one process can own a serial port. Stop other serial readers first.
 """
 
 import argparse
@@ -440,7 +440,7 @@ def detect_serial_ports(config, probe_seconds):
     baud = bauds[0]
     LOGGER.info(
         "Passively probing %d port(s) at %d baud for %.1f seconds each. "
-        "PuTTY and DesMoinesSerialLogger must be stopped.",
+        "DesMoinesSerialLogger and any other serial reader must be stopped.",
         len(ports),
         baud,
         probe_seconds,
@@ -716,7 +716,7 @@ def main():
         if unresolved:
             LOGGER.warning(
                 "Could not uniquely identify: %s. Increase --probe-seconds and "
-                "confirm the logger and PuTTY are stopped.",
+                "confirm the logger and any other serial reader are stopped.",
                 ", ".join(unresolved),
             )
         if args.apply_detected_ports:

@@ -413,7 +413,7 @@ if ($RunNow) {
     Start-ScheduledTask -TaskName $SerialTaskName
     Start-ScheduledTask -TaskName $UploadTaskName
     Start-ScheduledTask -TaskName $SharedCopyTaskName
-    Write-Host "Started all three tasks. PuTTY must remain closed for the serial ports."
+    Write-Host "Started all three tasks. Do not run another serial reader on the configured ports."
 }
 
 Get-ScheduledTask -TaskName $SerialTaskName, $UploadTaskName, $SharedCopyTaskName |
