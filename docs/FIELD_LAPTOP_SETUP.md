@@ -147,11 +147,11 @@ mapping (the existing config is backed up first), run:
 py -3 scripts\field\acquire_serial.py --apply-detected-ports --probe-seconds 20
 ```
 
-Small format examples live in `sample_data\instrument_signatures`. They can be
+Small format examples live in `sample-data`. They can be
 checked, or compared with a captured local file, without uploading anything:
 
 ```powershell
-py -3 scripts\field\identify_instrument_data.py sample_data\instrument_signatures
+py -3 scripts\field\identify_instrument_data.py sample-data
 py -3 scripts\field\identify_instrument_data.py C:\des_moines\data\nephlometer\Neph.txt
 ```
 

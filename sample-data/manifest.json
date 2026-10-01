@@ -1,0 +1,28 @@
+{
+  "BC-MA200": {
+    "file": "black-carbon-ma200.csv",
+    "acquisition": "file",
+    "reference_kind": "format-only",
+    "note": "Replace with real MA200 header/data rows when a capture is available."
+  },
+  "CO2-LICOR": {
+    "file": "co2-licor.xml",
+    "acquisition": "serial",
+    "reference_kind": "field-extract"
+  },
+  "NEPH-PM25": {
+    "file": "neph-pm25.txt",
+    "acquisition": "serial",
+    "reference_kind": "field-extract"
+  },
+  "NO2-CAPS": {
+    "file": "no2-caps.txt",
+    "acquisition": "serial",
+    "reference_kind": "field-extract"
+  },
+  "SMPS": {
+    "file": "smps.csv",
+    "acquisition": "file",
+    "reference_kind": "field-extract"
+  }
+}

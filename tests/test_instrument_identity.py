@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -19,12 +20,12 @@ SMPS = "1,17/09/2026 12:22:09," + ",".join(str(value) for value in range(45))
 
 class InstrumentIdentityTests(unittest.TestCase):
     def test_tracked_signature_files_identify_all_instruments(self):
-        root = Path(__file__).parents[1] / "sample_data" / "instrument_signatures"
+        root = Path(__file__).parents[1] / "sample-data"
         expected = {
-            "black_carbon_ma200.csv": "BC-MA200",
-            "co2_licor.xml": "CO2-LICOR",
-            "neph_pm25.txt": "NEPH-PM25",
-            "no2_caps.txt": "NO2-CAPS",
+            "black-carbon-ma200.csv": "BC-MA200",
+            "co2-licor.xml": "CO2-LICOR",
+            "neph-pm25.txt": "NEPH-PM25",
+            "no2-caps.txt": "NO2-CAPS",
             "smps.csv": "SMPS",
         }
         for filename, instrument_id in expected.items():
@@ -33,6 +34,12 @@ class InstrumentIdentityTests(unittest.TestCase):
                     instrument_id,
                     identify_text((root / filename).read_text(encoding="utf-8")),
                 )
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(expected.values()), set(manifest))
+        self.assertEqual(
+            {name for name in expected},
+            {entry["file"] for entry in manifest.values()},
+        )
 
     def test_classifies_raw_and_pc_enveloped_serial_rows(self):
         self.assertEqual("NO2-CAPS", classify_line(NO2))

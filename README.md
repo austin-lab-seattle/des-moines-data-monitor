@@ -92,8 +92,8 @@ C:\des_moines\
   upload both fail closed when a row is foreign, mixed, or unrecognizable, so a
   NEPH payload cannot be uploaded under the SMPS Bronze prefix.
 - `scripts/field/identify_instrument_data.py` identifies local captures without
-  changing config or uploading. Small fixtures for all five formats live under
-  `sample_data/instrument_signatures/`.
+  changing config or uploading. Small references for all five formats live in
+  `sample-data/`; its manifest distinguishes real field extracts from fixtures.
 - `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
   keeps only real data rows, removes duplicates, derives Duwamish PM2.5 from
   corrected BScat, normalizes the SMPS Total Concentration header, and writes a
