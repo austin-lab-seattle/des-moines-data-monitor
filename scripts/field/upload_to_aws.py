@@ -36,6 +36,11 @@ from datetime import datetime, timezone
 
 import boto3
 
+try:
+    from scripts.field.instrument_identity import inspect_batch
+except ModuleNotFoundError:  # Direct execution from scripts/field on Windows.
+    from instrument_identity import inspect_batch
+
 
 log_handlers = [logging.StreamHandler()]
 if os.environ.get("PIPELINE_LOG_TO_FILE", "1") != "0":
@@ -446,6 +451,20 @@ def build_s3_key(instrument_id, source_basename, now):
     return s3_key, batch_name
 
 
+def read_identity_sample(path, max_bytes=2 * 1024 * 1024):
+    """Read bounded head/tail content for the no-upload preflight."""
+    with open(path, "rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if size <= max_bytes:
+            raw = handle.read()
+        else:
+            half = max_bytes // 2
+            head = handle.read(half)
+            handle.seek(max(0, size - half))
+            raw = head + b"\n" + handle.read(half)
+    return raw.decode("utf-8", errors="replace")
+
+
 def upload_to_s3(s3, bucket, s3_key, raw_data):
     delays = [2, 4, 8]
     last_exc = None
@@ -482,6 +501,17 @@ def handle_instrument(instrument, s3, config, loop, executor):
                 if raw_data is None:
                     log("warning", instrument_id,
                         f"Skipping row {row_id}; raw_data is empty but uploaded=0")
+                    continue
+                identity = inspect_batch(instrument_id, raw_data)
+                if not identity["valid"]:
+                    had_error = True
+                    log(
+                        "error",
+                        instrument_id,
+                        f"BLOCKED pre-Bronze retry for {source_file or batch_name}: "
+                        f"{identity['reason']}. The buffered row remains pending and "
+                        "its checkpoint was not advanced.",
+                    )
                     continue
                 try:
                     await loop.run_in_executor(
@@ -546,6 +576,19 @@ def handle_instrument(instrument, s3, config, loop, executor):
 
                 if not data.strip():
                     file_offsets[base] = {"offset": max(current_offset, used_offset)}
+                    continue
+
+                identity = inspect_batch(instrument_id, data)
+                if not identity["valid"]:
+                    had_error = True
+                    log(
+                        "error",
+                        instrument_id,
+                        f"BLOCKED before Bronze for {base} at byte {used_offset}: "
+                        f"{identity['reason']}. Nothing was buffered or uploaded, and "
+                        "the checkpoint remains unchanged. Correct the instrument/file "
+                        "mapping or rotate the contaminated local file.",
+                    )
                     continue
 
                 now = datetime.now(timezone.utc)
@@ -665,6 +708,21 @@ def validate_setup():
         matched_instruments += 1
         total_bytes = sum(os.path.getsize(path) for path in files)
         log("info", instrument_id, f"Matched {len(files)} file(s), {total_bytes:,} bytes")
+        for path in files:
+            try:
+                identity = inspect_batch(instrument_id, read_identity_sample(path))
+            except OSError as exc:
+                log("error", instrument_id, f"Could not inspect {path}: {exc}")
+                valid = False
+                continue
+            if not identity["valid"]:
+                log(
+                    "error",
+                    instrument_id,
+                    f"Pre-Bronze identity check failed for {path}: "
+                    f"{identity['reason']}",
+                )
+                valid = False
 
     if matched_instruments == 0:
         logger.warning(

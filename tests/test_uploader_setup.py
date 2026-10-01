@@ -1,7 +1,9 @@
+import asyncio
 import json
 import tempfile
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -27,7 +29,10 @@ class UploaderSetupTests(unittest.TestCase):
     def test_preflight_passes_without_uploading(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "NO2-CAPS.dat"
-            source.write_text("header\nvalue\n")
+            source.write_text(
+                "3872505678.767,10.599,523.765,751.62,295.89,"
+                "166273,1.32319,10104,485.763\n"
+            )
             config_path = self.config(root, str(source))
 
             session = mock.Mock()
@@ -134,6 +139,45 @@ class UploaderSetupTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(FileNotFoundError, "configured AWS credential"):
                 upload_instrument_data.create_s3_client({"aws_region": "us-west-2"})
+
+    def test_wrong_instrument_content_is_blocked_before_buffer_and_s3(self):
+        neph = (
+            "2026-09-17 00:44:50, 9.605, 25.810, 27.790, "
+            "37.961, 1012.294,00,07\n"
+        )
+
+        async def run_case(source):
+            instrument = {
+                "id": "SMPS",
+                "ingestion_type": "growing_file",
+                "data_glob": str(source),
+            }
+            config = {"s3_bucket": "example-bucket"}
+            loop = asyncio.get_running_loop()
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                return await upload_instrument_data.handle_instrument(
+                    instrument, mock.Mock(), config, loop, executor
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "wrong_SMPS.csv"
+            source.write_text(neph)
+            insert = mock.Mock()
+            upload = mock.Mock()
+            with (
+                mock.patch.object(
+                    upload_instrument_data, "load_file_checkpoints", return_value={}
+                ),
+                mock.patch.object(upload_instrument_data, "get_pending_rows", return_value=[]),
+                mock.patch.object(upload_instrument_data, "save_file_checkpoints"),
+                mock.patch.object(upload_instrument_data, "insert_buffer_row", insert),
+                mock.patch.object(upload_instrument_data, "upload_to_s3", upload),
+            ):
+                result = asyncio.run(run_case(source))
+
+            self.assertEqual("error", result["status"])
+            insert.assert_not_called()
+            upload.assert_not_called()
 
 
 if __name__ == "__main__":

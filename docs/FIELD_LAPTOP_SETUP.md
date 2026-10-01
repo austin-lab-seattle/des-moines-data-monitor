@@ -132,6 +132,29 @@ py -3 scripts\field\acquire_serial.py --check
 py -3 scripts\field\acquire_serial.py
 ```
 
+Before starting the logger, the attached ports can be identified from a short
+passive sample. This does not send commands to an instrument and does not alter
+the config:
+
+```powershell
+py -3 scripts\field\acquire_serial.py --detect-ports --probe-seconds 20
+```
+
+Check every reported instrument/COM mapping. To save a complete, unambiguous
+mapping (the existing config is backed up first), run:
+
+```powershell
+py -3 scripts\field\acquire_serial.py --apply-detected-ports --probe-seconds 20
+```
+
+Small format examples live in `sample_data\instrument_signatures`. They can be
+checked, or compared with a captured local file, without uploading anything:
+
+```powershell
+py -3 scripts\field\identify_instrument_data.py sample_data\instrument_signatures
+py -3 scripts\field\identify_instrument_data.py C:\des_moines\data\nephlometer\Neph.txt
+```
+
 Wait until each active instrument reports that its port is open and confirm the
 configured files under `C:\des_moines\data` are updating. Stop the manual test
 with `Ctrl+C`, then
@@ -148,6 +171,14 @@ Get-Content .\serial_collector.log -Tail 100  # manual-test log only
 The serial task creates local files continuously, while the upload task
 checkpoints and sends completed lines to S3. Do not run a second serial reader
 on these ports while the serial task is enabled.
+
+The serial logger validates each payload before writing the uploader-watched
+file. The uploader then independently validates every new and retry batch before
+the SQLite buffer or S3 Bronze. A foreign row, a mixed-instrument file, or
+unrecognizable non-header content is blocked with `BLOCKED before Bronze` in
+`collector.log`; the checkpoint is deliberately left unchanged. Fix the COM
+mapping or rotate the contaminated local file before the next upload run. Never
+manually advance the checkpoint past rejected data.
 
 ## 3. Configure AWS credentials
 

@@ -64,6 +64,8 @@ C:\des_moines\
 ├── scripts/
 │   ├── field/                        # acquisition, upload and laptop scheduling
 │   │   ├── acquire_serial.py         # continuous serial acquisition
+│   │   ├── instrument_identity.py     # pre-Bronze content validation
+│   │   ├── identify_instrument_data.py # offline file identification
 │   │   ├── upload_to_aws.py          # incremental Bronze uploader
 │   │   ├── copy_to_shared_drive.py   # stable, non-destructive OneDrive snapshots
 │   │   └── windows/install_tasks.ps1 # installs the three Windows field tasks
@@ -85,6 +87,13 @@ C:\des_moines\
   unchanged. Silver owns parsing and scientific transformations. Its
   `--detect-ports` mode can passively identify the three wire formats, and
   `--apply-detected-ports` saves only a complete, unambiguous mapping.
+- `scripts/field/instrument_identity.py` verifies the actual payload format
+  independently of folder names and config labels. Serial acquisition and AWS
+  upload both fail closed when a row is foreign, mixed, or unrecognizable, so a
+  NEPH payload cannot be uploaded under the SMPS Bronze prefix.
+- `scripts/field/identify_instrument_data.py` identifies local captures without
+  changing config or uploading. Small fixtures for all five formats live under
+  `sample_data/instrument_signatures/`.
 - `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
   keeps only real data rows, removes duplicates, derives Duwamish PM2.5 from
   corrected BScat, normalizes the SMPS Total Concentration header, and writes a

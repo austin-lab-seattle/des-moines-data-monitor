@@ -537,8 +537,47 @@ def parse_port_updates(values):
     return updates
 
 
+class SerialPayloadValidator:
+    """Release only payloads that match the configured serial instrument."""
+
+    def __init__(self, parser_name, max_buffer_chars=262144):
+        self.parser_name = parser_name
+        self.parse = PARSERS[parser_name][0]
+        self.max_buffer_chars = max_buffer_chars
+        self.buffer = ""
+
+    def feed(self, text, captured_at):
+        if self.parser_name != "licor":
+            return [text] if self.parse(text, captured_at) is not None else []
+
+        # LI-COR XML may span several readline() calls. Buffer until a complete
+        # element exists, then release the exact XML element as one payload.
+        self.buffer += text
+        accepted = []
+        while True:
+            start = self.buffer.find("<li850>")
+            if start < 0:
+                if len(self.buffer) > self.max_buffer_chars:
+                    self.buffer = self.buffer[-64:]
+                break
+            if start:
+                self.buffer = self.buffer[start:]
+            end = self.buffer.find("</li850>")
+            if end < 0:
+                if len(self.buffer) > self.max_buffer_chars:
+                    self.buffer = ""
+                break
+            end += len("</li850>")
+            payload = self.buffer[:end]
+            self.buffer = self.buffer[end:]
+            if self.parse(payload, captured_at) is not None:
+                accepted.append(payload)
+        return accepted
+
+
 def run_instrument(cfg, stop_event, raw_log_dir, reconnect_seconds):
-    parser, _columns = PARSERS[cfg["parser"]]
+    validator = SerialPayloadValidator(cfg["parser"])
+    consecutive_rejections = 0
     bronze_file = DailyInstrumentRaw(cfg)
     raw_file = DailyTextFile(
         raw_log_dir, cfg["name"], "raw.log", header="PC_Date_Time\tRaw_Line"
@@ -573,14 +612,33 @@ def run_instrument(cfg, stop_event, raw_log_dir, reconnect_seconds):
                     raw_file.write(now, f"{stamp}\t{text}")
                     if not text:
                         continue
-                    # This is the only file watched by the uploader. Preserve
-                    # the exact instrument payload; Silver owns all parsing.
-                    bronze_file.write(now, text)
-                    # Parser use here is diagnostic only and never changes the
-                    # Bronze payload. Unrecognized lines go to the local meta log.
-                    row = parser(text, now)
-                    if row is None:
+                    accepted_payloads = validator.feed(text, now)
+                    for payload in accepted_payloads:
+                        # This is the only file watched by the uploader. Keep
+                        # the raw payload, but only after its format proves the
+                        # configured COM port is the expected instrument.
+                        bronze_file.write(now, payload)
+                    if not accepted_payloads and cfg["parser"] != "licor":
+                        consecutive_rejections += 1
                         meta_file.write(now, f"{stamp}\t{text}")
+                        if consecutive_rejections == 1 or consecutive_rejections % 100 == 0:
+                            LOGGER.error(
+                                "[%s] rejected %d consecutive line(s) from %s: "
+                                "payload does not match parser %s; uploader-watched "
+                                "file was not changed. Check the COM-port mapping/baud.",
+                                cfg["id"],
+                                consecutive_rejections,
+                                cfg["port"],
+                                cfg["parser"],
+                            )
+                    elif accepted_payloads:
+                        if consecutive_rejections:
+                            LOGGER.info(
+                                "[%s] valid payload resumed after %d rejected line(s)",
+                                cfg["id"],
+                                consecutive_rejections,
+                            )
+                        consecutive_rejections = 0
         except Exception as exc:
             if stop_event.is_set():
                 break

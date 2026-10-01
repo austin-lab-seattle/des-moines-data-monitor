@@ -26,6 +26,24 @@ silver_builder = load_module()
 
 
 class SilverBuilderTests(unittest.TestCase):
+    def test_neph_payload_under_smps_prefix_is_not_converted_to_smps(self):
+        neph = (
+            "2026-09-17 13:13:50, 8.174, 25.114, 26.847, "
+            "39.478, 1011.836,00,07"
+        )
+        header, rows, metadata, total, duplicates, mismatches = (
+            silver_builder.consolidate(
+                "SMPS", [("SMPS/bronze/mislabeled.txt", neph)]
+            )
+        )
+
+        self.assertIsNone(header)
+        self.assertEqual([], rows)
+        self.assertEqual(0, total)
+        self.assertEqual(0, duplicates)
+        self.assertEqual(0, mismatches)
+        self.assertIn(neph, metadata)
+
     def test_neph_accepts_slash_and_hyphen_timestamps(self):
         slash = "2024/06/10 20:01:00,0,8.174,302.087,302.589,27.186,1009.113"
         hyphen = "2026-09-17 13:13:50, 8.174, 25.114, 26.847, 39.478, 1011.836,00,07"

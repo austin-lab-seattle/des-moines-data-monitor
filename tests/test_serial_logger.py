@@ -129,6 +129,36 @@ class SerialLoggerParserTests(unittest.TestCase):
         self.assertEqual("licor", parser_name)
         self.assertEqual(1, scores["licor"])
 
+    def test_serial_payload_validator_rejects_wrong_com_port_format(self):
+        validator = log_serial_instruments.SerialPayloadValidator("neph")
+        no2 = (
+            "3872505678.767,10.599,523.765,751.62,295.89,"
+            "166273,1.32319,10104,485.763"
+        )
+        neph = (
+            "2026-09-17 00:44:50, 9.605, 25.810, 27.790, "
+            "37.961, 1012.294,00,07"
+        )
+        now = datetime(2026, 9, 17, 0, 45)
+        self.assertEqual([], validator.feed(no2, now))
+        self.assertEqual([neph], validator.feed(neph, now))
+
+    def test_serial_payload_validator_joins_split_licor_xml(self):
+        validator = log_serial_instruments.SerialPayloadValidator("licor")
+        now = datetime(2026, 9, 17, 0, 45)
+        first = (
+            "<li850><data><celltemp>25.1</celltemp><cellpres>101.2</cellpres>"
+            "<co2>421.3</co2><co2abs>0.08</co2abs><h2o>6.8</h2o>"
+        )
+        second = (
+            "<h2oabs>0.01</h2oabs><h2odewpoint>1.7</h2odewpoint>"
+            "<ivolt>12</ivolt><raw><co2>1</co2><co2ref>2</co2ref>"
+            "<h2o>3</h2o><h2oref>4</h2oref></raw><flowrate>0.75</flowrate>"
+            "</data></li850>"
+        )
+        self.assertEqual([], validator.feed(first, now))
+        self.assertEqual([first + second], validator.feed(second, now))
+
     def test_duplicate_instrument_detections_are_not_safe_to_apply(self):
         updates = log_serial_instruments.detected_port_updates([
             {"port": "COM7", "parser": "no2"},
