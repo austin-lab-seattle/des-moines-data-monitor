@@ -80,6 +80,42 @@ function planeIcon(heading) {
   });
 }
 
+function fmtLocal(iso) {
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function Sparkline({ points }) {
+  const values = (points || []).map((p) => p.v).filter((v) => typeof v === 'number');
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const width = 180;
+  const height = 38;
+  const step = width / (values.length - 1);
+  const path = values
+    .map(
+      (v, i) =>
+        `${i === 0 ? 'M' : 'L'} ${(i * step).toFixed(1)} ${(height - ((v - min) / span) * height).toFixed(1)}`,
+    )
+    .join(' ');
+  return (
+    <svg className="fc-spark" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+      <path d={path} fill="none" stroke="var(--brand)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 export default function FlightsLive() {
   const mapRef = useRef(null);
   const mapObj = useRef(null);
@@ -88,6 +124,7 @@ export default function FlightsLive() {
   const [site, setSite] = useState(DEFAULT_SITE);
   const [data, setData] = useState(null);
   const [note, setNote] = useState('');
+  const [conditions, setConditions] = useState(null);
 
   // Load the configurable instrument location once.
   useEffect(() => {
@@ -106,7 +143,10 @@ export default function FlightsLive() {
   // Initialise the map once.
   useEffect(() => {
     if (mapObj.current || !mapRef.current) return undefined;
-    const map = L.map(mapRef.current).setView([DEFAULT_SITE.latitude, DEFAULT_SITE.longitude], 11);
+    const map = L.map(mapRef.current, { scrollWheelZoom: false }).setView(
+      [DEFAULT_SITE.latitude, DEFAULT_SITE.longitude],
+      11,
+    );
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 18,
       attribution: '&copy; OpenStreetMap contributors',
@@ -127,7 +167,7 @@ export default function FlightsLive() {
     siteLayer.current.clearLayers();
     const ring = L.circle([site.latitude, site.longitude], {
       radius: RADIUS_KM * 1000,
-      color: '#22d3ee',
+      color: '#4b2e83',
       weight: 1,
       fill: false,
       opacity: 0.35,
@@ -174,6 +214,34 @@ export default function FlightsLive() {
     };
   }, [site]);
 
+  // Latest ultrafine-particle reading from the instrument (real pipeline data).
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const params = new URLSearchParams({
+          instrument: 'SMPS',
+          measurement: 'Total Concentration (#/cm³)',
+        });
+        const res = await fetch(`${API_BASE_URL}/air-quality/v1/timeseries?${params}`);
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        const payload = await res.json();
+        if (!active) return;
+        const series = payload.series || [];
+        const last = series[series.length - 1] || null;
+        setConditions({ series, value: last ? last.v : null, time: last ? last.t : null });
+      } catch {
+        if (active) setConditions({ series: [], value: null, time: null, unavailable: true });
+      }
+    };
+    load();
+    const timer = setInterval(load, 60000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
   // Render aircraft markers whenever the data refreshes.
   useEffect(() => {
     if (!aircraftLayer.current || !data) return;
@@ -195,6 +263,7 @@ export default function FlightsLive() {
 
   const flights = data?.flights || [];
   const isSample = data?.is_sample;
+  const nearest = flights[0] || null;
 
   return (
     <section className="flights-view">
@@ -241,6 +310,42 @@ export default function FlightsLive() {
               )}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      <div className="flights-conditions">
+        <div className="fc-kpi">
+          <span className="fc-label">Ultrafine particles at the instrument (SMPS)</span>
+          <div className="fc-value-row">
+            <strong className="fc-value">
+              {conditions?.value != null ? Math.round(conditions.value).toLocaleString() : 'n/a'}
+            </strong>
+            <span className="fc-unit">#/cm&sup3;</span>
+            <Sparkline points={conditions?.series} />
+          </div>
+          <span className="fc-stamp">
+            {conditions?.unavailable
+              ? 'reading unavailable'
+              : conditions?.time
+                ? `as of ${fmtLocal(conditions.time)} Pacific`
+                : 'loading'}
+          </span>
+        </div>
+        <div className="fc-nearest">
+          <span className="fc-label">Nearest aircraft</span>
+          {nearest ? (
+            <>
+              <strong className="fc-value">{nearest.carrier || nearest.callsign || 'Unknown'}</strong>
+              <span className="fc-stamp">
+                {nearest.callsign || nearest.icao24} &middot; {nearest.distance_km} km &middot;{' '}
+                {metresToFeet(nearest.baro_altitude_m) != null
+                  ? `${metresToFeet(nearest.baro_altitude_m).toLocaleString()} ft`
+                  : 'n/a'}
+              </span>
+            </>
+          ) : (
+            <span className="fc-stamp">none in range right now</span>
+          )}
         </div>
       </div>
 
