@@ -183,3 +183,53 @@ button { cursor: pointer; }
   .team-title-actions select { flex:1; min-width:0; }
   .team-card-intro { align-items:flex-start; flex-direction:column; }
 }
+
+/* Aircraft activity proof of concept */
+.aircraft-page { max-width:1380px; }
+.coverage-badge { max-width:360px; padding:.7rem .9rem; border:1px solid var(--border); border-radius:11px; background:var(--surface); color:var(--text-soft); font-size:.78rem; font-weight:750; line-height:1.35; box-shadow:var(--shadow); }
+.coverage-synthetic { border-color:#d6b3ea; background:#f5eafa; color:#733598; }
+.theme-dark .coverage-synthetic { background:#2d1a38; color:#dfb8f5; }
+.coverage-partial,.coverage-unknown { border-color:#e7c39e; background:#fff6e9; color:#8f5317; }
+.theme-dark .coverage-partial,.theme-dark .coverage-unknown { background:#332619; color:#f0bb7c; }
+.coverage-complete { border-color:#aadbc6; background:#eaf8f1; color:#196b49; }
+.association-banner { display:flex; align-items:flex-start; gap:.75rem; margin-bottom:1.2rem; padding:1rem 1.15rem; border:1px solid #e7c39e; border-radius:12px; background:#fff7ec; color:#764714; }
+.theme-dark .association-banner { border-color:#60462d; background:#2b2117; color:#f0c58f; }
+.association-banner svg { flex:0 0 auto; margin-top:.08rem; }
+.association-banner strong,.association-banner span { display:block; }
+.association-banner span { margin-top:.2rem; font-size:.84rem; line-height:1.5; }
+.aircraft-controls-card,.aircraft-chart-card,.aircraft-map-card,.aircraft-table-card { padding:1.45rem; }
+.aircraft-control-grid { display:grid; grid-template-columns:repeat(4,minmax(150px,1fr)); gap:.9rem; }
+.aircraft-actions { display:flex; flex-wrap:wrap; gap:.65rem; margin-top:1rem; }
+.aircraft-actions a { text-decoration:none; }
+.aircraft-upload { position:relative; overflow:hidden; }
+.aircraft-upload input { position:absolute; inset:0; opacity:0; cursor:pointer; }
+.assumption-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:.8rem; margin-top:1rem; }
+.assumption-grid>div { padding:.9rem; border:1px solid var(--border); border-radius:10px; background:var(--surface-soft); }
+.assumption-grid strong { display:flex; align-items:center; gap:.4rem; margin-bottom:.35rem; font-size:.78rem; }
+.assumption-grid span { display:block; color:var(--text-muted); font-size:.74rem; line-height:1.45; }
+.aircraft-results-grid { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(390px,.8fr); gap:1.2rem; margin:1.2rem 0; }
+.aircraft-results-grid .surface-card { margin:0; }
+.aircraft-timeline { width:100%; min-height:320px; }
+.flight-map-wrap { overflow:hidden; border:1px solid var(--border); border-radius:12px; }
+.flight-map { display:block; width:100%; height:auto; min-height:320px; }
+.map-attribution { padding:.55rem .7rem; border-top:1px solid var(--border); background:var(--surface-soft); color:var(--text-muted); font-size:.68rem; }
+.metric-definition { margin-bottom:1rem; padding:.85rem 1rem; border-left:3px solid var(--brand); background:var(--surface-soft); color:var(--text-soft); font-size:.78rem; line-height:1.5; }
+.aircraft-event-table { min-width:1100px; }
+.aircraft-event-table td { vertical-align:top; }
+.aircraft-event-table small { display:block; max-width:220px; margin-top:.25rem; color:var(--text-muted); font-size:.68rem; line-height:1.35; }
+.positive-change { color:var(--danger); font-weight:800; }
+
+@media (max-width:1080px) {
+  .aircraft-control-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .aircraft-results-grid { grid-template-columns:1fr; }
+  .assumption-grid { grid-template-columns:1fr; }
+}
+@media (max-width:720px) {
+  .site-header { grid-template-columns:1fr auto; gap:.7rem; padding:.65rem 1rem 0; }
+  .site-nav { grid-column:1/-1; width:100%; height:48px; overflow-x:auto; }
+  .site-nav button { flex:1 0 auto; padding:0 .75rem; }
+  .site-nav button::after { right:.75rem; left:.75rem; }
+  .aircraft-control-grid { grid-template-columns:1fr; }
+  .coverage-badge { max-width:none; }
+  .flight-map { min-height:250px; }
+}

@@ -1382,7 +1382,7 @@ def pick_default_measurement(instrument_id, options):
 
 
 def get_series(event):
-    """Hourly mean of one measurement over time, computed on demand from silver."""
+    """Bucketed mean of one measurement over time, computed on demand from silver."""
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
     if not is_valid_instrument(instrument_id):
@@ -1415,6 +1415,12 @@ def get_series(event):
     col_index = columns.index(measurement)
     start_time = datetime_for_compare(params.get("start"))
     end_time = datetime_for_compare(params.get("end"))
+    try:
+        bucket_minutes = int(params.get("bucket_minutes", 60))
+    except (TypeError, ValueError):
+        return response(400, {"error": "bucket_minutes must be one of 1, 5, 15, or 60"})
+    if bucket_minutes not in {1, 5, 15, 60}:
+        return response(400, {"error": "bucket_minutes must be one of 1, 5, 15, or 60"})
 
     buckets = {}
     skipped_schema_mismatch = 0
@@ -1434,8 +1440,14 @@ def get_series(event):
             if moment is None:
                 skipped_no_timestamp += 1
             continue
-        hour = moment.replace(minute=0, second=0, microsecond=0).isoformat()
-        agg = buckets.setdefault(hour, [0.0, 0])
+        bucket_minute = (moment.minute // bucket_minutes) * bucket_minutes
+        bucket = moment.replace(
+            minute=bucket_minute,
+            second=0,
+            microsecond=0,
+            tzinfo=timezone.utc,
+        ).isoformat().replace("+00:00", "Z")
+        agg = buckets.setdefault(bucket, [0.0, 0])
         agg[0] += float(fields[col_index])
         agg[1] += 1
 
@@ -1445,6 +1457,7 @@ def get_series(event):
         "instrument_id": instrument_id,
         "measurement": measurement,
         "measurements": options,
+        "bucket_minutes": bucket_minutes,
         "series": series,
         "source_rows": len(data_lines),
         "plotted_rows": plotted_rows,

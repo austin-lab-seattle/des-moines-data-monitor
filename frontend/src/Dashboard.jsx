@@ -1,6 +1,7 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import { Activity, AlertTriangle, Check, Clock, Copy, Database, DollarSign, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import AircraftAnalysis from './AircraftAnalysis.jsx';
 
 const DEFAULT_API_BASE_URL = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
 const API_ENTRY_URL = import.meta.env.VITE_API_URL || `${DEFAULT_API_BASE_URL}/air-quality/v1/summary`;
@@ -55,13 +56,19 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [activeView, setActiveView] = useState('overview');
+  const [activeView, setActiveView] = useState(() => window.location.pathname.startsWith('/aircraft') ? 'aircraft' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.localStorage.setItem('aq-dashboard-theme', theme);
   }, [theme]);
+
+  const selectView = (view) => {
+    setActiveView(view);
+    const path = view === 'aircraft' ? '/aircraft' : '/';
+    if (view !== 'api' && window.location.pathname !== path) window.history.replaceState({}, '', path);
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -131,7 +138,7 @@ export default function Dashboard() {
     <div className={`app-shell ${theme === 'light' ? 'theme-light' : 'theme-dark'} ${activeView === 'api' ? 'api-shell' : ''}`}>
       <div className={activeView === 'api' ? 'api-portal-root' : 'site-frame'}>
         {activeView !== 'api' && <header className="site-header">
-          <button className="site-brand" type="button" onClick={() => setActiveView('overview')} aria-label="Open overview">
+          <button className="site-brand" type="button" onClick={() => selectView('overview')} aria-label="Open overview">
             <span className="brand-mark"><Wind size={22} /></span>
             <span><strong>Des Moines Air</strong><small>Environmental monitor</small></span>
           </button>
@@ -140,9 +147,10 @@ export default function Dashboard() {
             {[
               { id: 'overview', label: 'Conditions' },
               { id: 'review', label: 'Observations' },
+              { id: 'aircraft', label: 'Aircraft' },
               { id: 'api', label: 'Developers' },
             ].map(tab => (
-              <button key={tab.id} onClick={() => setActiveView(tab.id)} className={activeView === tab.id ? 'site-nav-active' : ''}>
+              <button key={tab.id} onClick={() => selectView(tab.id)} className={activeView === tab.id ? 'site-nav-active' : ''}>
                 {tab.label}
               </button>
             ))}
@@ -182,11 +190,12 @@ export default function Dashboard() {
           />
         )}
         {activeView === 'review' && <DataReview />}
+        {activeView === 'aircraft' && <AircraftAnalysis />}
         {activeView === 'api' && (
           <ApiSnippets
             theme={theme}
             onThemeChange={setTheme}
-            onOpenDashboard={() => setActiveView('overview')}
+            onOpenDashboard={() => selectView('overview')}
           />
         )}
       </div>
@@ -510,8 +519,8 @@ const PUBLIC_ENDPOINTS = [
     id: 'series',
     method: 'GET',
     path: RESEARCH_API_PATHS.timeseries,
-    title: 'Hourly Time Series',
-    summary: 'Returns hourly mean values for one measurement from the cleaned records.',
+    title: 'Time Series',
+    summary: 'Returns bucketed mean values for one measurement from the cleaned records.',
     access: 'Read',
     apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.timeseries)}?instrument=SMPS&measurement=Total%20Concentration%20(%23/cm%C2%B3)"`,
     params: [
@@ -519,8 +528,9 @@ const PUBLIC_ENDPOINTS = [
       { name: 'measurement', required: 'No', description: 'Measurement column name. If omitted, the API chooses a default for the instrument.' },
       { name: 'start', required: 'No', description: 'ISO timestamp. Records before this time are excluded.' },
       { name: 'end', required: 'No', description: 'ISO timestamp. Records after this time are excluded.' },
+      { name: 'bucket_minutes', required: 'No', description: 'Aggregation resolution: 1, 5, 15, or 60 minutes. Defaults to 60.' },
     ],
-    responseFields: ['instrument_id', 'measurement', 'measurements', 'series', 'plotted_rows'],
+    responseFields: ['instrument_id', 'measurement', 'measurements', 'bucket_minutes', 'series', 'plotted_rows'],
   },
   {
     id: 'observations',
