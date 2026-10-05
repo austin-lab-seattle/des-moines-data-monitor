@@ -5,7 +5,7 @@
     "coverage_status": "synthetic",
     "window_start_utc": "2026-09-17T19:00:00Z",
     "window_end_utc": "2026-09-17T20:00:00Z",
-    "notice": "Fabricated flight paths for software testing only. These are not observations of real aircraft."
+    "notice": "Fabricated flight paths and sensor values for software testing only. These are not real observations."
   },
   "observations": [
     {"aircraft_id":"SAMPLE-ALPHA","callsign":"SAMPLE1","timestamp":"2026-09-17T19:14:00Z","latitude":47.3860,"longitude":-122.3230,"geoaltitude":1120,"aircraft_type":"TEST-A320"},
@@ -17,5 +17,17 @@
     {"aircraft_id":"SAMPLE-BRAVO","callsign":"SAMPLE2","timestamp":"2026-09-17T19:39:00Z","latitude":47.4080,"longitude":-122.2720,"baroaltitude":1390,"aircraft_type":"TEST-B738"},
     {"aircraft_id":"SAMPLE-BRAVO","callsign":"SAMPLE2","timestamp":"2026-09-17T19:41:00Z","latitude":47.4250,"longitude":-122.2760,"baroaltitude":1260,"aircraft_type":"TEST-B738"},
     {"aircraft_id":"SAMPLE-BRAVO","callsign":"SAMPLE2","timestamp":"2026-09-17T19:43:00Z","latitude":47.4430,"longitude":-122.2810,"baroaltitude":1180,"aircraft_type":"TEST-B738"}
+  ],
+  "sensor_observations": [
+    {"t":"2026-09-17T19:09:00Z","v":5.0},
+    {"t":"2026-09-17T19:12:00Z","v":6.0},
+    {"t":"2026-09-17T19:16:00Z","v":7.0},
+    {"t":"2026-09-17T19:19:00Z","v":14.0},
+    {"t":"2026-09-17T19:23:00Z","v":8.0},
+    {"t":"2026-09-17T19:32:00Z","v":5.0},
+    {"t":"2026-09-17T19:35:00Z","v":5.5},
+    {"t":"2026-09-17T19:38:00Z","v":6.0},
+    {"t":"2026-09-17T19:42:00Z","v":11.0},
+    {"t":"2026-09-17T19:48:00Z","v":6.0}
   ]
 }

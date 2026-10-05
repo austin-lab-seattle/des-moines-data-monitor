@@ -121,6 +121,10 @@ export default function AircraftAnalysis() {
       const text = await response.text();
       const payload = parseAircraftPayload(text, 'sample-aircraft.json');
       normalizePayload(payload, text);
+      setSensorSeries(payload.sensorObservations || []);
+      setMeasurement('Synthetic PM2.5 (test only)');
+      setMeasurements([]);
+      setMessage(`Loaded ${payload.observations.length} synthetic aircraft positions and ${payload.sensorObservations.length} synthetic sensor points for an end-to-end UI test.`);
       setStartLocal(localInputFromUtc(payload.metadata.window_start_utc, site.timezone));
       setEndLocal(localInputFromUtc(payload.metadata.window_end_utc, site.timezone));
     } catch (caught) { setError(caught.message || 'Could not load sample data.'); }
@@ -147,7 +151,7 @@ export default function AircraftAnalysis() {
       if (Date.parse(endUtc) <= Date.parse(startUtc)) throw new Error('End time must be after start time.');
       if (Date.parse(endUtc) - Date.parse(startUtc) > 86400000) throw new Error('The proof of concept is limited to one day per analysis.');
       const params = new URLSearchParams({ instrument, start: startUtc, end: endUtc, bucket_minutes: '1' });
-      if (measurement) params.set('measurement', measurement);
+      if (measurement && measurements.includes(measurement)) params.set('measurement', measurement);
       const response = await fetch(`/air-quality/v1/timeseries?${params}`);
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `Sensor API returned ${response.status}`);
@@ -160,7 +164,7 @@ export default function AircraftAnalysis() {
     } catch (caught) {
       if (currentId === requestId.current) setError(caught.message || 'Could not load sensor observations.');
     } finally { if (currentId === requestId.current) setSensorLoading(false); }
-  }, [endLocal, instrument, measurement, site.timezone, startLocal]);
+  }, [endLocal, instrument, measurement, measurements, site.timezone, startLocal]);
 
   const timeBounds = useMemo(() => {
     try { return [Date.parse(zonedLocalToUtc(startLocal, site.timezone)), Date.parse(zonedLocalToUtc(endLocal, site.timezone))]; }

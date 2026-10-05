@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildFlybyEvents, coverageLabel, haversineKm, matchEventsToSensor,
-  normalizeAircraftRecord, zonedLocalToUtc,
+  normalizeAircraftRecord, parseAircraftPayload, zonedLocalToUtc,
 } from './aircraftAnalytics.js';
 
 const site = { latitude: 47.422703, longitude: -122.297714 };
@@ -49,4 +49,14 @@ test('flybys split by aircraft and event metrics use documented windows', () => 
 test('unknown coverage is not described as confirmed aircraft absence', () => {
   assert.match(coverageLabel({}).label, /does not confirm no aircraft/);
   assert.match(coverageLabel({ coverage_status: 'synthetic' }).label, /not a real/);
+});
+
+test('synthetic import can carry an explicitly labeled sensor fixture', () => {
+  const payload = parseAircraftPayload(JSON.stringify({
+    metadata: { sample: true, coverage_status: 'synthetic' },
+    observations: [{ timestamp: '2026-07-15T19:00:00Z', latitude: 47, longitude: -122 }],
+    sensor_observations: [{ t: '2026-07-15T19:00:00Z', v: 4 }],
+  }), 'sample.json');
+  assert.equal(payload.sensorObservations.length, 1);
+  assert.equal(payload.metadata.coverage_status, 'synthetic');
 });

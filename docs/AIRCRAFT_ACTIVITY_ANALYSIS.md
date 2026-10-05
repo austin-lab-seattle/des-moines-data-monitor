@@ -42,7 +42,7 @@ Open the local URL printed by Vite, then select **Aircraft**.
 
 1. Choose a Pacific-local start/end time. A single run is limited to one day.
 2. Select the sensor instrument. Run once to load the API's default measurement, or choose another available measurement and run again.
-3. Import an aircraft CSV/JSON export, or click **Load synthetic sample** to test the interface. The sample uses `SAMPLE-*` identifiers and is always labeled synthetic.
+3. Import an aircraft CSV/JSON export, or click **Load synthetic sample** to test the complete interface. The sample uses `SAMPLE-*` identifiers, includes fabricated sensor values, and is always labeled synthetic.
 4. Choose 1, 3, or 5 km and adjust the ±10-minute default window.
 5. Click **Run analysis**. The interface requests one-minute Silver-layer sensor means, converts the selected Pacific window to UTC, and calculates the events.
 
