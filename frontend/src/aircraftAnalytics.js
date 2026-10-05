@@ -136,7 +136,11 @@ export function parseAircraftPayload(text, filename = '') {
     const payload = JSON.parse(trimmed);
     const observations = Array.isArray(payload) ? payload : payload.observations;
     if (!Array.isArray(observations)) throw new Error('JSON must be an array or contain an observations array.');
-    return { observations, metadata: Array.isArray(payload) ? {} : (payload.metadata || {}) };
+    return {
+      observations,
+      metadata: Array.isArray(payload) ? {} : (payload.metadata || {}),
+      sensorObservations: Array.isArray(payload) ? [] : (payload.sensor_observations || []),
+    };
   }
   return { observations: parseCsv(trimmed), metadata: {} };
 }
