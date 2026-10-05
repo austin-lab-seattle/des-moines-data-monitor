@@ -1,0 +1,23 @@
+{
+  "site": {
+    "name": "Angle Lake Station (provisional instrument location)",
+    "latitude": 47.422703,
+    "longitude": -122.297714,
+    "timezone": "America/Los_Angeles",
+    "coordinate_source": "Sound Transit GTFS parent station S01",
+    "coordinate_source_url": "https://www.soundtransit.org/help-contacts/business-information/open-transit-data-otd/otd-downloads",
+    "verified_on": "2026-10-04",
+    "provisional": true
+  },
+  "analysis": {
+    "distance_thresholds_km": [1, 3, 5],
+    "default_distance_km": 3,
+    "default_window_minutes": 10,
+    "flight_pass_gap_minutes": 30
+  },
+  "sensor_time": {
+    "source_timezone_assumption": "America/Los_Angeles",
+    "status": "unverified",
+    "note": "Instrument CSV timestamps do not include an offset. The API currently interprets them as Pacific local wall time before converting to UTC. Confirm each instrument clock configuration with the field team."
+  }
+}

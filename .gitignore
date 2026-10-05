@@ -30,6 +30,7 @@ checkpoints/
 batches/
 batch_*.txt
 data/
+aircraft-cache/
 *.parquet
 
 # Generated artifacts

@@ -55,6 +55,36 @@ class SeriesTests(unittest.TestCase):
         self.assertNotIn("Major State", payload["measurements"])
         self.assertNotIn("PC_minus_instrument_s", payload["measurements"])
 
+    def test_minute_buckets_are_utc_and_preserve_flyby_resolution(self):
+        silver = "\n".join([
+            "Date_Time,PM2.5 (µg/m³)",
+            "2026-07-15 12:03:10,4.0",
+            "2026-07-15 12:03:50,6.0",
+            "2026-07-15 12:04:05,9.0",
+        ])
+        event = {"queryStringParameters": {
+            "instrument": "NEPH-PM25",
+            "measurement": "PM2.5 (µg/m³)",
+            "bucket_minutes": "1",
+        }}
+
+        with mock.patch.object(lambda_api, "get_silver_text", return_value=silver):
+            payload = json.loads(lambda_api.get_series(event)["body"])
+
+        self.assertEqual(1, payload["bucket_minutes"])
+        self.assertEqual("2026-07-15T19:03:00Z", payload["series"][0]["t"])
+        self.assertEqual(5.0, payload["series"][0]["v"])
+        self.assertEqual("2026-07-15T19:04:00Z", payload["series"][1]["t"])
+
+    def test_invalid_bucket_minutes_is_rejected(self):
+        silver = "Date_Time,PM2.5 (µg/m³)\n2026-07-15 12:03:10,4.0"
+        with mock.patch.object(lambda_api, "get_silver_text", return_value=silver):
+            result = lambda_api.get_series({"queryStringParameters": {
+                "instrument": "NEPH-PM25",
+                "bucket_minutes": "2",
+            }})
+        self.assertEqual(400, result["statusCode"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/aircraft",
+      "destination": "/"
+    },
+    {
       "source": "/team",
       "destination": "/"
     },
