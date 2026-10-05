@@ -18,7 +18,7 @@ const DEFAULT_SITE = {
   latitude: 47.422703,
   longitude: -122.297714,
 };
-const RADIUS_KM = 25;
+const RADIUS_KM = 8;
 const REFRESH_MS = 20000;
 
 function haversineKm(lat1, lon1, lat2, lon2) {
@@ -36,9 +36,9 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 // route is deployed or when the API is unreachable. Never shown as real data.
 function localSample(lat, lon) {
   const seeds = [
-    ['ASA123', 'Alaska Airlines', 0.03, -0.02, 1200, 70],
-    ['DAL456', 'Delta Air Lines', -0.05, 0.035, 2400, 250],
-    ['SWA789', 'Southwest Airlines', 0.07, 0.05, 3100, 300],
+    ['ASA123', 'Alaska Airlines', 0.02, -0.015, 1200, 70],
+    ['DAL456', 'Delta Air Lines', -0.03, 0.025, 2400, 250],
+    ['SWA789', 'Southwest Airlines', 0.04, 0.03, 3100, 300],
   ];
   const flights = seeds
     .map(([callsign, carrier, dLat, dLon, alt, heading]) => {
@@ -125,7 +125,7 @@ export default function FlightsLive() {
   useEffect(() => {
     if (!mapObj.current || !siteLayer.current) return;
     siteLayer.current.clearLayers();
-    L.circle([site.latitude, site.longitude], {
+    const ring = L.circle([site.latitude, site.longitude], {
       radius: RADIUS_KM * 1000,
       color: '#22d3ee',
       weight: 1,
@@ -142,7 +142,7 @@ export default function FlightsLive() {
     })
       .addTo(siteLayer.current)
       .bindPopup(`<b>${site.name}</b><br>Instrument location`);
-    mapObj.current.setView([site.latitude, site.longitude]);
+    mapObj.current.fitBounds(ring.getBounds(), { padding: [20, 20] });
   }, [site]);
 
   useEffect(() => {

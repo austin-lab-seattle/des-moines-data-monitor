@@ -1715,7 +1715,7 @@ def get_mtd_cost():
 
 FLIGHTS_DEFAULT_LAT = float(os.environ.get("INSTRUMENT_LAT", "47.422703"))
 FLIGHTS_DEFAULT_LON = float(os.environ.get("INSTRUMENT_LON", "-122.297714"))
-FLIGHTS_DEFAULT_RADIUS_KM = float(os.environ.get("FLIGHTS_RADIUS_KM", "25"))
+FLIGHTS_DEFAULT_RADIUS_KM = float(os.environ.get("FLIGHTS_RADIUS_KM", "8"))
 FLIGHTS_CACHE_TTL_SECONDS = 15
 
 OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
@@ -1817,6 +1817,8 @@ def parse_opensky_states(raw, lat, lon, radius_km):
         longitude, latitude = state[5], state[6]
         if latitude is None or longitude is None:
             continue
+        if state[8]:  # on_ground: parked or taxiing at the airport, not overhead
+            continue
         distance_km = round(haversine_km(lat, lon, latitude, longitude), 2)
         if distance_km > radius_km:
             continue
@@ -1843,9 +1845,9 @@ def parse_opensky_states(raw, lat, lon, radius_km):
 def sample_flights(lat, lon, radius_km):
     """Clearly labeled placeholder aircraft. Never real observations."""
     seeds = [
-        ("ASA123", "Alaska Airlines", 0.03, -0.02, 1200.0, 70.0),
-        ("DAL456", "Delta Air Lines", -0.05, 0.035, 2400.0, 250.0),
-        ("SWA789", "Southwest Airlines", 0.07, 0.05, 3100.0, 300.0),
+        ("ASA123", "Alaska Airlines", 0.02, -0.015, 1200.0, 70.0),
+        ("DAL456", "Delta Air Lines", -0.03, 0.025, 2400.0, 250.0),
+        ("SWA789", "Southwest Airlines", 0.04, 0.03, 3100.0, 300.0),
     ]
     flights = []
     for callsign, carrier, d_lat, d_lon, altitude, heading in seeds:
