@@ -1,7 +1,7 @@
 import { useCallback, useState, useEffect, useRef } from 'react';
 import { Activity, AlertTriangle, Check, Clock, Copy, Database, DollarSign, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import AircraftAnalysis from './AircraftAnalysis.jsx';
+import FlightsLive from './FlightsLive.jsx';
 
 const DEFAULT_API_BASE_URL = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
 const API_ENTRY_URL = import.meta.env.VITE_API_URL || `${DEFAULT_API_BASE_URL}/air-quality/v1/summary`;
@@ -190,7 +190,7 @@ export default function Dashboard() {
           />
         )}
         {activeView === 'review' && <DataReview />}
-        {activeView === 'aircraft' && <AircraftAnalysis />}
+        {activeView === 'aircraft' && <FlightsLive />}
         {activeView === 'api' && (
           <ApiSnippets
             theme={theme}
