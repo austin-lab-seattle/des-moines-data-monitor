@@ -206,18 +206,35 @@ def parse_raw_no2(payload, received_at=None):
         return None
     try:
         values = [float(part) for part in parts]
-        instrument_time = EPOCH_1904 + timedelta(seconds=values[0])
+    except ValueError:
+        return None
+    # The CAPS time field has been seen as 1904-epoch seconds and, after an
+    # instrument setup change, as a bare HHMMSS reading. Decode the epoch form so
+    # historical rows are unchanged; otherwise keep the raw token and use the PC
+    # receipt time as the reporting stamp, leaving the instrument clock blank for
+    # the field team to confirm.
+    try:
+        epoch_time = EPOCH_1904 + timedelta(seconds=values[0])
     except (ValueError, OverflowError):
+        epoch_time = None
+    if epoch_time is not None and 2000 <= epoch_time.year <= 2100:
+        reporting_time = received_at or epoch_time
+        fields = [epoch_time.strftime("%H%M%S")] + [
+            compact_number(value) for value in values[1:]
+        ] + [
+            format_local_timestamp(reporting_time),
+            format_local_timestamp(epoch_time),
+            seconds_between(reporting_time, epoch_time),
+        ]
+        return csv_line(NO2_CANONICAL_COLUMNS), csv_line(fields)
+    if received_at is None:
         return None
-    if not 2000 <= instrument_time.year <= 2100:
-        return None
-    reporting_time = received_at or instrument_time
-    fields = [instrument_time.strftime("%H%M%S")] + [
+    fields = [parts[0]] + [
         compact_number(value) for value in values[1:]
     ] + [
-        format_local_timestamp(reporting_time),
-        format_local_timestamp(instrument_time),
-        seconds_between(reporting_time, instrument_time),
+        format_local_timestamp(received_at),
+        "",
+        "",
     ]
     return csv_line(NO2_CANONICAL_COLUMNS), csv_line(fields)
 

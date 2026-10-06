@@ -664,14 +664,13 @@ def is_data_row(instrument_id, line):
     ):
         return True
     if instrument_id == "NO2-CAPS":
+        # Raw CAPS wire data is nine numeric fields. The leading time token's
+        # format is not assumed (seen as 1904-epoch seconds and as HHMMSS); the
+        # nine numeric fields are signature enough. Normalized rows are handled
+        # by the HHMMSS branch below.
         raw_fields = [field.strip() for field in payload.split(",")]
         if len(raw_fields) == 9 and all(is_float(field) for field in raw_fields):
-            try:
-                raw_time = datetime(1904, 1, 1) + timedelta(seconds=float(raw_fields[0]))
-                if 2000 <= raw_time.year <= 2100:
-                    return True
-            except (ValueError, OverflowError):
-                pass
+            return True
 
     fields = split_fields(stripped)
     if not fields or not any(fields):
