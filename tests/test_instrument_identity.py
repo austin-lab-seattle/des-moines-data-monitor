@@ -54,6 +54,22 @@ class InstrumentIdentityTests(unittest.TestCase):
             classify_line(NEPH.replace("2026-", "22026-", 1)),
         )
 
+    def test_classifies_hhmmss_caps_wire_rows(self):
+        # After a setup change the CAPS began stamping HHMMSS instead of a 1904
+        # epoch value; its nine numeric fields still identify it.
+        hhmmss = (
+            "201311,10.255,1411.510,747.55,301.87,"
+            "68031,1.3365,10104,1374.746"
+        )
+        self.assertEqual("NO2-CAPS", classify_line(hhmmss))
+        self.assertEqual(
+            "NO2-CAPS",
+            classify_line(f"2026-10-05 20:13:15.822\t{hhmmss}"),
+        )
+        result = inspect_batch("NO2-CAPS", "\n".join(hhmmss for _ in range(3)))
+        self.assertTrue(result["valid"])
+        self.assertEqual(3, result["counts"]["NO2-CAPS"])
+
     def test_wrong_neph_data_is_blocked_from_smps_bronze(self):
         result = inspect_batch("SMPS", NEPH + "\n" + NEPH)
         self.assertFalse(result["valid"])

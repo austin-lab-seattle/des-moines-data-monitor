@@ -90,6 +90,32 @@ class SilverBuilderTests(unittest.TestCase):
         self.assertEqual("2026-09-17 16:01:18.767", values[9])
         self.assertEqual(values[9], values[10])
 
+    def test_raw_no2_hhmmss_is_normalized_with_pc_time(self):
+        # After a setup change the CAPS stamps HHMMSS instead of a 1904 epoch
+        # value; Silver keeps the raw token and uses the PC receipt time.
+        capture = (
+            "2026-10-05 20:13:15.822\t"
+            "201311,10.255,1411.510,747.55,301.87,68031,1.3365,10104,1374.746"
+        )
+        header, rows, _metadata, total, _duplicates, mismatches = (
+            silver_builder.consolidate(
+                "NO2-CAPS", [("NO2-CAPS/bronze/no2.txt", capture)]
+            )
+        )
+
+        self.assertEqual(
+            silver_builder.NO2_CANONICAL_COLUMNS, silver_builder.split_fields(header)
+        )
+        self.assertEqual(1, total)
+        self.assertEqual(0, mismatches)
+        self.assertEqual(1, len(rows))
+        values = silver_builder.split_fields(rows[0])
+        self.assertEqual("201311", values[0])
+        self.assertEqual("10.255", values[1])
+        self.assertEqual("2026-10-05 20:13:15.822", values[9])
+        self.assertEqual("", values[10])
+        self.assertEqual("", values[11])
+
     def test_legacy_neph_repairs_clear_twelve_hour_clock_error(self):
         capture = "\n".join([
             "=~=~= PuTTY log 2026.09.17 12:44:50 =~=~=~=",
