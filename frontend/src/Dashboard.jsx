@@ -58,6 +58,13 @@ const PUBLIC_INSTRUMENTS = {
   'NO2-CAPS': { name: 'Nitrogen dioxide', detail: 'NO₂', column: 'Concentration', unit: 'ppb' },
   SMPS: { name: 'Particle number', detail: 'Particle concentration', column: 'Total Concentration (#/cm³)', unit: 'particles/cm³' },
 };
+const INSTRUMENT_NAMES = {
+  'BC-MA200': 'Black Carbon MA200',
+  'CO2-LICOR': 'CO₂ LI-COR',
+  'NEPH-PM25': 'Nephelometer PM₂.₅',
+  'NO2-CAPS': 'NO₂ CAPS',
+  SMPS: 'SMPS',
+};
 const RECENT_READING_COLUMNS = {
   'BC-MA200': ['BC1', 'BC2', 'BC3', 'BC4', 'BC5'],
   'CO2-LICOR': ['CO2_(umol_mol-1)'],
@@ -84,6 +91,12 @@ const DEFAULT_CHART_MEASUREMENT = {
   'NO2-CAPS': 'Concentration',
 };
 const isChartMeasurement = name => String(name || '').toUpperCase() !== 'HHMMSS';
+// timestamp_iso contains UTC from the API, including older responses without
+// an explicit offset. Raw instrument timestamps are retained as a fallback.
+const observationTime = row => {
+  const iso = row?.timestamp_iso;
+  return iso ? (/(Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`) : row?.timestamp;
+};
 const toIso = (value) => value ? new Date(value).toISOString() : '';
 const formatScienceLabel = (value) => String(value || '').replaceAll('cm�', 'cm³');
 const recentColumnsFor = (instrumentId, columns) => {
@@ -134,7 +147,7 @@ export default function Dashboard() {
       if (!response.ok) throw new Error(`API returned ${response.status}`);
       const result = await response.json();
       const latest = result.rows?.[0] || null;
-      const stamp = latest?.timestamp_iso;
+      const stamp = observationTime(latest);
       return { id, ...PUBLIC_INSTRUMENTS[id], latest,
         older: Boolean(stamp && Date.now() - new Date(stamp).getTime() > 60 * 60 * 1000) };
     }));
@@ -263,7 +276,7 @@ function Overview({ instruments, formatSeattleTime, loading }) {
         <div className="pollutant-grid">
             {instruments.map(instrument => {
               const value = instrument.latest?.values?.[instrument.column];
-              const stamp = instrument.latest?.timestamp_iso;
+              const stamp = observationTime(instrument.latest);
               const oldReading = instrument.older;
               return (
                 <button key={instrument.id} type="button" className="pollutant-card"
@@ -271,6 +284,8 @@ function Overview({ instruments, formatSeattleTime, loading }) {
                   aria-label={`View latest readings from ${instrument.name}`}>
                   <span className="pollutant-name">{instrument.name}</span>
                   <span className="pollutant-detail">{instrument.detail}</span>
+                  <span className="pollutant-instrument">{INSTRUMENT_NAMES[instrument.id]}</span>
+                  <span className="pollutant-instrument-id">{instrument.id}</span>
                   <strong className="pollutant-value">{loading ? '…' : formatReadingValue(value, instrument.column)}</strong>
                   <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
                   <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
@@ -359,6 +374,7 @@ function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
           <div>
             <span className="section-eyebrow">Recent readings</span>
             <h2 id="readings-dialog-title">{instrument.name}</h2>
+            <p>{INSTRUMENT_NAMES[instrument.id]} · {instrument.id}</p>
             <p>Newest reading first · Pacific time</p>
           </div>
           <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="Close recent readings">
@@ -393,7 +409,7 @@ function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
               <tbody>
                 {rows.map(row => (
                   <tr key={row.row_key}>
-                    <td className="readings-time">{formatSeattleTime(row.timestamp_iso || row.timestamp)}</td>
+                    <td className="readings-time">{formatSeattleTime(observationTime(row))}</td>
                     {displayColumns.map(column => (
                       <td key={column}>{formatReadingValue(row.values?.[column], column)}</td>
                     ))}
@@ -499,7 +515,7 @@ function DataReview() {
         <div className="filter-grid">
           <Control label="Instrument">
             <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} — {INSTRUMENT_NAMES[id]}</option>)}
             </select>
           </Control>
           <Control label="Start Time (filter)">
@@ -1243,7 +1259,7 @@ function TimeSeriesChart() {
               setExportMessage('');
               fetchSeries({ inst: nextInstrument, meas: nextMeasurement, s: start, e: end });
             }} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} — {INSTRUMENT_NAMES[id]}</option>)}
             </select>
           </Control>
           <Control label="Measurement">
