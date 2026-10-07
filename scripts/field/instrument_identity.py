@@ -106,15 +106,13 @@ def classify_line(line):
     if len(fields) >= 3 and DATE_RE.match(first) and TIME_RE.match(second):
         return "CO2-LICOR"
 
-    # Current CAPS wire data contains nine numeric fields beginning with 1904
-    # epoch seconds.  Historical normalized rows begin with HHMMSS.
+    # Raw CAPS wire data is nine comma-separated numeric fields.  The first field
+    # is an instrument time token whose format is not assumed here: it has been
+    # seen as 1904-epoch seconds and, after a setup change, as HHMMSS.  Among this
+    # instrument set, nine numeric fields are signature enough.  Normalized rows
+    # begin with HHMMSS and carry additional columns (handled below).
     if len(fields) == 9 and all(_is_float(value) for value in fields):
-        try:
-            instrument_time = datetime(1904, 1, 1) + timedelta(seconds=float(first))
-        except (OverflowError, ValueError):
-            instrument_time = None
-        if instrument_time is not None and 2000 <= instrument_time.year <= 2100:
-            return "NO2-CAPS"
+        return "NO2-CAPS"
     if (
         len(fields) >= 10
         and re.match(r"^\d{6}$", first)

@@ -120,25 +120,29 @@ def seconds_between(pc_time, instrument_time):
 
 
 def parse_no2(text, pc_time=None):
-    """Parse CAPS data while making PC-local time the reporting timestamp."""
+    """Validate a CAPS line and keep its instrument time field as a raw string.
+
+    The CAPS time field's format is currently unconfirmed: it has been seen as
+    an absolute 1904-epoch value and, after an instrument setup change, as a bare
+    HHMMSS clock reading. Rather than guess at a decode (and risk inventing a
+    wrong timestamp), the field is passed through verbatim and the PC-local
+    receipt time is used as the authoritative reporting stamp. Interpreting the
+    instrument clock is left to the Silver builder once the format is confirmed
+    with the field team. The structural signature -- nine comma-separated numeric
+    fields -- still distinguishes CAPS from the other serial instruments.
+    """
     parts = [part.strip() for part in text.split(",")]
     if len(parts) != 9:
         return None
     try:
-        values = [float(part) for part in parts]
-        instrument_time = EPOCH_1904 + timedelta(seconds=values[0])
-    except (ValueError, OverflowError):
-        return None
-    if not 2000 <= instrument_time.year <= 2100:
+        for part in parts:
+            float(part)
+    except ValueError:
         return None
     captured_at = pc_time or datetime.now().astimezone()
-    return [instrument_time.strftime("%H%M%S")] + [
-        compact_number(value) for value in values[1:]
-    ] + [
-        local_timestamp(captured_at),
-        local_timestamp(instrument_time),
-        compact_number(seconds_between(captured_at, instrument_time)),
-    ]
+    # Instrument_Timestamp and PC_minus_instrument_s are intentionally left blank
+    # until the CAPS time format is confirmed; the raw token is preserved above.
+    return parts + [local_timestamp(captured_at), "", ""]
 
 
 def parse_neph(text, pc_time=None):

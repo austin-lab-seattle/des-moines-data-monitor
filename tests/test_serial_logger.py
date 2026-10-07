@@ -46,20 +46,41 @@ class SerialLoggerParserTests(unittest.TestCase):
             self.assertEqual("PC_Date_Time\tRaw_Line", lines[0])
             self.assertEqual(3, len(lines))
 
-    def test_no2_parser_writes_pipeline_schema(self):
-        moment = datetime(2026, 9, 18, 12, 34, 56)
-        epoch_seconds = (moment - log_serial_instruments.EPOCH_1904).total_seconds()
+    def test_no2_parser_passes_through_instrument_time_as_string(self):
+        # The CAPS time field's format is unconfirmed, so the logger keeps it
+        # verbatim and uses the PC receipt time as the authoritative stamp.
         row = log_serial_instruments.parse_no2(
-            f"{epoch_seconds},1,2,3,4,5,6,7,8",
-            datetime(2026, 9, 18, 12, 35, 1),
+            "201311,10.255,1411.510,747.55,301.87,68031,1.3365,10104,1374.746",
+            datetime(2026, 10, 5, 20, 13, 15),
         )
 
         self.assertEqual(len(log_serial_instruments.NO2_COLUMNS), len(row))
-        self.assertEqual("123456", row[0])
-        self.assertEqual("2026-09-18 12:35:01.000", row[-3])
-        self.assertEqual("2026-09-18 12:34:56.000", row[-2])
-        self.assertEqual("5", row[-1])
+        self.assertEqual("201311", row[0])
+        self.assertEqual("10.255", row[1])
+        self.assertEqual("1374.746", row[8])
+        self.assertEqual("2026-10-05 20:13:15.000", row[-3])
+        self.assertEqual("", row[-2])
+        self.assertEqual("", row[-1])
         self.assertTrue(lambda_api.is_data_row("NO2-CAPS", ",".join(row)))
+
+    def test_no2_parser_still_accepts_legacy_epoch_time(self):
+        row = log_serial_instruments.parse_no2(
+            "3872505678.767,10.599,523.765,751.62,"
+            "295.89,166273,1.32319,10104,485.763",
+            datetime(2026, 10, 5, 20, 13, 15),
+        )
+
+        self.assertEqual(len(log_serial_instruments.NO2_COLUMNS), len(row))
+        self.assertEqual("3872505678.767", row[0])
+        self.assertEqual("2026-10-05 20:13:15.000", row[-3])
+
+    def test_no2_parser_rejects_wrong_width_or_non_numeric(self):
+        self.assertIsNone(log_serial_instruments.parse_no2("too,few,fields"))
+        self.assertIsNone(
+            log_serial_instruments.parse_no2(
+                "201311,oops,1411.510,747.55,301.87,68031,1.3365,10104,1374.746"
+            )
+        )
 
     def test_neph_parser_handles_live_stream(self):
         row = log_serial_instruments.parse_neph(
