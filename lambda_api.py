@@ -68,6 +68,7 @@ INVENTORY_TTL_SECONDS = 30
 COST_TTL_SECONDS = 3600
 _inventory_cache = {"data": None, "ts": 0.0}
 _latest_upload_cache = {"data": None, "ts": 0.0}
+_weather_cache = {"data": None, "ts": 0.0}
 _cost_cache = {"data": None, "ts": 0.0}
 
 # Counting many small batch objects is dominated by per-object request latency,
@@ -1641,17 +1642,52 @@ def get_latest_upload():
         return response(200, _latest_upload_cache["data"])
     try:
         def latest_for(instrument):
-            latest = max((obj["LastModified"] for obj in iter_s3_objects(f"{instrument}/bronze/")), default=None)
+            latest = max(iter_s3_objects(f"{instrument}/bronze/"), key=lambda obj: obj["LastModified"], default=None)
             return instrument, latest
         with ThreadPoolExecutor(max_workers=len(INSTRUMENT_IDS)) as pool:
             updates = list(pool.map(latest_for, INSTRUMENT_IDS))
         available = [(instrument, stamp) for instrument, stamp in updates if stamp is not None]
-        instrument, stamp = max(available, key=lambda item: item[1]) if available else (None, None)
-        payload = {"instrument_id": instrument, "uploaded_at": stamp.isoformat() if stamp else None}
+        instrument, latest = max(available, key=lambda item: item[1]["LastModified"]) if available else (None, None)
+        rows = None
+        if latest:
+            try:
+                rows = count_data_rows(instrument, latest["Key"])
+            except Exception as exc:
+                print(f"Latest batch count unavailable: {exc}")
+        payload = {"instrument_id": instrument, "uploaded_at": latest["LastModified"].isoformat() if latest else None,
+                   "upload_rows": rows, "upload_bytes": latest.get("Size") if latest else None}
     except Exception as exc:
         print(f"Upload metadata error: {exc}")
         return response(503, {"error": "Upload information is temporarily unavailable"})
     _latest_upload_cache.update(data=payload, ts=now)
+    return response(200, payload)
+
+
+def get_site_weather():
+    """Optional decorative regional weather, never an instrument measurement.
+
+    Open-Meteo free non-commercial endpoint; fixed Des Moines coordinates and
+    30-minute caching. No visitor geolocation, key, subscription or paid fallback.
+    """
+    now = time.time()
+    if now - _weather_cache["ts"] < 1800 and _weather_cache["data"] is not None:
+        return response(200, _weather_cache["data"])
+    try:
+        query = urllib.parse.urlencode({"latitude": 47.4, "longitude": -122.33,
+                                       "current": "is_day,cloud_cover,weather_code", "timeformat": "unixtime"})
+        request = urllib.request.Request(f"https://api.open-meteo.com/v1/forecast?{query}", headers={"User-Agent": "DesMoinesAirAcademicDashboard/1.0"})
+        with urllib.request.urlopen(request, timeout=4) as result:
+            current = json.load(result)["current"]
+        if current.get("is_day") not in (0, 1) or not isinstance(current.get("cloud_cover"), (int, float)) or not 0 <= current["cloud_cover"] <= 100:
+            raise ValueError("Invalid weather response")
+        observed = current.get("time")
+        if not isinstance(observed, (int, float)) or not math.isfinite(observed) or abs(now - observed) > 7200:
+            raise ValueError("Stale weather response")
+        payload = {"weather": {"is_day": bool(current["is_day"]), "cloud_cover": current["cloud_cover"], "weather_code": current.get("weather_code"), "time": observed}, "source": "Open-Meteo"}
+    except Exception as exc:
+        print(f"Optional weather unavailable: {exc}")
+        payload = {"weather": None, "source": "Open-Meteo"}
+    _weather_cache.update(data=payload, ts=now)
     return response(200, payload)
 
 
@@ -2065,6 +2101,8 @@ def lambda_handler(event, context):
 
     if query_params(event).get("view") == "latest-upload":
         return get_latest_upload()
+    if query_params(event).get("view") == "weather":
+        return get_site_weather()
 
     inventory = get_inventory()
     mtd_cost = None

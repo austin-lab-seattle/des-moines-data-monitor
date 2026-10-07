@@ -9,16 +9,20 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
     const url = new URL(route.request().url());
     const id = url.searchParams.get('instrument');
     const instrument = instruments[id];
+    if (url.pathname.endsWith('/summary') && url.searchParams.get('view') === 'weather') {
+      await route.fulfill({ json: { weather: siteWeather, source: 'Open-Meteo' } });
+      return;
+    }
     if (url.pathname.endsWith('/summary') && url.searchParams.get('view') === 'latest-upload') {
       await route.fulfill(uploadError ? { status: 503, json: { error: 'Upload information unavailable' } }
-        : { json: { instrument_id: 'NO2-CAPS', uploaded_at: '2026-10-07T07:10:00+00:00' } });
+        : { json: { instrument_id: 'NO2-CAPS', uploaded_at: '2026-10-07T07:10:00+00:00', upload_rows: 128, upload_bytes: 2048 } });
       return;
     }
     if (url.pathname.endsWith('/observations') && instrument) {
@@ -72,7 +76,7 @@ test('Conditions shows pollutant readings and hides internal counters and aircra
   await expect(page.locator('main')).not.toContainText(/Raw rows|Cleaned rows|Clean observations|Latest source|completed upload/);
   expect(requests.some(value => {
     const url = new URL(value);
-    return url.pathname.endsWith('/summary') && url.searchParams.get('view') !== 'latest-upload' || url.pathname.endsWith('/flights');
+    return url.pathname.endsWith('/summary') && !['latest-upload', 'weather'].includes(url.searchParams.get('view')) || url.pathname.endsWith('/flights');
   })).toBe(false);
   expect(errors).toEqual([]);
 });
@@ -199,6 +203,8 @@ test('blue Conditions hero shows real upload time separately from reading time i
   await expect(widget.locator('time')).toHaveAttribute('datetime', '2026-10-07T07:10:00+00:00');
   await expect(widget).toContainText('12:10:00 AM');
   await expect(widget).toContainText('NO2-CAPS');
+  await expect(widget).toContainText('128 rows');
+  await expect(widget).toContainText('2.0 KB');
   await expect(widget).not.toContainText('12:06:59 AM');
   const background = () => page.locator('.conditions-hero').evaluate(element => getComputedStyle(element).backgroundImage);
   expect(await background()).toContain('linear-gradient');
@@ -260,4 +266,44 @@ test('changing the Observations instrument clears old rows before the next respo
   await expect(page.locator('.review-table tbody')).not.toContainText('10.255');
   completeCo2();
   await expect(page.locator('.review-table tbody')).toContainText('420');
+});
+
+test('decorative sky follows regional weather and respects reduced motion', async ({ page }) => {
+  await mockApi(page, { siteWeather: { is_day: true, cloud_cover: 70 } });
+  await page.goto('/');
+  await expect(page.locator('.sky-day .sky-cloud')).toHaveCount(4);
+  await expect(page.locator('.sky-star')).toHaveCount(0);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const animation = await page.locator('.sky-cloud').first().evaluate(element => getComputedStyle(element).animationName);
+  expect(animation).toBe('none');
+});
+
+test('night sky has subtle stars with no alteration of instrument values', async ({ page }) => {
+  await mockApi(page, { siteWeather: { is_day: false, cloud_cover: 0 } });
+  await page.goto('/');
+  await expect(page.locator('.sky-night .sky-star')).toHaveCount(16);
+  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' })).toContainText('10.255');
+  await expect(page.locator('main')).not.toContainText(/\u2014|\u2013/);
+});
+
+test('developer menu opens and closes on desktop and mobile, with friendly API URLs', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/developers');
+  const sidebar = page.locator('#api-docs-nav');
+  await expect(sidebar).toBeVisible();
+  await page.getByRole('button', { name: 'Hide documentation navigation' }).click();
+  await expect(sidebar).not.toBeVisible();
+  await page.getByRole('button', { name: 'Open documentation navigation' }).click();
+  await expect(sidebar).toBeVisible();
+  const origin = new URL(page.url()).origin;
+  await expect(page.locator('.api-base-url-row code')).toHaveText(origin);
+  await expect(page.locator('.api-portal')).not.toContainText('execute-api');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(sidebar).not.toBeVisible();
+  await page.getByRole('button', { name: 'Open documentation navigation' }).click();
+  await expect(sidebar).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(sidebar).not.toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Air Quality Data API', exact: true })).toBeVisible();
 });

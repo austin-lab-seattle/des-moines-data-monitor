@@ -1,10 +1,10 @@
 // Preserve the supplied decimal precision. Formatting must not manufacture a
 // zero from a blank field or round individual observations to chart precision.
 export const formatReadingValue = (value, column = '') => {
-  if (value == null || String(value).trim() === '') return '—';
+  if (value == null || String(value).trim() === '') return 'N/A';
   const text = String(value).trim();
   if (/(status|state|error)/i.test(column)) return text;
-  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) || !Number.isFinite(Number(text))) return '—';
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text) || !Number.isFinite(Number(text))) return 'N/A';
   if (/e/i.test(text)) return text;
   const [integer, fraction] = text.split('.');
   const grouped = (integer || '0').replace(/\B(?=(\d{3})+(?!\d))/g, ',');

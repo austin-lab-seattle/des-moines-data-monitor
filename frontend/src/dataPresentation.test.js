@@ -4,7 +4,7 @@ import { formatReadingValue, observationTime } from './dataPresentation.js';
 
 test('missing, invalid and non-finite measurements never become numeric zero', () => {
   for (const value of [null, undefined, '', '   ', 'NaN', 'Infinity', '-Infinity', NaN, Infinity, 'error', '0x10']) {
-    assert.equal(formatReadingValue(value, 'Concentration'), '—');
+    assert.equal(formatReadingValue(value, 'Concentration'), 'N/A');
   }
 });
 test('individual reading precision, zero, negatives and scientific notation survive formatting', () => {

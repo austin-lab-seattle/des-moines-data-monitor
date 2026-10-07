@@ -21,16 +21,16 @@ class LatestUploadTests(unittest.TestCase):
             if prefix.startswith('CO2-LICOR/'):
                 return [{'Key': 'CO2-LICOR/bronze/later-name.txt', 'LastModified': datetime(2026, 10, 7, 8, 20, tzinfo=timezone.utc)}]
             return []
-        with mock.patch.object(lambda_api, 'iter_s3_objects', side_effect=objects), mock.patch.object(lambda_api, 'get_inventory') as inventory, mock.patch.object(lambda_api, 'get_silver_text') as silver:
+        with mock.patch.object(lambda_api, 'iter_s3_objects', side_effect=objects), mock.patch.object(lambda_api, 'get_inventory') as inventory, mock.patch.object(lambda_api, 'get_silver_text') as silver, mock.patch.object(lambda_api, 'count_data_rows', return_value=128):
             result = lambda_api.get_latest_upload()
-        self.assertEqual({'instrument_id': 'NO2-CAPS', 'uploaded_at': '2026-10-07T08:30:00+00:00'}, json.loads(result['body']))
+        self.assertEqual({'instrument_id': 'NO2-CAPS', 'uploaded_at': '2026-10-07T08:30:00+00:00', 'upload_rows': 128, 'upload_bytes': None}, json.loads(result['body']))
         inventory.assert_not_called()
         silver.assert_not_called()
 
     def test_empty_bucket_and_s3_failure_do_not_invent_upload_time(self):
         with mock.patch.object(lambda_api, 'iter_s3_objects', return_value=[]):
             result = lambda_api.get_latest_upload()
-        self.assertEqual({'instrument_id': None, 'uploaded_at': None}, json.loads(result['body']))
+        self.assertEqual({'instrument_id': None, 'uploaded_at': None, 'upload_rows': None, 'upload_bytes': None}, json.loads(result['body']))
         lambda_api._latest_upload_cache.update(data=None, ts=0)
         with mock.patch.object(lambda_api, 'iter_s3_objects', side_effect=RuntimeError('unavailable')):
             self.assertEqual(503, lambda_api.get_latest_upload()['statusCode'])
@@ -41,3 +41,11 @@ class LatestUploadTests(unittest.TestCase):
         self.assertEqual(200, result['statusCode'])
         upload.assert_called_once()
         inventory.assert_not_called()
+
+    def test_batch_metrics_are_from_the_selected_upload_only(self):
+        stamp = datetime(2026, 10, 7, 8, 30, tzinfo=timezone.utc)
+        objects = [{'Key': 'NO2-CAPS/bronze/latest.txt', 'Size': 2048, 'LastModified': stamp}]
+        with mock.patch.object(lambda_api, 'iter_s3_objects', side_effect=lambda prefix: objects if prefix.startswith('NO2-CAPS/') else []), mock.patch.object(lambda_api, 'count_data_rows', return_value=128) as count:
+            payload = json.loads(lambda_api.get_latest_upload()['body'])
+        count.assert_called_once_with('NO2-CAPS', 'NO2-CAPS/bronze/latest.txt')
+        self.assertEqual((128, 2048), (payload['upload_rows'], payload['upload_bytes']))
