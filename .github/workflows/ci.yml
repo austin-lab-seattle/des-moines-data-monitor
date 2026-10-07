@@ -47,3 +47,16 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install browser for public dashboard checks
+        run: npx playwright install --with-deps chromium
+      - name: Verify public dashboard behavior in the production build
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: public-dashboard-browser-report
+          path: frontend/playwright-report/
+          retention-days: 7

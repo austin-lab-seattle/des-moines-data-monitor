@@ -640,8 +640,7 @@ def split_fields(line):
 
 def is_float(value):
     try:
-        float(value)
-        return True
+        return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
 
@@ -899,6 +898,15 @@ def row_matches_time_range(row_time, start_time, end_time):
     return True
 
 
+def validate_time_range(start_raw, end_raw, start_time, end_time):
+    if start_raw and start_time is None:
+        raise ValueError("Invalid start timestamp")
+    if end_raw and end_time is None:
+        raise ValueError("Invalid end timestamp")
+    if start_time is not None and end_time is not None and start_time > end_time:
+        raise ValueError("start must be before or equal to end")
+
+
 def review_item_applies_to_row(item, row):
     if item.get("status", "active") != "active":
         return False
@@ -918,6 +926,8 @@ def review_item_applies_to_row(item, row):
 
 
 def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100, cursor=0, order="asc"):
+    if order not in {"asc", "desc"}:
+        raise ValueError("order must be asc or desc")
     text = get_silver_text(instrument_id)
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
@@ -926,6 +936,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
     columns = split_fields(lines[0])
     start_time = datetime_for_compare(start_raw)
     end_time = datetime_for_compare(end_raw)
+    validate_time_range(start_raw, end_raw, start_time, end_time)
     rows = []
     skipped = 0
     limit = min(max(int(limit or 100), 1), 500)
@@ -933,16 +944,21 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
 
     flags = read_review_objects(instrument_id, "flags")
     corrections = read_review_objects(instrument_id, "corrections")
-    source_rows = list(enumerate(lines[1:]))
-    if order == "desc":
-        source_rows.reverse()
-
-    for source_index, raw_line in source_rows:
+    source_rows = []
+    for source_index, raw_line in enumerate(lines[1:]):
         fields = split_fields(raw_line)
+        if len(fields) != len(columns):
+            continue
         timestamp_raw = record_timestamp(instrument_id, columns, fields)
         timestamp_compare = datetime_for_instrument(instrument_id, timestamp_raw)
-        if (start_time or end_time) and not row_matches_time_range(timestamp_compare, start_time, end_time):
+        if not row_matches_time_range(timestamp_compare, start_time, end_time):
             continue
+        source_rows.append((timestamp_compare, source_index, raw_line, fields, timestamp_raw))
+    # Bronze batches are sorted by source filename, NOT necessarily observation
+    # time. Paginate only after chronological sorting, preserving source identity.
+    source_rows.sort(key=lambda row: (row[0], row[1]), reverse=order == "desc")
+
+    for timestamp_compare, source_index, raw_line, fields, timestamp_raw in source_rows:
         if skipped < cursor:
             skipped += 1
             continue
@@ -955,7 +971,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
             "row_key": make_row_key(instrument_id, timestamp_raw, raw_line),
             "source_index": source_index,
             "timestamp": timestamp_raw,
-            "timestamp_iso": timestamp_compare.isoformat() if timestamp_compare else None,
+            "timestamp_iso": timestamp_compare.replace(tzinfo=timezone.utc).isoformat(),
             "timestamp_compare": timestamp_compare,
             "values": values,
             "raw": raw_line,
@@ -971,7 +987,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
         if len(rows) >= limit:
             break
 
-    next_cursor = cursor + len(rows) if len(rows) == limit else None
+    next_cursor = cursor + len(rows) if cursor + len(rows) < len(source_rows) else None
     return columns, rows, next_cursor, len(flags) + len(corrections)
 
 
@@ -983,12 +999,13 @@ def count_silver_records(instrument_id, start_raw=None, end_raw=None):
         return 0
     start_time = datetime_for_compare(start_raw)
     end_time = datetime_for_compare(end_raw)
-    if not (start_time or end_time):
-        return len(lines) - 1
+    validate_time_range(start_raw, end_raw, start_time, end_time)
     columns = split_fields(lines[0])
     count = 0
     for raw_line in lines[1:]:
         fields = split_fields(raw_line)
+        if len(fields) != len(columns):
+            continue
         moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
         if row_matches_time_range(moment, start_time, end_time):
             count += 1
@@ -1006,6 +1023,8 @@ def get_silver_records(event):
     if str(params.get("count_only", "")).lower() in ("1", "true", "yes"):
         try:
             count = count_silver_records(instrument_id, params.get("start"), params.get("end"))
+        except ValueError as exc:
+            return response(400, {"error": str(exc)})
         except s3_client.exceptions.NoSuchKey:
             return response(404, {"error": "Records not found", "instrument_id": instrument_id})
         except Exception as exc:
@@ -1022,6 +1041,8 @@ def get_silver_records(event):
             params.get("cursor", 0),
             params.get("order", "asc"),
         )
+    except ValueError as exc:
+        return response(400, {"error": str(exc)})
     except s3_client.exceptions.NoSuchKey:
         return response(404, {"error": "Records not found", "instrument_id": instrument_id})
     except Exception as exc:
@@ -1335,23 +1356,20 @@ SERIES_DEFAULT_MEASUREMENT = {
 }
 
 
-def numeric_columns(columns, data_lines, sample=25):
-    counts = [0] * len(columns)
-    seen = 0
+def numeric_columns(columns, data_lines):
+    # Sparse columns from rollover/schema unions may be empty in the first 25
+    # records. A finite reading anywhere makes the measurement available.
+    present = [False] * len(columns)
     for raw_line in data_lines:
         fields = split_fields(raw_line)
         if len(fields) != len(columns):
             continue
         for index in range(min(len(columns), len(fields))):
+            if present[index]:
+                continue
             if is_float(fields[index]):
-                counts[index] += 1
-        seen += 1
-        if seen >= sample:
-            break
-    if not seen:
-        return []
-    threshold = seen * 0.6
-    return [columns[index] for index in range(len(columns)) if counts[index] >= threshold]
+                present[index] = True
+    return [columns[index] for index in range(len(columns)) if present[index]]
 
 
 # Instrument-setting and diagnostic columns are numeric but not science
@@ -1408,9 +1426,11 @@ def get_series(event):
     numeric = numeric_columns(columns, data_lines)
     # The picker shows only meaningful measurements, but any numeric column can
     # still be requested directly by name via ?measurement=.
-    options = [column for column in numeric if is_measurement_column(column)] or numeric
+    options = [column for column in numeric if is_measurement_column(column)]
     measurement = params.get("measurement")
-    if measurement not in numeric:
+    if measurement and (measurement not in numeric or "hhmmss" in measurement.lower()):
+        return response(400, {"error": "Unknown, non-numeric, or time-only measurement"})
+    if not measurement:
         measurement = pick_default_measurement(instrument_id, options)
     if measurement is None:
         return response(200, {"instrument_id": instrument_id, "measurement": None, "measurements": options, "series": []})
@@ -1418,6 +1438,10 @@ def get_series(event):
     col_index = columns.index(measurement)
     start_time = datetime_for_compare(params.get("start"))
     end_time = datetime_for_compare(params.get("end"))
+    try:
+        validate_time_range(params.get("start"), params.get("end"), start_time, end_time)
+    except ValueError as exc:
+        return response(400, {"error": str(exc)})
     try:
         bucket_minutes = int(params.get("bucket_minutes", 60))
     except (TypeError, ValueError):
@@ -1450,17 +1474,19 @@ def get_series(event):
             microsecond=0,
             tzinfo=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
-        agg = buckets.setdefault(bucket, [0.0, 0])
-        agg[0] += float(fields[col_index])
-        agg[1] += 1
+        buckets.setdefault(bucket, []).append(float(fields[col_index]))
 
-    series = [{"t": hour, "v": round(total / count, 3)} for hour, (total, count) in sorted(buckets.items())]
-    plotted_rows = sum(count for _total, count in buckets.values())
+    # Explicit sample mean; no fabricated zeroes or interpolation for empty
+    # buckets. Scale before fsum to avoid overflow of otherwise finite means.
+    series = [{"t": hour, "v": round(math.fsum(value / len(values) for value in values), 3), "n": len(values)}
+              for hour, values in sorted(buckets.items())]
+    plotted_rows = sum(len(values) for values in buckets.values())
     return response(200, {
         "instrument_id": instrument_id,
         "measurement": measurement,
         "measurements": options,
         "bucket_minutes": bucket_minutes,
+        "aggregation": "sample_mean",
         "series": series,
         "source_rows": len(data_lines),
         "plotted_rows": plotted_rows,

@@ -20,6 +20,7 @@ Invoke on demand from the Lambda console or the CLI:
 import csv
 import io
 import json
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -157,8 +158,7 @@ def split_fields(line):
 
 def is_float(value):
     try:
-        float(value)
-        return True
+        return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
 
@@ -207,6 +207,8 @@ def parse_raw_no2(payload, received_at=None):
     try:
         values = [float(part) for part in parts]
     except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in values):
         return None
     # The CAPS time field has been seen as 1904-epoch seconds and, after an
     # instrument setup change, as a bare HHMMSS reading. Decode the epoch form so
