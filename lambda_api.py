@@ -67,6 +67,7 @@ LEGACY_API_ROUTES = {
 INVENTORY_TTL_SECONDS = 30
 COST_TTL_SECONDS = 3600
 _inventory_cache = {"data": None, "ts": 0.0}
+_latest_upload_cache = {"data": None, "ts": 0.0}
 _cost_cache = {"data": None, "ts": 0.0}
 
 # Counting many small batch objects is dominated by per-object request latency,
@@ -1633,6 +1634,27 @@ def get_observations_export(event):
     })
 
 
+def get_latest_upload():
+    """Actual Bronze upload time from S3 metadata, without counting/reading rows."""
+    now = time.time()
+    if _latest_upload_cache["data"] is not None and now - _latest_upload_cache["ts"] < INVENTORY_TTL_SECONDS:
+        return response(200, _latest_upload_cache["data"])
+    try:
+        def latest_for(instrument):
+            latest = max((obj["LastModified"] for obj in iter_s3_objects(f"{instrument}/bronze/")), default=None)
+            return instrument, latest
+        with ThreadPoolExecutor(max_workers=len(INSTRUMENT_IDS)) as pool:
+            updates = list(pool.map(latest_for, INSTRUMENT_IDS))
+        available = [(instrument, stamp) for instrument, stamp in updates if stamp is not None]
+        instrument, stamp = max(available, key=lambda item: item[1]) if available else (None, None)
+        payload = {"instrument_id": instrument, "uploaded_at": stamp.isoformat() if stamp else None}
+    except Exception as exc:
+        print(f"Upload metadata error: {exc}")
+        return response(503, {"error": "Upload information is temporarily unavailable"})
+    _latest_upload_cache.update(data=payload, ts=now)
+    return response(200, payload)
+
+
 def compute_inventory():
     """List every bronze object, count rows in parallel, aggregate per instrument."""
     per_instrument_objects = {
@@ -2040,6 +2062,9 @@ def lambda_handler(event, context):
     auth_response = require_public_api_access(event, READ_SCOPES["summary"])
     if auth_response:
         return auth_response
+
+    if query_params(event).get("view") == "latest-upload":
+        return get_latest_upload()
 
     inventory = get_inventory()
     mtd_cost = None

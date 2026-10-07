@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
-import { AlertTriangle, ArrowRight, Check, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { formatReadingValue, observationTime } from './dataPresentation.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
@@ -116,6 +116,7 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
   const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
+  const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -159,6 +160,7 @@ export default function Dashboard() {
 
   const handleRefresh = () => {
     setRefreshing(true);
+    setUploadRefreshKey(key => key + 1);
     loadReadings();
   };
 
@@ -226,6 +228,7 @@ export default function Dashboard() {
             instruments={instruments}
             formatSeattleTime={formatSeattleTime}
             loading={loading}
+            uploadRefreshKey={uploadRefreshKey}
           />
         )}
         {activeView === 'review' && <DataReview />}
@@ -246,17 +249,57 @@ export default function Dashboard() {
   );
 }
 
-function Overview({ instruments, formatSeattleTime, loading }) {
+function LatestUploadWidget({ formatSeattleTime, refreshKey }) {
+  const [upload, setUpload] = useState({ loading: true });
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      try {
+        const response = await fetchApi(`${API_PATHS.summary}?view=latest-upload`, { signal: controller.signal });
+        const result = await response.json();
+        if (!response.ok) throw new Error('Upload information unavailable');
+        if (!Object.hasOwn(result, 'uploaded_at') || !Object.hasOwn(result, 'instrument_id')) throw new Error('Missing upload information');
+        if (result.uploaded_at || result.instrument_id) {
+          if (!INSTRUMENT_IDS.includes(result.instrument_id) || !/(Z|[+-]\d{2}:?\d{2})$/i.test(result.uploaded_at || '') || !Number.isFinite(Date.parse(result.uploaded_at))) {
+            throw new Error('Invalid upload information');
+          }
+        }
+        if (!controller.signal.aborted) setUpload({ ...result, loading: false, error: false });
+      } catch {
+        if (!controller.signal.aborted) setUpload(previous => ({ ...previous, loading: false, error: true }));
+      }
+    };
+    const initial = setTimeout(load, 0);
+    const interval = setInterval(load, 60000);
+    return () => { controller.abort(); clearTimeout(initial); clearInterval(interval); };
+  }, [refreshKey]);
+
+  return (
+    <aside className="latest-upload-widget" aria-label="Latest upload">
+      <Clock size={23} aria-hidden="true" />
+      <div>
+        <span className="upload-widget-label">{upload.error && upload.uploaded_at ? 'Last confirmed upload' : 'Latest upload'}</span>
+        {upload.uploaded_at ? <time dateTime={upload.uploaded_at}>{formatSeattleTime(upload.uploaded_at)}</time>
+          : <strong>{upload.loading ? 'Checking uploads…' : upload.error ? 'Temporarily unavailable' : 'No uploads yet'}</strong>}
+        {upload.instrument_id && <span className="upload-widget-instrument">{INSTRUMENT_NAMES[upload.instrument_id]} · {upload.instrument_id}</span>}
+        <small>{upload.error ? 'Could not refresh upload information' : 'Pacific time'}</small>
+      </div>
+    </aside>
+  );
+}
+
+function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey }) {
   const [recentInstrument, setRecentInstrument] = useState(null);
 
   return (
     <main className="dashboard-page">
-      <section className="location-heading">
+      <section className="location-heading conditions-hero">
         <div>
           <div className="location-label"><MapPin size={15} /> Des Moines, Washington</div>
           <h1>Air monitoring conditions</h1>
           <p>Explore recent pollutant measurements near Sea-Tac Airport.</p>
         </div>
+        <LatestUploadWidget formatSeattleTime={formatSeattleTime} refreshKey={uploadRefreshKey} />
       </section>
 
       <section className="latest-conditions" aria-labelledby="latest-conditions-title">
