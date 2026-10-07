@@ -375,7 +375,7 @@ function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
             <span className="section-eyebrow">Recent readings</span>
             <h2 id="readings-dialog-title">{instrument.name}</h2>
             <p>{INSTRUMENT_NAMES[instrument.id]} · {instrument.id}</p>
-            <p>Newest reading first · Pacific time</p>
+            <p>Individual readings · Newest first · Pacific time</p>
           </div>
           <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="Close recent readings">
             <X size={19} />
@@ -420,7 +420,7 @@ function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
           </div>
         )}
         <div className="readings-dialog-footer">
-          <span>Latest available measurements</span>
+          <span>Latest 8 available readings · Not hourly averages</span>
           <button type="button" onClick={onClose}>Close</button>
         </div>
       </section>
@@ -1154,8 +1154,9 @@ function TimeSeriesChart() {
       // A slower response for the previously selected measurement must never
       // replace the data (and Y-axis scale) for the current selection.
       if (requestId === seriesRequestId.current && res.ok) {
-        const publicColumns = RECENT_READING_COLUMNS[inst] || [];
-        const availableMeasurements = (payload.measurements || []).filter(name => isChartMeasurement(name) && publicColumns.includes(name));
+        // The compact popup is curated separately. Preserve the API's science
+        // measurements here so secondary quantities remain available to chart.
+        const availableMeasurements = (payload.measurements || []).filter(isChartMeasurement);
         const selectedMeasurement = isChartMeasurement(payload.measurement)
           ? payload.measurement
           : '';

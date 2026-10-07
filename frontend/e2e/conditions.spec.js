@@ -3,10 +3,10 @@ import { readFile } from 'node:fs/promises';
 
 const instruments = {
   'BC-MA200': { name: 'Black carbon', columns: ['BC1'], value: '120' },
-  'CO2-LICOR': { name: 'Carbon dioxide', columns: ['CO2_(umol_mol-1)'], value: '420' },
-  'NEPH-PM25': { name: 'Fine particles', columns: ['PM2.5 (µg/m³)'], value: '5.123' },
-  'NO2-CAPS': { name: 'Nitrogen dioxide', columns: ['Concentration', 'HHMMSS'], value: '10.255' },
-  SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)'], value: '5497.34' },
+  'CO2-LICOR': { name: 'Carbon dioxide', columns: ['CO2_(umol_mol-1)', 'H2O_(mmol_mol-1)', 'CO2_Absorption'], value: '420' },
+  'NEPH-PM25': { name: 'Fine particles', columns: ['PM2.5 (µg/m³)', 'BScat (10^-4 m^-1)'], value: '5.123' },
+  'NO2-CAPS': { name: 'Nitrogen dioxide', columns: ['Concentration', 'Loss', 'Span', 'LastBaseline', 'HHMMSS'], value: '10.255' },
+  SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
 async function mockApi(page, { missingBlackCarbon = false, no2Error = false } = {}) {
@@ -39,8 +39,8 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false } = 
     if (url.pathname.endsWith('/timeseries') && instrument) {
       // Include a legacy HHMMSS option: the public UI must still hide it.
       await route.fulfill({ json: {
-        measurement: instrument.columns[0], measurements: instrument.columns,
-        series: [{ t: '2026-10-07T07:00:00Z', v: Number(instrument.value) }],
+        measurement: url.searchParams.get('measurement') || instrument.columns[0], measurements: instrument.columns,
+        series: [{ t: '2026-10-07T07:00:00Z', v: 9000 }],
       } });
       return;
     }
@@ -92,7 +92,29 @@ test('NO2 aggregation selects concentration and hides the clock field', async ({
   await page.locator('.chart-controls select').nth(0).selectOption('NO2-CAPS');
   const selector = page.locator('.chart-controls select').nth(1);
   await expect(selector).toHaveValue('Concentration');
-  await expect(selector.locator('option')).toHaveText(['NO₂ concentration (ppb)']);
+  await expect(selector.locator('option')).toHaveText(['NO₂ concentration (ppb)', 'Loss', 'Span', 'LastBaseline']);
+  expect(errors).toEqual([]);
+});
+
+test('recent values use individual Silver observations, not hourly chart aggregates', async ({ page }) => {
+  const errors = await mockApi(page);
+  await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/timeseries')),
+    page.goto('/'),
+  ]);
+  const requests = [];
+  page.on('request', request => requests.push(new URL(request.url())));
+  await page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Nitrogen dioxide' });
+  await expect(dialog.locator('tbody tr')).toHaveCount(8);
+  await expect(dialog.locator('tbody tr').first().locator('td').nth(1)).toHaveText('10.255');
+  await expect(dialog).toContainText('Not hourly averages');
+  await expect(dialog.locator('tbody')).not.toContainText('9,000');
+  const observation = requests.find(url => url.pathname.endsWith('/observations'));
+  expect(observation?.searchParams.get('instrument')).toBe('NO2-CAPS');
+  expect(observation?.searchParams.get('limit')).toBe('8');
+  expect(observation?.searchParams.get('order')).toBe('desc');
+  expect(requests.some(url => url.pathname.endsWith('/timeseries'))).toBe(false);
   expect(errors).toEqual([]);
 });
 
@@ -104,6 +126,23 @@ test('unavailable instruments do not blank the public page', async ({ page }) =>
   await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' })).toContainText('Temporarily unavailable');
   await page.getByRole('button', { name: 'View latest readings from Black carbon' }).click();
   await expect(page.getByRole('dialog')).toContainText('No readings are available');
+  expect(errors).toEqual([]);
+});
+
+test('secondary aggregation choices survive the public dashboard cleanup', async ({ page }) => {
+  const errors = await mockApi(page);
+  await page.goto('/');
+  for (const id of ['CO2-LICOR', 'NEPH-PM25', 'SMPS']) {
+    await page.locator('.chart-controls select').nth(0).selectOption(id);
+    const selector = page.locator('.chart-controls select').nth(1);
+    await expect(selector).toHaveValue(instruments[id].columns[0]);
+    for (const column of instruments[id].columns) {
+      await expect(selector.locator(`option[value="${column}"]`)).toHaveCount(1);
+    }
+    await selector.selectOption(instruments[id].columns[1]);
+    await expect.poll(() => page.locator('.chart-controls select').nth(1).inputValue())
+      .toBe(instruments[id].columns[1]);
+  }
   expect(errors).toEqual([]);
 });
 
