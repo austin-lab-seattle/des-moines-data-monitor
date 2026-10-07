@@ -99,6 +99,37 @@ test('each pollutant opens eight labeled readings in Conditions', async ({ page 
   expect(errors).toEqual([]);
 });
 
+test('instrument labels stay readable in both themes and at mobile width', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Use dark theme' }).click();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const labels = await page.locator('.pollutant-instrument').evaluateAll(elements => elements.map(element => {
+        const style = getComputedStyle(element);
+        return { size: parseFloat(style.fontSize), weight: Number(style.fontWeight), color: style.color,
+          cardColor: getComputedStyle(element.closest('.pollutant-card')).color,
+          fits: element.scrollWidth <= element.clientWidth };
+      }));
+      expect(labels).toHaveLength(5);
+      for (const label of labels) {
+        expect(label.size).toBeGreaterThanOrEqual(14);
+        expect(label.weight).toBeGreaterThanOrEqual(700);
+        expect(label.color).toBe(label.cardColor);
+        expect(label.fits).toBe(true);
+      }
+      for (const id of Object.keys(instruments)) {
+        const label = page.locator('.pollutant-instrument-id', { hasText: id });
+        await expect(label).toBeVisible();
+        expect(await label.evaluate(element => parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(12);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+  }
+});
+
 test('NO2 aggregation selects concentration and hides the clock field', async ({ page }) => {
   const errors = await mockApi(page);
   await page.goto('/');
@@ -202,7 +233,8 @@ test('blue Conditions hero shows real upload time separately from reading time i
   const widget = page.getByRole('complementary', { name: 'Latest upload' });
   await expect(widget.locator('time')).toHaveAttribute('datetime', '2026-10-07T07:10:00+00:00');
   await expect(widget).toContainText('12:10:00 AM');
-  await expect(widget).toContainText('NO2-CAPS');
+  await expect(widget.locator('.upload-widget-instrument')).toHaveText('NO₂ CAPS');
+  await expect(widget.locator('.upload-widget-instrument')).toHaveAttribute('title', 'NO2-CAPS');
   await expect(widget).toContainText('128 rows');
   await expect(widget).toContainText('2.0 KB');
   await expect(widget).not.toContainText('12:06:59 AM');
