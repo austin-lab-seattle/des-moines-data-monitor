@@ -202,7 +202,8 @@ test('blue Conditions hero shows real upload time separately from reading time i
   const widget = page.getByRole('complementary', { name: 'Latest upload' });
   await expect(widget.locator('time')).toHaveAttribute('datetime', '2026-10-07T07:10:00+00:00');
   await expect(widget).toContainText('12:10:00 AM');
-  await expect(widget).toContainText('NO2-CAPS');
+  await expect(widget.locator('.upload-widget-instrument')).toHaveText('NO₂ CAPS');
+  await expect(widget.locator('.upload-widget-instrument')).toHaveAttribute('title', 'NO2-CAPS');
   await expect(widget).toContainText('128 rows');
   await expect(widget).toContainText('2.0 KB');
   await expect(widget).not.toContainText('12:06:59 AM');

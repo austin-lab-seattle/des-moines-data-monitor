@@ -269,7 +269,7 @@ function LatestUploadWidget({ formatSeattleTime, refreshKey }) {
         <span className="upload-widget-label">{upload.error && upload.uploaded_at ? 'Last confirmed upload' : 'Latest upload'}</span>
         {upload.uploaded_at ? <time dateTime={upload.uploaded_at}>{formatSeattleTime(upload.uploaded_at)}</time>
           : <strong>{upload.loading ? 'Checking uploads…' : upload.error ? 'Temporarily unavailable' : 'No uploads yet'}</strong>}
-        {upload.instrument_id && <span className="upload-widget-instrument">{INSTRUMENT_NAMES[upload.instrument_id]} · {upload.instrument_id}</span>}
+        {upload.instrument_id && <span className="upload-widget-instrument" title={upload.instrument_id}>{INSTRUMENT_NAMES[upload.instrument_id]}</span>}
         {(Number.isInteger(upload.upload_rows) && upload.upload_rows >= 0 || Number.isFinite(upload.upload_bytes) && upload.upload_bytes >= 0) && <div className="upload-batch-stats" aria-label="Latest uploaded batch statistics">
           {Number.isInteger(upload.upload_rows) && upload.upload_rows >= 0 && <span>{upload.upload_rows.toLocaleString()} rows</span>}
           {Number.isFinite(upload.upload_bytes) && upload.upload_bytes >= 0 && <span>{formatUploadBytes(upload.upload_bytes)}</span>}
