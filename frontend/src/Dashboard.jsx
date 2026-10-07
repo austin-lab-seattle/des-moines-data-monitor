@@ -6,19 +6,7 @@ import { formatReadingValue, observationTime } from './dataPresentation.js';
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
 
-const DEFAULT_API_BASE_URL = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
-const API_ENTRY_URL = import.meta.env.VITE_API_URL || `${DEFAULT_API_BASE_URL}/air-quality/v1/summary`;
-const getApiBaseUrl = (value) => {
-  const trimmed = String(value || DEFAULT_API_BASE_URL).replace(/\/+$/, '');
-  const marker = '/air-quality/';
-  if (trimmed.includes(marker)) return trimmed.slice(0, trimmed.indexOf(marker));
-  try {
-    return new URL(trimmed).origin;
-  } catch {
-    return DEFAULT_API_BASE_URL;
-  }
-};
-const API_BASE_URL = getApiBaseUrl(API_ENTRY_URL);
+const API_BASE_URL = window.location.origin;
 const API_PATHS = {
   summary: '/air-quality/v1/summary',
   timeseries: '/air-quality/v1/timeseries',
@@ -114,7 +102,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : 'overview');
+  const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : window.location.pathname === '/developers' ? 'api' : window.location.pathname === '/observations' ? 'review' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
   const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
 
@@ -125,8 +113,8 @@ export default function Dashboard() {
 
   const selectView = (view) => {
     setActiveView(view);
-    const path = view === 'aircraft' ? '/lab/aircraft' : '/';
-    if (view !== 'api' && window.location.pathname !== path) window.history.replaceState({}, '', path);
+    const path = view === 'aircraft' ? '/lab/aircraft' : view === 'api' ? '/developers' : view === 'review' ? '/observations' : '/';
+    if (window.location.pathname !== path || window.location.hash) window.history.replaceState({}, '', path);
   };
 
   const loadReadings = useCallback(async () => {
@@ -282,10 +270,55 @@ function LatestUploadWidget({ formatSeattleTime, refreshKey }) {
         {upload.uploaded_at ? <time dateTime={upload.uploaded_at}>{formatSeattleTime(upload.uploaded_at)}</time>
           : <strong>{upload.loading ? 'Checking uploads…' : upload.error ? 'Temporarily unavailable' : 'No uploads yet'}</strong>}
         {upload.instrument_id && <span className="upload-widget-instrument">{INSTRUMENT_NAMES[upload.instrument_id]} · {upload.instrument_id}</span>}
+        {(Number.isInteger(upload.upload_rows) && upload.upload_rows >= 0 || Number.isFinite(upload.upload_bytes) && upload.upload_bytes >= 0) && <div className="upload-batch-stats" aria-label="Latest uploaded batch statistics">
+          {Number.isInteger(upload.upload_rows) && upload.upload_rows >= 0 && <span>{upload.upload_rows.toLocaleString()} rows</span>}
+          {Number.isFinite(upload.upload_bytes) && upload.upload_bytes >= 0 && <span>{formatUploadBytes(upload.upload_bytes)}</span>}
+          <small>Latest batch</small>
+        </div>}
         <small>{upload.error ? 'Could not refresh upload information' : 'Pacific time'}</small>
       </div>
     </aside>
   );
+}
+
+function formatUploadBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function SkyDecoration() {
+  const [weather, setWeather] = useState(null);
+  const [fallbackDay, setFallbackDay] = useState(() => {
+    const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hourCycle: 'h23' }).format(new Date()));
+    return hour >= 7 && hour < 19;
+  });
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      const hour = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', hourCycle: 'h23' }).format(new Date()));
+      setFallbackDay(hour >= 7 && hour < 19);
+      try {
+        const response = await fetchApi(`${API_PATHS.summary}?view=weather`, { signal: controller.signal });
+        const result = await response.json();
+        if (!controller.signal.aborted) setWeather(response.ok && typeof result.weather?.is_day === 'boolean' && Number.isFinite(result.weather?.cloud_cover) && result.weather.cloud_cover >= 0 && result.weather.cloud_cover <= 100 ? result.weather : null);
+      } catch {
+        if (!controller.signal.aborted) setWeather(null);
+      }
+    };
+    const initial = setTimeout(load, 0);
+    const interval = setInterval(load, 1800000);
+    return () => { controller.abort(); clearTimeout(initial); clearInterval(interval); };
+  }, []);
+  const day = weather?.is_day ?? fallbackDay;
+  const clouds = weather ? weather.cloud_cover >= 65 ? 4 : weather.cloud_cover >= 25 ? 2 : 1 : day ? 2 : 0;
+  return <>
+    <div className={`sky-decoration ${day ? 'sky-day' : 'sky-night'}`} aria-hidden="true">
+      {!day && Array.from({ length: 16 }, (_, index) => <i className="sky-star" key={`star-${index}`} style={{ left: `${4 + (index * 37) % 92}%`, top: `${9 + (index * 23) % 75}%`, animationDelay: `${index * -.7}s` }} />)}
+      {Array.from({ length: clouds }, (_, index) => <i className="sky-cloud" key={`cloud-${index}`} style={{ top: `${13 + index * 20}%`, animationDelay: `${index * -19}s`, animationDuration: `${85 + index * 14}s` }} />)}
+    </div>
+    <span className="sky-attribution">Decorative sky · {weather ? <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Weather by Open-Meteo</a> : 'Pacific-time fallback'}</span>
+  </>;
 }
 
 function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey }) {
@@ -294,6 +327,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
   return (
     <main className="dashboard-page">
       <section className="location-heading conditions-hero">
+        <SkyDecoration />
         <div>
           <div className="location-label"><MapPin size={15} /> Des Moines, Washington</div>
           <h1>Air monitoring conditions</h1>
@@ -557,7 +591,7 @@ function DataReview() {
               setNextCursor(null);
               setInstrument(event.target.value);
             }} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} — {INSTRUMENT_NAMES[id]}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} · {INSTRUMENT_NAMES[id]}</option>)}
             </select>
           </Control>
           <Control label="Start Time (filter)">
@@ -965,7 +999,15 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
   const [measurement, setMeasurement] = useState('Total Concentration (#/cm³)');
   const [measurements, setMeasurements] = useState([]);
   const [copied, setCopied] = useState(false);
-  const [navOpen, setNavOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(() => window.matchMedia('(min-width:981px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(min-width:981px)');
+    const resize = () => setNavOpen(media.matches);
+    const escape = event => { if (event.key === 'Escape') setNavOpen(false); };
+    media.addEventListener('change', resize);
+    document.addEventListener('keydown', escape);
+    return () => { media.removeEventListener('change', resize); document.removeEventListener('keydown', escape); };
+  }, []);
   const [accessOpen, setAccessOpen] = useState(false);
   const [activeEndpointId, setActiveEndpointId] = useState('series');
 
@@ -1007,7 +1049,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
               onClick={() => setNavOpen(current => !current)}
               aria-controls="api-docs-nav"
               aria-expanded={navOpen}
-              aria-label="Open documentation navigation"
+              aria-label={navOpen ? 'Hide documentation navigation' : 'Open documentation navigation'}
               title="Documentation navigation"
             >
               <Menu size={20} />
@@ -1045,8 +1087,8 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
 
       {navOpen && <button className="api-nav-scrim" onClick={closeNav} aria-label="Close API navigation" />}
 
-      <div className="api-portal-layout">
-        <aside id="api-docs-nav" className={`api-portal-sidebar ${navOpen ? 'api-portal-sidebar-open' : ''}`}>
+      <div className={`api-portal-layout ${navOpen ? '' : 'api-layout-nav-closed'}`}>
+        <aside id="api-docs-nav" className={`api-portal-sidebar ${navOpen ? 'api-portal-sidebar-open' : 'api-portal-sidebar-closed'}`}>
           <div className="api-sidebar-heading">
             <span>Documentation</span>
             <button className="api-icon-button api-sidebar-close" type="button" onClick={closeNav} aria-label="Close documentation navigation">
@@ -1312,7 +1354,7 @@ function TimeSeriesChart() {
               setExportMessage('');
               fetchSeries({ inst: nextInstrument, meas: nextMeasurement, s: start, e: end });
             }} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} — {INSTRUMENT_NAMES[id]}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} · {INSTRUMENT_NAMES[id]}</option>)}
             </select>
           </Control>
           <Control label="Measurement">
