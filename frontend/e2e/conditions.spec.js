@@ -9,13 +9,18 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
     const url = new URL(route.request().url());
     const id = url.searchParams.get('instrument');
     const instrument = instruments[id];
+    if (url.pathname.endsWith('/summary') && url.searchParams.get('view') === 'latest-upload') {
+      await route.fulfill(uploadError ? { status: 503, json: { error: 'Upload information unavailable' } }
+        : { json: { instrument_id: 'NO2-CAPS', uploaded_at: '2026-10-07T07:10:00+00:00' } });
+      return;
+    }
     if (url.pathname.endsWith('/observations') && instrument) {
       if (id === 'BC-MA200' && missingBlackCarbon) {
         await route.fulfill({ status: 404, json: { error: 'Records not found' } });
@@ -65,7 +70,10 @@ test('Conditions shows pollutant readings and hides internal counters and aircra
   }
   await expect(page.getByRole('navigation')).not.toContainText('Aircraft');
   await expect(page.locator('main')).not.toContainText(/Raw rows|Cleaned rows|Clean observations|Latest source|completed upload/);
-  expect(requests.some(url => url.includes('/summary') || url.includes('/flights'))).toBe(false);
+  expect(requests.some(value => {
+    const url = new URL(value);
+    return url.pathname.endsWith('/summary') && url.searchParams.get('view') !== 'latest-upload' || url.pathname.endsWith('/flights');
+  })).toBe(false);
   expect(errors).toEqual([]);
 });
 
@@ -173,12 +181,39 @@ test('mobile Conditions keeps instrument names and popup within the screen', asy
   const errors = await mockApi(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
+  await expect(page.getByRole('complementary', { name: 'Latest upload' })).toContainText('12:10:00 AM');
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  expect(overflow).toBe(false);
   await expect(page.locator('.pollutant-instrument-id', { hasText: 'NO2-CAPS' })).toBeVisible();
   await page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' }).click();
   await expect(page.getByRole('dialog').locator('tbody tr')).toHaveCount(8);
   const width = await page.getByRole('dialog').evaluate(element => element.getBoundingClientRect().width);
   expect(width).toBeLessThanOrEqual(390);
   expect(errors).toEqual([]);
+});
+
+test('blue Conditions hero shows real upload time separately from reading time in both themes', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  const widget = page.getByRole('complementary', { name: 'Latest upload' });
+  await expect(widget.locator('time')).toHaveAttribute('datetime', '2026-10-07T07:10:00+00:00');
+  await expect(widget).toContainText('12:10:00 AM');
+  await expect(widget).toContainText('NO2-CAPS');
+  await expect(widget).not.toContainText('12:06:59 AM');
+  const background = () => page.locator('.conditions-hero').evaluate(element => getComputedStyle(element).backgroundImage);
+  expect(await background()).toContain('linear-gradient');
+  await page.getByRole('button', { name: 'Use dark theme' }).click();
+  expect(await background()).toContain('linear-gradient');
+  await expect(widget).toContainText('12:10:00 AM');
+});
+
+test('failed upload metadata does not replace instrument readings or invent an upload', async ({ page }) => {
+  await mockApi(page, { uploadError: true });
+  await page.goto('/');
+  const widget = page.getByRole('complementary', { name: 'Latest upload' });
+  await expect(widget).toContainText('Temporarily unavailable');
+  await expect(widget.locator('time')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'View latest readings from Carbon dioxide' })).toContainText('420');
 });
 
 test('Observations pagination uses a forward arrow and the applied filters', async ({ page }) => {
