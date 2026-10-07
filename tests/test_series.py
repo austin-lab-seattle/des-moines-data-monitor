@@ -55,6 +55,23 @@ class SeriesTests(unittest.TestCase):
         self.assertNotIn("Major State", payload["measurements"])
         self.assertNotIn("PC_minus_instrument_s", payload["measurements"])
 
+    def test_no2_hhmmss_is_not_offered_as_a_measurement(self):
+        silver = "\n".join([
+            "HHMMSS,Concentration,Loss,Pressure,Temperature,Signal,Span,Status,"
+            "LastBaseline,Timestamp,Instrument_Timestamp,PC_minus_instrument_s",
+            "201311,10.255,1411.510,747.55,301.87,68031,1.3365,10104,"
+            "1374.746,2026-10-07 20:13:11,2026-10-07 20:13:11,0",
+        ])
+
+        with mock.patch.object(lambda_api, "get_silver_text", return_value=silver):
+            result = lambda_api.get_series({
+                "queryStringParameters": {"instrument": "NO2-CAPS"}
+            })
+
+        payload = json.loads(result["body"])
+        self.assertEqual("Concentration", payload["measurement"])
+        self.assertNotIn("HHMMSS", payload["measurements"])
+
     def test_minute_buckets_are_utc_and_preserve_flyby_resolution(self):
         silver = "\n".join([
             "Date_Time,PM2.5 (µg/m³)",

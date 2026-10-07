@@ -10,19 +10,19 @@
     },
     {
       "source": "/air-quality/v1/summary",
-      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/metrics"
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/summary"
     },
     {
       "source": "/air-quality/v1/timeseries",
-      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/series"
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/timeseries"
     },
     {
       "source": "/air-quality/v1/observations/export",
-      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/silver-download"
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/observations/export"
     },
     {
       "source": "/air-quality/v1/observations",
-      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/silver-records"
+      "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/observations"
     },
     {
       "source": "/air-quality/v1/access-requests",

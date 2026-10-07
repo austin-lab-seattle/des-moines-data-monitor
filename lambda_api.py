@@ -1364,7 +1364,7 @@ MEASUREMENT_BLOCKLIST = (
     "dma", "ramping", "transit", "adjustment", "dilution", "density", "sheath",
     "impactor", "size", "scan", "polarity", "direction", "neutralizer",
     "classifier", "detector", "communication", "status", "state", "reserved", "d50",
-    "inlet", "counting", "channel", "retrace", "pc_minus", "raw ",
+    "inlet", "counting", "channel", "retrace", "pc_minus", "raw ", "hhmmss",
 )
 
 

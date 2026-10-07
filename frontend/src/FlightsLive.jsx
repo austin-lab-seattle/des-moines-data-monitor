@@ -167,7 +167,7 @@ export default function FlightsLive() {
     siteLayer.current.clearLayers();
     const ring = L.circle([site.latitude, site.longitude], {
       radius: RADIUS_KM * 1000,
-      color: '#4b2e83',
+      color: '#168aad',
       weight: 1,
       fill: false,
       opacity: 0.35,
