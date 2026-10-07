@@ -1,7 +1,9 @@
-import { useCallback, useState, useEffect, useRef } from 'react';
-import { Activity, AlertTriangle, Check, Clock, Copy, Database, DollarSign, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Wind, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
+import { AlertTriangle, Check, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import AircraftAnalysis from './AircraftAnalysis.jsx';
+// Aircraft work has a separate local workspace and is not part of public navigation.
+const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
+const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
 
 const DEFAULT_API_BASE_URL = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
 const API_ENTRY_URL = import.meta.env.VITE_API_URL || `${DEFAULT_API_BASE_URL}/air-quality/v1/summary`;
@@ -31,19 +33,73 @@ const RESEARCH_API_PATHS = {
 };
 const apiUrl = (path) => path;
 const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
-const API_TIMEOUT_MS = 15000;
+// A cold summary request currently rebuilds the S3 inventory and can take
+// slightly over 15 seconds. Keep the UI loading rather than reporting a false
+// outage just before the response arrives.
+const API_TIMEOUT_MS = 30000;
 const fetchApi = async (pathWithQuery, options = {}) => {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const abortFromCaller = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  options.signal?.addEventListener('abort', abortFromCaller, { once: true });
   try {
-    return await fetch(apiUrl(pathWithQuery), { ...options, signal: options.signal || controller.signal });
+    return await fetch(apiUrl(pathWithQuery), { ...options, signal: controller.signal });
   } finally {
     window.clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', abortFromCaller);
   }
 };
 const INSTRUMENT_IDS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
+const PUBLIC_INSTRUMENTS = {
+  'BC-MA200': { name: 'Black carbon', detail: 'Soot particles', column: 'BC1' },
+  'CO2-LICOR': { name: 'Carbon dioxide', detail: 'CO₂', column: 'CO2_(umol_mol-1)', unit: 'ppm' },
+  'NEPH-PM25': { name: 'Fine particles', detail: 'PM₂.₅', column: 'PM2.5 (µg/m³)', unit: 'µg/m³' },
+  'NO2-CAPS': { name: 'Nitrogen dioxide', detail: 'NO₂', column: 'Concentration', unit: 'ppb' },
+  SMPS: { name: 'Particle number', detail: 'Particle concentration', column: 'Total Concentration (#/cm³)', unit: 'particles/cm³' },
+};
+const RECENT_READING_COLUMNS = {
+  'BC-MA200': ['BC1', 'BC2', 'BC3', 'BC4', 'BC5'],
+  'CO2-LICOR': ['CO2_(umol_mol-1)'],
+  'NEPH-PM25': ['PM2.5 (µg/m³)'],
+  'NO2-CAPS': ['Concentration'],
+  SMPS: ['Total Concentration (#/cm³)', 'Median (nm)', 'Mean (nm)', 'Geo. Mean (nm)', 'Mode (nm)'],
+};
+const RECENT_READING_LABELS = {
+  Concentration: 'NO₂ concentration (ppb)',
+  Pressure: 'Pressure',
+  Temperature: 'Temperature (K)',
+  Signal: 'Signal',
+  Status: 'Status',
+  'CO2_(umol_mol-1)': 'CO₂ (µmol/mol)',
+  'H2O_(mmol_mol-1)': 'H₂O (mmol/mol)',
+  'Cell_Temp_(C)': 'Cell temp (°C)',
+  'Cell_Pressure_(kPa)': 'Cell pressure (kPa)',
+  'Flow_Rate_(L_min-1)': 'Flow (L/min)',
+  'Sample temperature': 'Sample temp',
+  'Relative humidity': 'Humidity',
+  'Atmospheric pressure': 'Pressure',
+};
+const DEFAULT_CHART_MEASUREMENT = {
+  'NO2-CAPS': 'Concentration',
+};
+const isChartMeasurement = name => String(name || '').toUpperCase() !== 'HHMMSS';
 const toIso = (value) => value ? new Date(value).toISOString() : '';
 const formatScienceLabel = (value) => String(value || '').replaceAll('cm�', 'cm³');
+const recentColumnsFor = (instrumentId, columns) => {
+  const available = new Set(columns);
+  const preferred = (RECENT_READING_COLUMNS[instrumentId] || []).filter(column => available.has(column));
+  if (preferred.length) return preferred.slice(0, 5);
+  return [];
+};
+const formatReadingValue = (value, column) => {
+  if (value == null || value === '') return '—';
+  if (/(status|state|error)/i.test(column)) return String(value);
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  if (numeric !== 0 && Math.abs(numeric) < 0.001) return numeric.toExponential(3);
+  return numeric.toLocaleString(undefined, { maximumFractionDigits: 3 });
+};
 const getInitialTheme = () => {
   if (typeof window === 'undefined') return 'light';
   const saved = window.localStorage.getItem('aq-dashboard-theme');
@@ -56,7 +112,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [activeView, setActiveView] = useState(() => window.location.pathname.startsWith('/aircraft') ? 'aircraft' : 'overview');
+  const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
 
   useEffect(() => {
@@ -66,60 +122,45 @@ export default function Dashboard() {
 
   const selectView = (view) => {
     setActiveView(view);
-    const path = view === 'aircraft' ? '/aircraft' : '/';
+    const path = view === 'aircraft' ? '/lab/aircraft' : '/';
     if (view !== 'api' && window.location.pathname !== path) window.history.replaceState({}, '', path);
   };
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await fetchApi(API_PATHS.summary);
-        if (!response.ok) {
-          throw new Error(`API returned ${response.status}`);
-        }
-        const result = await response.json();
-        setData(result);
-        setError(null);
-      } catch (err) {
-        console.error('Fetch error:', err);
-        setError(err.message || 'API request failed');
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
-    };
-    fetchData();
-    const interval = setInterval(fetchData, 60000);
-    return () => clearInterval(interval);
+  const loadReadings = useCallback(async () => {
+    const results = await Promise.allSettled(INSTRUMENT_IDS.map(async id => {
+      const params = new URLSearchParams({ instrument: id, limit: '1', order: 'desc' });
+      const response = await fetchApi(`${API_PATHS.observations}?${params}`);
+      if (response.status === 404) return { id, ...PUBLIC_INSTRUMENTS[id], latest: null };
+      if (!response.ok) throw new Error(`API returned ${response.status}`);
+      const result = await response.json();
+      const latest = result.rows?.[0] || null;
+      const stamp = latest?.timestamp_iso;
+      return { id, ...PUBLIC_INSTRUMENTS[id], latest,
+        older: Boolean(stamp && Date.now() - new Date(stamp).getTime() > 60 * 60 * 1000) };
+    }));
+    setData(previous => ({ instruments: results.map((result, index) => {
+      if (result.status === 'fulfilled') return result.value;
+      const id = INSTRUMENT_IDS[index];
+      const cached = previous?.instruments?.find(instrument => instrument.id === id);
+      return { ...cached, id, ...PUBLIC_INSTRUMENTS[id], unavailable: true };
+    }) }));
+    setError(results.some(result => result.status === 'rejected') ? 'Some readings could not be refreshed.' : null);
+    setLoading(false);
+    setRefreshing(false);
   }, []);
 
-  const handleRefresh = async () => {
+  useEffect(() => {
+    const initial = setTimeout(loadReadings, 0);
+    const interval = setInterval(loadReadings, 60000);
+    return () => { clearTimeout(initial); clearInterval(interval); };
+  }, [loadReadings]);
+
+  const handleRefresh = () => {
     setRefreshing(true);
-    try {
-      const response = await fetchApi(API_PATHS.summary);
-      if (!response.ok) {
-        throw new Error(`API returned ${response.status}`);
-      }
-      const result = await response.json();
-      setData(result);
-      setError(null);
-    } catch (err) {
-      console.error('Fetch error:', err);
-      setError(err.message || 'API request failed');
-    } finally {
-      setRefreshing(false);
-    }
+    loadReadings();
   };
 
-  const { kpis = {}, instruments = [], refreshTime } = data || {};
-
-  const formatBytes = (bytes) => {
-    if (!bytes || bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-  };
+  const instruments = data?.instruments || INSTRUMENT_IDS.map(id => ({ id, ...PUBLIC_INSTRUMENTS[id] }));
 
   const formatSeattleTime = (isoString) => {
     if (!isoString) return "NO DATA";
@@ -147,7 +188,6 @@ export default function Dashboard() {
             {[
               { id: 'overview', label: 'Conditions' },
               { id: 'review', label: 'Observations' },
-              { id: 'aircraft', label: 'Aircraft' },
               { id: 'api', label: 'Developers' },
             ].map(tab => (
               <button key={tab.id} onClick={() => selectView(tab.id)} className={activeView === tab.id ? 'site-nav-active' : ''}>
@@ -169,28 +209,29 @@ export default function Dashboard() {
 
         {loading && activeView !== 'api' && (
           <div className="dashboard-api-notice dashboard-loading-notice" role="status">
-            Loading the latest research data. You can still use the navigation and filters.
+            Loading the latest air-quality readings…
           </div>
         )}
 
         {!loading && error && activeView !== 'api' && (
           <div className="dashboard-api-notice" role="status">
-            Live dashboard data is temporarily unavailable. API documentation and access requests remain available.
+            Some readings could not be refreshed. Check the time shown beside each reading.
           </div>
         )}
 
         {activeView === 'overview' && (
           <Overview
-            kpis={kpis}
             instruments={instruments}
-            refreshTime={refreshTime}
-            formatBytes={formatBytes}
             formatSeattleTime={formatSeattleTime}
             loading={loading}
           />
         )}
         {activeView === 'review' && <DataReview />}
-        {activeView === 'aircraft' && <AircraftAnalysis />}
+        {activeView === 'aircraft' && FlightsLive && (
+          <Suspense fallback={<div className="loading-screen">Loading aircraft workspace…</div>}>
+            <FlightsLive />
+          </Suspense>
+        )}
         {activeView === 'api' && (
           <ApiSnippets
             theme={theme}
@@ -203,22 +244,8 @@ export default function Dashboard() {
   );
 }
 
-function Overview({ kpis, instruments, refreshTime, formatBytes, formatSeattleTime, loading }) {
-  const [referenceTime] = useState(Date.now);
-  const totalCleanedRows = instruments.reduce((total, instrument) => total + (instrument.silverRows || 0), 0);
-  const hasMtdCost = Number.isFinite(Number(kpis.mtdCost));
-  const mtdCost = hasMtdCost
-    ? Number(kpis.mtdCost).toLocaleString(undefined, {
-        style: 'currency',
-        currency: kpis.costCurrency || 'USD',
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })
-    : null;
-  const ageDays = refreshTime
-    ? Math.max(0, Math.floor((referenceTime - new Date(refreshTime).getTime()) / 86400000))
-    : null;
-  const ageLabel = ageDays == null ? 'Not available' : ageDays === 0 ? 'Today' : `${ageDays} days ago`;
+function Overview({ instruments, formatSeattleTime, loading }) {
+  const [recentInstrument, setRecentInstrument] = useState(null);
 
   return (
     <main className="dashboard-page">
@@ -226,82 +253,162 @@ function Overview({ kpis, instruments, refreshTime, formatBytes, formatSeattleTi
         <div>
           <div className="location-label"><MapPin size={15} /> Des Moines, Washington</div>
           <h1>Air monitoring conditions</h1>
-          <p>Live field-instrument status and quality-checked environmental observations.</p>
-        </div>
-        <div className="updated-label"><span>Last network update</span><strong>{formatSeattleTime(refreshTime)}</strong></div>
-      </section>
-
-      <section className="network-hero">
-        <div className="network-hero-main">
-          <span className="hero-orbit"><Clock size={32} /></span>
-          <div>
-            <span className="hero-kicker">Latest completed upload</span>
-            <h2>{refreshTime ? formatSeattleTime(refreshTime) : loading ? 'Loading upload history…' : 'No upload timestamp available'}</h2>
-            <p>{ageDays != null && ageDays > 1 ? `The dataset is ${ageDays} days old. Check the field-laptop schedule if this is unexpected.` : 'Timestamp reported by the research data pipeline.'}</p>
-          </div>
-        </div>
-        <div className="network-hero-facts">
-          <div><span>Latest source</span><strong>{kpis.lastUpdatedInstrument || '—'}</strong></div>
-          <div><span>Clean observations</span><strong>{totalCleanedRows.toLocaleString()}</strong></div>
-          <div><span>Data age</span><strong>{ageLabel}</strong></div>
+          <p>Explore recent pollutant measurements near Sea-Tac Airport.</p>
         </div>
       </section>
 
-      <section className="kpi-grid" aria-label="Monitoring summary">
-        <KPICard title="Last upload" value={refreshTime ? formatSeattleTime(refreshTime).split(',')[1]?.trim() : 'No data'} unit="Local time" color="blue" Icon={Clock} />
-        {hasMtdCost ? (
-          <KPICard title="Month to date" value={mtdCost} unit="Internal infrastructure" color="violet" Icon={DollarSign} />
-        ) : (
-          <KPICard title="Cleaned rows" value={totalCleanedRows.toLocaleString()} unit="Quality checked" color="violet" Icon={Check} />
-        )}
-        <KPICard title="Latest source" value={kpis.lastUpdatedInstrument || '—'} unit="Reporting instrument" color="green" Icon={Activity} />
-        <KPICard title="Instruments" value={instruments.length.toString()} unit="Connected sources" color="orange" Icon={Database} />
+      <section className="latest-conditions" aria-labelledby="latest-conditions-title">
+        <h2 id="latest-conditions-title">Latest readings</h2>
+        <p className="latest-conditions-copy">Select a pollutant to see recent values. Reading times are shown in Pacific time.</p>
+        <div className="pollutant-grid">
+            {instruments.map(instrument => {
+              const value = instrument.latest?.values?.[instrument.column];
+              const stamp = instrument.latest?.timestamp_iso;
+              const oldReading = instrument.older;
+              return (
+                <button key={instrument.id} type="button" className="pollutant-card"
+                  onClick={() => setRecentInstrument(instrument)}
+                  aria-label={`View latest readings from ${instrument.name}`}>
+                  <span className="pollutant-name">{instrument.name}</span>
+                  <span className="pollutant-detail">{instrument.detail}</span>
+                  <strong className="pollutant-value">{loading ? '…' : formatReadingValue(value, instrument.column)}</strong>
+                  <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
+                  <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
+                    {loading ? 'Loading…' : instrument.latest
+                      ? `${instrument.unavailable ? 'Last available: ' : oldReading ? 'Older reading: ' : ''}${formatSeattleTime(stamp || instrument.latest.timestamp)}`
+                      : instrument.unavailable ? 'Temporarily unavailable' : 'No reading available'}
+                  </span>
+                  <span className="pollutant-open"><Table2 size={14} /> Recent values</span>
+                </button>
+              );
+            })}
+        </div>
       </section>
 
       <TimeSeriesChart />
 
-      <section className="surface-card inventory-card">
-        <div className="section-heading">
-          <div><span className="section-eyebrow">Network inventory</span><h2>Instrument activity</h2></div>
-          <span className="section-meta">{instruments.length} sources</span>
+      {recentInstrument && (
+        <LatestReadingsDialog
+          instrument={recentInstrument}
+          formatSeattleTime={formatSeattleTime}
+          onClose={() => setRecentInstrument(null)}
+        />
+      )}
+    </main>
+  );
+}
+
+function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
+  const [columns, setColumns] = useState([]);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const closeButtonRef = useRef(null);
+  const displayColumns = recentColumnsFor(instrument.id, columns);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const load = async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const params = new URLSearchParams({
+          instrument: instrument.id,
+          limit: '8',
+          order: 'desc',
+        });
+        const response = await fetchApi(`${API_PATHS.observations}?${params.toString()}`, {
+          signal: controller.signal,
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          if (response.status === 404) throw new Error('No readings are available for this pollutant yet.');
+          throw new Error(result.error || `API returned ${response.status}`);
+        }
+        setColumns(result.columns || []);
+        setRows(result.rows || []);
+      } catch (err) {
+        if (err.name !== 'AbortError') setError(err.message || 'Could not load recent readings.');
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    };
+    load();
+    closeButtonRef.current?.focus();
+    return () => controller.abort();
+  }, [instrument.id]);
+
+  useEffect(() => {
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="readings-dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className={`readings-dialog ${displayColumns.length > 2 ? 'readings-dialog-wide' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="readings-dialog-title"
+        onMouseDown={event => event.stopPropagation()}
+      >
+        <div className="readings-dialog-header">
+          <div>
+            <span className="section-eyebrow">Recent readings</span>
+            <h2 id="readings-dialog-title">{instrument.name}</h2>
+            <p>Newest reading first · Pacific time</p>
+          </div>
+          <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="Close recent readings">
+            <X size={19} />
+          </button>
         </div>
 
-        <div className="table-scroll"><table className="data-table">
-          <thead>
-            <tr>
-              <th>Instrument</th><th>Raw rows</th><th>Cleaned rows</th><th>Last update</th>
-            </tr>
-          </thead>
-          <tbody>
-            {instruments.map(instrument => {
-              return (
-                <tr key={instrument.id}>
-                  <td>
-                    <div className="instrument-name">
-                      <div>
-                        <strong>{instrument.name}</strong><small>{instrument.id}</small>
-                      </div>
-                    </div>
-                  </td>
-                  <td><strong>{(instrument.bronzeRows || 0).toLocaleString()}</strong><small>{formatBytes(instrument.bronzeSize)}</small>
-                  </td>
-                  <td><strong>{instrument.silverRows != null ? instrument.silverRows.toLocaleString() : '—'}</strong>
-                    {instrument.silverRows != null && instrument.bronzeRows > instrument.silverRows && (
-                      <small className="filtered-note"
-                        title="Raw rows not carried forward: duplicates, schema mismatches, and non-approved source files"
-                      >
-                        {(instrument.bronzeRows - instrument.silverRows).toLocaleString()} filtered
-                      </small>
-                    )}
-                  </td>
-                  <td>{formatSeattleTime(instrument.lastUpdate)}</td>
+        {loading && (
+          <div className="readings-dialog-state" role="status">
+            <RefreshCw size={18} className="animate-spin" /> Loading recent readings…
+          </div>
+        )}
+        {!loading && error && (
+          <div className="readings-dialog-state readings-dialog-error" role="alert">
+            <AlertTriangle size={18} /> {error}
+          </div>
+        )}
+        {!loading && !error && !rows.length && (
+          <div className="readings-dialog-state">No recent readings are available.</div>
+        )}
+        {!loading && !error && rows.length > 0 && (
+          <div className="readings-table-scroll">
+            <table className="readings-table">
+              <thead>
+                <tr>
+                  <th>Recorded (Pacific time)</th>
+                  {displayColumns.map(column => (
+                    <th key={column}>{RECENT_READING_LABELS[column] || formatScienceLabel(column)}</th>
+                  ))}
                 </tr>
-              );
-            })}
-          </tbody>
-        </table></div>
+              </thead>
+              <tbody>
+                {rows.map(row => (
+                  <tr key={row.row_key}>
+                    <td className="readings-time">{formatSeattleTime(row.timestamp_iso || row.timestamp)}</td>
+                    {displayColumns.map(column => (
+                      <td key={column}>{formatReadingValue(row.values?.[column], column)}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="readings-dialog-footer">
+          <span>Latest available measurements</span>
+          <button type="button" onClick={onClose}>Close</button>
+        </div>
       </section>
-    </main>
+    </div>
   );
 }
 
@@ -317,7 +424,7 @@ function DataReview() {
   const [error, setError] = useState('');
   const recordsRequestId = useRef(0);
 
-  const displayColumns = columns.slice(0, 8);
+  const displayColumns = recentColumnsFor(instrument, columns);
 
   const loadRecordsFor = useCallback(async ({
     cursor = 0,
@@ -349,7 +456,7 @@ function DataReview() {
         setColumns(result.columns || []);
         setRows(result.rows || []);
         setNextCursor(result.next_cursor ?? null);
-        setMessage(`${auto ? 'Showing latest' : 'Loaded'} ${(result.rows || []).length} cleaned records.`);
+        setMessage(auto ? 'Showing recent readings, newest first.' : 'Readings loaded.');
       }
     } catch (err) {
       if (requestId === recordsRequestId.current) {
@@ -381,9 +488,9 @@ function DataReview() {
     <main className="dashboard-page review-page">
       <section className="location-heading compact-heading">
         <div>
-          <div className="location-label"><Database size={15} /> Quality-checked data</div>
+          <div className="location-label"><Database size={15} /> Recorded measurements</div>
           <h1>Observation explorer</h1>
-          <p>Browse recent cleaned records or focus on a specific time window.</p>
+          <p>Browse recent pollutant readings or explore a specific time window.</p>
         </div>
         <div className="auth-banner auth-off"><Lock size={15} /> Public read-only view</div>
       </section>
@@ -392,7 +499,7 @@ function DataReview() {
         <div className="filter-grid">
           <Control label="Instrument">
             <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name}</option>)}
             </select>
           </Control>
           <Control label="Start Time (filter)">
@@ -420,11 +527,10 @@ function DataReview() {
       <section className="surface-card observation-card">
         <div className="section-heading">
           <div>
-            <span className="section-eyebrow">Cleaned records</span>
-            <h2>{instrument} observations</h2>
+            <span className="section-eyebrow">Recent readings</span>
+            <h2>{PUBLIC_INSTRUMENTS[instrument]?.name || instrument}</h2>
           </div>
           <div className="section-actions">
-            <span className="section-meta">{rows.length} loaded</span>
             {nextCursor !== null && (
               <button onClick={() => loadRecords(nextCursor)} className="action-button"><RefreshCw size={14} /> Next Page</button>
             )}
@@ -437,7 +543,7 @@ function DataReview() {
               <tr>
                 <th className="review-th">Status</th>
                 <th className="review-th">Timestamp</th>
-                {displayColumns.map(column => <th key={column} className="review-th">{column}</th>)}
+                {displayColumns.map(column => <th key={column} className="review-th">{RECENT_READING_LABELS[column] || formatScienceLabel(column)}</th>)}
               </tr>
             </thead>
             <tbody>
@@ -455,7 +561,7 @@ function DataReview() {
                     </td>
                     <td className="mono-cell">{row.timestamp || 'No timestamp'}</td>
                     {displayColumns.map(column => (
-                      <td key={column} className="mono-cell">{row.values[column]}</td>
+                      <td key={column} className="mono-cell">{formatReadingValue(row.values[column], column)}</td>
                     ))}
                   </tr>
                 );
@@ -1011,7 +1117,6 @@ function TimeSeriesChart() {
   const [measurement, setMeasurement] = useState('');
   const [measurements, setMeasurements] = useState([]);
   const [series, setSeries] = useState([]);
-  const [seriesMeta, setSeriesMeta] = useState({});
   const [start, setStart] = useState('');
   const [end, setEnd] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1023,7 +1128,6 @@ function TimeSeriesChart() {
     const requestId = ++seriesRequestId.current;
     setLoading(true);
     setSeries([]);
-    setSeriesMeta({});
     try {
       const params = new URLSearchParams({ instrument: inst });
       if (meas) params.set('measurement', meas);
@@ -1034,15 +1138,14 @@ function TimeSeriesChart() {
       // A slower response for the previously selected measurement must never
       // replace the data (and Y-axis scale) for the current selection.
       if (requestId === seriesRequestId.current && res.ok) {
-        setMeasurements(payload.measurements || []);
-        setMeasurement(payload.measurement || '');
-        setSeries(payload.series || []);
-        setSeriesMeta({
-          sourceRows: payload.source_rows || 0,
-          plottedRows: payload.plotted_rows || 0,
-          skippedSchemaMismatch: payload.skipped_schema_mismatch || 0,
-          skippedInvalidMeasurement: payload.skipped_invalid_measurement || 0,
-        });
+        const publicColumns = RECENT_READING_COLUMNS[inst] || [];
+        const availableMeasurements = (payload.measurements || []).filter(name => isChartMeasurement(name) && publicColumns.includes(name));
+        const selectedMeasurement = isChartMeasurement(payload.measurement)
+          ? payload.measurement
+          : '';
+        setMeasurements(availableMeasurements);
+        setMeasurement(selectedMeasurement);
+        setSeries(selectedMeasurement ? (payload.series || []) : []);
       }
     } catch {
       /* the empty state already replaces data from the previous selection */
@@ -1087,7 +1190,7 @@ function TimeSeriesChart() {
         link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
       } else if (res.status === 404) {
-        setExportMessage(`No cleaned CSV is available for ${instrument} yet. It will appear after the next Silver processing run.`);
+        setExportMessage('No measurements are available to download for this pollutant yet.');
       } else {
         setExportMessage(payload.error || 'The cleaned CSV could not be prepared. Please try again.');
       }
@@ -1113,12 +1216,12 @@ function TimeSeriesChart() {
   return (
     <section className="surface-card chart-card">
       <div className="section-heading chart-heading">
-        <div><span className="section-eyebrow">Hourly series</span><h2>Explore measurements over time</h2></div>
+        <div><span className="section-eyebrow">Hourly averages</span><h2>Explore readings over time</h2></div>
         <div className="section-actions">
           <button onClick={downloadCSV} disabled={!series.length} className="action-button action-secondary" title="Hourly-averaged values shown in the chart">
             <Download size={14} /> Chart CSV
           </button>
-          <button onClick={downloadExport} disabled={exportLoading} className="action-button action-secondary" title="Cleaned observations for the selected dates; defaults to the latest 14 days and never exceeds 31 days">
+          <button onClick={downloadExport} disabled={exportLoading} className="action-button action-secondary" title="Download measurements for the selected dates; defaults to the latest 14 days">
             <Download size={14} /> {exportLoading ? 'Preparing…' : 'Export CSV'}
           </button>
         </div>
@@ -1133,13 +1236,14 @@ function TimeSeriesChart() {
           <Control label="Instrument">
             <select value={instrument} onChange={event => {
               const nextInstrument = event.target.value;
+              const nextMeasurement = DEFAULT_CHART_MEASUREMENT[nextInstrument] || '';
               setInstrument(nextInstrument);
-              setMeasurement('');
+              setMeasurement(nextMeasurement);
               setMeasurements([]);
               setExportMessage('');
-              fetchSeries({ inst: nextInstrument, s: start, e: end });
+              fetchSeries({ inst: nextInstrument, meas: nextMeasurement, s: start, e: end });
             }} className="control-input">
-              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{id}</option>)}
+              {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name}</option>)}
             </select>
           </Control>
           <Control label="Measurement">
@@ -1148,7 +1252,7 @@ function TimeSeriesChart() {
               onChange={event => { setMeasurement(event.target.value); fetchSeries({ inst: instrument, meas: event.target.value, s: start, e: end }); }}
               className="control-input measurement-input"
             >
-              {measurements.map(name => <option key={name} value={name}>{formatScienceLabel(name)}</option>)}
+              {measurements.map(name => <option key={name} value={name}>{RECENT_READING_LABELS[name] || formatScienceLabel(name)}</option>)}
             </select>
           </Control>
           <Control label="Start">
@@ -1187,13 +1291,8 @@ function TimeSeriesChart() {
       )}
 
       <div className="chart-caption">
-        <span>{formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly mean</span><span>{series.length} points</span>
+        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly average · chart times in UTC</span>
       </div>
-      {seriesMeta.skippedSchemaMismatch > 0 && (
-        <div className="chart-warning">
-          Ignored {seriesMeta.skippedSchemaMismatch.toLocaleString()} {instrument} rows with mismatched column count for this chart.
-        </div>
-      )}
     </section>
   );
 }
@@ -1204,16 +1303,5 @@ function Control({ label, children }) {
       <span>{label}</span>
       {children}
     </label>
-  );
-}
-
-function KPICard({ title, value, unit, color, Icon }) {
-  return (
-    <article className={`kpi-card kpi-${color}`}>
-      <span className="kpi-icon"><Icon size={20} /></span>
-      <span className="kpi-title">{title}</span>
-      <strong>{value}</strong>
-      <small>{unit}</small>
-    </article>
   );
 }

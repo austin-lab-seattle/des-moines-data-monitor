@@ -2,10 +2,13 @@ import csv
 import hmac
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -33,6 +36,7 @@ API_ROUTES = {
     "timeseries": "/air-quality/v1/timeseries",
     "observations": "/air-quality/v1/observations",
     "observations_export": "/air-quality/v1/observations/export",
+    "flights": "/air-quality/v1/flights",
     "access_requests": "/air-quality/v1/access-requests",
     "verify_access": "/air-quality/v1/access-requests/verify",
 }
@@ -1359,7 +1363,7 @@ MEASUREMENT_BLOCKLIST = (
     "dma", "ramping", "transit", "adjustment", "dilution", "density", "sheath",
     "impactor", "size", "scan", "polarity", "direction", "neutralizer",
     "classifier", "detector", "communication", "status", "state", "reserved", "d50",
-    "inlet", "counting", "channel", "retrace", "pc_minus", "raw ",
+    "inlet", "counting", "channel", "retrace", "pc_minus", "raw ", "hhmmss",
 )
 
 
@@ -1693,6 +1697,220 @@ def get_mtd_cost():
     return data
 
 
+# ---------------------------------------------------------------------------
+# Live aircraft overhead (OpenSky Network)
+# ---------------------------------------------------------------------------
+# A simple live view: current aircraft in a box around the instrument, each with
+# the horizontal distance from the instrument and the operating carrier derived
+# from the callsign. Reported altitude stays as altitude above mean sea level and
+# is never treated as height above the instrument.
+#
+# OpenSky access: anonymous works (most-recent states, ~10s resolution, limited
+# daily credits). Set OPENSKY_CLIENT_ID / OPENSKY_CLIENT_SECRET on the Lambda to
+# use the higher authenticated quota (OAuth2 client-credentials). When OpenSky
+# cannot be reached the endpoint returns clearly labeled sample aircraft so the
+# map still renders; sample data is always marked is_sample=true and must never
+# be presented as real observations.
+
+FLIGHTS_DEFAULT_LAT = float(os.environ.get("INSTRUMENT_LAT", "47.422703"))
+FLIGHTS_DEFAULT_LON = float(os.environ.get("INSTRUMENT_LON", "-122.297714"))
+FLIGHTS_DEFAULT_RADIUS_KM = float(os.environ.get("FLIGHTS_RADIUS_KM", "8"))
+FLIGHTS_CACHE_TTL_SECONDS = 15
+
+OPENSKY_STATES_URL = "https://opensky-network.org/api/states/all"
+OPENSKY_TOKEN_URL = (
+    "https://auth.opensky-network.org/auth/realms/opensky-network"
+    "/protocol/openid-connect/token"
+)
+OPENSKY_CLIENT_ID = os.environ.get("OPENSKY_CLIENT_ID")
+OPENSKY_CLIENT_SECRET = os.environ.get("OPENSKY_CLIENT_SECRET")
+
+_flights_cache = {}
+_opensky_token_cache = {"value": None, "expires_at": 0.0}
+
+# ICAO airline designators (callsign prefix) mapped to a readable carrier name.
+# Covers the common SeaTac operators plus a few others; unknown prefixes fall
+# back to the raw three-letter code.
+AIRLINE_CODES = {
+    "ASA": "Alaska Airlines", "QXE": "Horizon Air", "DAL": "Delta Air Lines",
+    "UAL": "United Airlines", "AAL": "American Airlines", "SWA": "Southwest Airlines",
+    "JBU": "JetBlue", "NKS": "Spirit Airlines", "FFT": "Frontier Airlines",
+    "HAL": "Hawaiian Airlines", "SKW": "SkyWest", "EDV": "Endeavor Air",
+    "RPA": "Republic Airways", "ASH": "Mesa Airlines", "UPS": "UPS Airlines",
+    "FDX": "FedEx Express", "GTI": "Atlas Air", "CKS": "Kalitta Air",
+    "ACA": "Air Canada", "WJA": "WestJet", "AMX": "Aeromexico", "VOI": "Volaris",
+    "KAL": "Korean Air", "ANA": "All Nippon Airways", "JAL": "Japan Airlines",
+    "EVA": "EVA Air", "CPA": "Cathay Pacific", "CAL": "China Airlines",
+    "QFA": "Qantas", "BAW": "British Airways", "DLH": "Lufthansa",
+    "AFR": "Air France", "KLM": "KLM", "ICE": "Icelandair",
+}
+
+
+def carrier_from_callsign(callsign):
+    """Map an ICAO callsign prefix to a carrier name, or None for GA/unknown."""
+    code = (callsign or "").strip().upper()
+    if len(code) >= 3 and code[:3].isalpha():
+        return AIRLINE_CODES.get(code[:3], code[:3])
+    return None
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle horizontal distance in kilometres."""
+    radius_km = 6371.0088
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    return 2 * radius_km * math.asin(min(1.0, math.sqrt(a)))
+
+
+def flights_bounding_box(lat, lon, radius_km):
+    lat_delta = radius_km / 111.0
+    lon_delta = radius_km / (111.0 * max(0.01, math.cos(math.radians(lat))))
+    return (lat - lat_delta, lon - lon_delta, lat + lat_delta, lon + lon_delta)
+
+
+def opensky_access_token():
+    """Cached OAuth2 client-credentials token, or None if no credentials set."""
+    if not (OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET):
+        return None
+    now = time.time()
+    if _opensky_token_cache["value"] and now < _opensky_token_cache["expires_at"]:
+        return _opensky_token_cache["value"]
+    body = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": OPENSKY_CLIENT_ID,
+        "client_secret": OPENSKY_CLIENT_SECRET,
+    }).encode("utf-8")
+    request = urllib.request.Request(
+        OPENSKY_TOKEN_URL, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as handle:
+        payload = json.loads(handle.read().decode("utf-8"))
+    _opensky_token_cache["value"] = payload["access_token"]
+    _opensky_token_cache["expires_at"] = now + min(1800, int(payload.get("expires_in", 1800))) - 60
+    return _opensky_token_cache["value"]
+
+
+def fetch_opensky_states(bounding_box):
+    lamin, lomin, lamax, lomax = bounding_box
+    query = urllib.parse.urlencode({
+        "lamin": round(lamin, 4), "lomin": round(lomin, 4),
+        "lamax": round(lamax, 4), "lomax": round(lomax, 4),
+    })
+    headers = {"User-Agent": "des-moines-air-quality-monitor"}
+    token = opensky_access_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(f"{OPENSKY_STATES_URL}?{query}", headers=headers)
+    with urllib.request.urlopen(request, timeout=12) as handle:
+        return json.loads(handle.read().decode("utf-8"))
+
+
+def parse_opensky_states(raw, lat, lon, radius_km):
+    flights = []
+    for state in raw.get("states") or []:
+        if len(state) < 11:
+            continue
+        longitude, latitude = state[5], state[6]
+        if latitude is None or longitude is None:
+            continue
+        if state[8]:  # on_ground: parked or taxiing at the airport, not overhead
+            continue
+        distance_km = round(haversine_km(lat, lon, latitude, longitude), 2)
+        if distance_km > radius_km:
+            continue
+        callsign = (state[1] or "").strip() or None
+        flights.append({
+            "icao24": state[0],
+            "callsign": callsign,
+            "carrier": carrier_from_callsign(callsign),
+            "origin_country": state[2],
+            "latitude": latitude,
+            "longitude": longitude,
+            "baro_altitude_m": state[7],
+            "geo_altitude_m": state[13] if len(state) > 13 else None,
+            "on_ground": bool(state[8]),
+            "velocity_ms": state[9],
+            "heading_deg": state[10],
+            "vertical_rate_ms": state[11],
+            "distance_km": distance_km,
+        })
+    flights.sort(key=lambda item: item["distance_km"])
+    return flights
+
+
+def sample_flights(lat, lon, radius_km):
+    """Clearly labeled placeholder aircraft. Never real observations."""
+    seeds = [
+        ("ASA123", "Alaska Airlines", 0.02, -0.015, 1200.0, 70.0),
+        ("DAL456", "Delta Air Lines", -0.03, 0.025, 2400.0, 250.0),
+        ("SWA789", "Southwest Airlines", 0.04, 0.03, 3100.0, 300.0),
+    ]
+    flights = []
+    for callsign, carrier, d_lat, d_lon, altitude, heading in seeds:
+        latitude, longitude = lat + d_lat, lon + d_lon
+        distance_km = round(haversine_km(lat, lon, latitude, longitude), 2)
+        if distance_km > radius_km:
+            continue
+        flights.append({
+            "icao24": "sample", "callsign": callsign, "carrier": carrier,
+            "origin_country": "Sample", "latitude": latitude, "longitude": longitude,
+            "baro_altitude_m": altitude, "geo_altitude_m": altitude,
+            "on_ground": False, "velocity_ms": 180.0, "heading_deg": heading,
+            "vertical_rate_ms": 0.0, "distance_km": distance_km,
+        })
+    flights.sort(key=lambda item: item["distance_km"])
+    return flights
+
+
+def get_flights(event):
+    params = query_params(event)
+
+    def _coordinate(name, default):
+        try:
+            return float(params[name])
+        except (KeyError, TypeError, ValueError):
+            return default
+
+    lat = _coordinate("lat", FLIGHTS_DEFAULT_LAT)
+    lon = _coordinate("lon", FLIGHTS_DEFAULT_LON)
+    radius_km = max(1.0, min(100.0, _coordinate("radius_km", FLIGHTS_DEFAULT_RADIUS_KM)))
+
+    cache_key = f"{lat:.4f},{lon:.4f},{radius_km:.1f}"
+    now = time.time()
+    cached = _flights_cache.get(cache_key)
+    if cached and now - cached["ts"] < FLIGHTS_CACHE_TTL_SECONDS:
+        return response(200, cached["data"])
+
+    bounding_box = flights_bounding_box(lat, lon, radius_km)
+    source, note = "opensky", None
+    try:
+        flights = parse_opensky_states(fetch_opensky_states(bounding_box), lat, lon, radius_km)
+    except Exception as exc:
+        print(f"OpenSky fetch failed: {exc}")
+        source = "sample"
+        note = "Live OpenSky data is unavailable; showing clearly labeled sample aircraft."
+        flights = sample_flights(lat, lon, radius_km)
+
+    data = {
+        "instrument": {"latitude": lat, "longitude": lon},
+        "radius_km": radius_km,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "is_sample": source == "sample",
+        "altitude_note": "Reported altitude is above mean sea level, not height above the instrument.",
+        "attribution": "Aircraft data from The OpenSky Network, https://opensky-network.org",
+        "count": len(flights),
+        "flights": flights,
+    }
+    if note:
+        data["note"] = note
+    _flights_cache[cache_key] = {"ts": now, "data": data}
+    return response(200, data)
+
+
 def lambda_handler(event, context):
     method, path = get_route(event)
     if method == "OPTIONS":
@@ -1786,6 +2004,9 @@ def lambda_handler(event, context):
         if auth_response:
             return auth_response
         return get_silver_records(event)
+
+    if route_matches(path, API_ROUTES["flights"]) and method == "GET":
+        return get_flights(event)
 
     if not route_matches(path, API_ROUTES["summary"]):
         return response(404, {"error": "Route not found"})

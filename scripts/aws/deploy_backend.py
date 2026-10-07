@@ -659,6 +659,7 @@ canonical_public_route_keys = [
     "GET /air-quality/v1/timeseries",
     "GET /air-quality/v1/observations",
     "GET /air-quality/v1/observations/export",
+    "GET /air-quality/v1/flights",
 ]
 public_access_route_keys = [
     "POST /air-quality/v1/access-requests",
