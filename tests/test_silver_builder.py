@@ -26,6 +26,28 @@ silver_builder = load_module()
 
 
 class SilverBuilderTests(unittest.TestCase):
+    def test_duplicate_serial_uploads_do_not_duplicate_silver_samples(self):
+        row = '2026-10-07 00:00:00\t000000,10.255,1411.510,747.55,301.87,68031,1.3365,10104,1374.746'
+        _header, rows, _metadata, total, duplicates, mismatches = silver_builder.consolidate(
+            'NO2-CAPS', [('NO2-CAPS/bronze/a.txt', row), ('NO2-CAPS/bronze/b.txt', row)]
+        )
+        self.assertEqual((2, 1, 0), (total, duplicates, mismatches))
+        self.assertEqual(1, len(rows))
+
+    def test_invalid_neph_reading_does_not_fabricate_pm25_from_intercept(self):
+        for value in ['', 'NaN', 'Infinity', 'error']:
+            header, rows = silver_builder.transform_silver(
+                "NEPH-PM25", "Date_Time,Scat coefficient", [f"2026-10-07 00:00:00,{value}"]
+            )
+            with self.subTest(value=value):
+                self.assertEqual(['', ''], silver_builder.split_fields(rows[0])[-2:])
+
+    def test_nonfinite_no2_values_never_enter_normalized_silver(self):
+        for value in ['NaN', 'Infinity', '-Infinity']:
+            self.assertIsNone(silver_builder.parse_raw_no2(
+                f"000000,{value},1,747,301,100,1,0,1", silver_builder.parse_local_timestamp("2026-10-07 00:00:00")
+            ))
+
     def test_neph_payload_under_smps_prefix_is_not_converted_to_smps(self):
         neph = (
             "2026-09-17 13:13:50, 8.174, 25.114, 26.847, "

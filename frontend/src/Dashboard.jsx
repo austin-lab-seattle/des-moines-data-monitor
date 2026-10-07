@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
-import { AlertTriangle, Check, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { formatReadingValue, observationTime } from './dataPresentation.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -93,10 +94,6 @@ const DEFAULT_CHART_MEASUREMENT = {
 const isChartMeasurement = name => String(name || '').toUpperCase() !== 'HHMMSS';
 // timestamp_iso contains UTC from the API, including older responses without
 // an explicit offset. Raw instrument timestamps are retained as a fallback.
-const observationTime = row => {
-  const iso = row?.timestamp_iso;
-  return iso ? (/(Z|[+-]\d{2}:?\d{2})$/i.test(iso) ? iso : `${iso}Z`) : row?.timestamp;
-};
 const toIso = (value) => value ? new Date(value).toISOString() : '';
 const formatScienceLabel = (value) => String(value || '').replaceAll('cm�', 'cm³');
 const recentColumnsFor = (instrumentId, columns) => {
@@ -104,14 +101,6 @@ const recentColumnsFor = (instrumentId, columns) => {
   const preferred = (RECENT_READING_COLUMNS[instrumentId] || []).filter(column => available.has(column));
   if (preferred.length) return preferred.slice(0, 5);
   return [];
-};
-const formatReadingValue = (value, column) => {
-  if (value == null || value === '') return '—';
-  if (/(status|state|error)/i.test(column)) return String(value);
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return String(value);
-  if (numeric !== 0 && Math.abs(numeric) < 0.001) return numeric.toExponential(3);
-  return numeric.toLocaleString(undefined, { maximumFractionDigits: 3 });
 };
 const getInitialTheme = () => {
   if (typeof window === 'undefined') return 'light';
@@ -435,6 +424,7 @@ function DataReview() {
   const [columns, setColumns] = useState([]);
   const [rows, setRows] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
+  const appliedFilters = useRef({ selectedStart: '', selectedEnd: '' });
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -451,6 +441,8 @@ function DataReview() {
   }) => {
     const requestId = ++recordsRequestId.current;
     setLoading(true);
+    setRows([]);
+    setNextCursor(null);
     setError('');
     setMessage('');
     try {
@@ -468,10 +460,12 @@ function DataReview() {
       if (!response.ok) {
         throw new Error(result.error || `API returned ${response.status}`);
       }
+      if (result.instrument_id !== selectedInstrument) throw new Error('The readings do not match the selected instrument.');
       if (requestId === recordsRequestId.current) {
         setColumns(result.columns || []);
         setRows(result.rows || []);
         setNextCursor(result.next_cursor ?? null);
+        appliedFilters.current = { selectedStart, selectedEnd };
         setMessage(auto ? 'Showing recent readings, newest first.' : 'Readings loaded.');
       }
     } catch (err) {
@@ -514,7 +508,12 @@ function DataReview() {
       <section className="surface-card filter-card">
         <div className="filter-grid">
           <Control label="Instrument">
-            <select value={instrument} onChange={event => setInstrument(event.target.value)} className="control-input">
+            <select value={instrument} onChange={event => {
+              recordsRequestId.current += 1;
+              setRows([]);
+              setNextCursor(null);
+              setInstrument(event.target.value);
+            }} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} — {INSTRUMENT_NAMES[id]}</option>)}
             </select>
           </Control>
@@ -548,7 +547,7 @@ function DataReview() {
           </div>
           <div className="section-actions">
             {nextCursor !== null && (
-              <button onClick={() => loadRecords(nextCursor)} className="action-button"><RefreshCw size={14} /> Next Page</button>
+              <button disabled={loading} onClick={() => loadRecordsFor({ cursor: nextCursor, selectedInstrument: instrument, ...appliedFilters.current })} className="action-button"><ArrowRight size={14} /> Next Page</button>
             )}
           </div>
         </div>
@@ -584,7 +583,7 @@ function DataReview() {
               })}
               {!rows.length && (
                 <tr>
-                  <td className="empty-cell" colSpan={displayColumns.length + 2}>No observations match this selection.</td>
+                  <td className="empty-cell" colSpan={displayColumns.length + 2}>{loading ? 'Loading readings…' : error ? 'Readings could not be loaded.' : 'No observations match this selection.'}</td>
                 </tr>
               )}
             </tbody>
@@ -1138,11 +1137,13 @@ function TimeSeriesChart() {
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [exportMessage, setExportMessage] = useState('');
+  const [seriesError, setSeriesError] = useState('');
   const seriesRequestId = useRef(0);
 
   const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
     const requestId = ++seriesRequestId.current;
     setLoading(true);
+    setSeriesError('');
     setSeries([]);
     try {
       const params = new URLSearchParams({ instrument: inst });
@@ -1151,6 +1152,14 @@ function TimeSeriesChart() {
       if (e) params.set('end', toIso(e));
       const res = await fetchApi(`${API_PATHS.timeseries}?${params.toString()}`);
       const payload = await res.json();
+      if (requestId !== seriesRequestId.current) return;
+      if (!res.ok) throw new Error(payload.error || 'Measurements could not be loaded.');
+      if (payload.instrument_id !== inst || (meas && payload.measurement !== meas)) {
+        throw new Error('The response does not match the selected instrument and measurement.');
+      }
+      if ((payload.series || []).some(point => !Number.isFinite(point.v) || !/(Z|[+-]\d{2}:?\d{2})$/i.test(point.t) || !Number.isFinite(Date.parse(point.t)))) {
+        throw new Error('Invalid chart values or timestamps were returned.');
+      }
       // A slower response for the previously selected measurement must never
       // replace the data (and Y-axis scale) for the current selection.
       if (requestId === seriesRequestId.current && res.ok) {
@@ -1164,8 +1173,8 @@ function TimeSeriesChart() {
         setMeasurement(selectedMeasurement);
         setSeries(selectedMeasurement ? (payload.series || []) : []);
       }
-    } catch {
-      /* the empty state already replaces data from the previous selection */
+    } catch (err) {
+      if (requestId === seriesRequestId.current) setSeriesError(err.message || 'Measurements could not be loaded.');
     } finally {
       if (requestId === seriesRequestId.current) setLoading(false);
     }
@@ -1287,6 +1296,8 @@ function TimeSeriesChart() {
 
       {loading ? (
         <div className="chart-empty">Loading measurements…</div>
+      ) : seriesError ? (
+        <div className="chart-empty" role="alert">{seriesError}</div>
       ) : series.length ? (
         <div className="chart-plot"><ResponsiveContainer width="100%" height={320}>
           <LineChart key={`${instrument}:${measurement}`} data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
@@ -1298,9 +1309,9 @@ function TimeSeriesChart() {
               labelStyle={{ color: 'var(--text-muted)' }}
               itemStyle={{ color: 'var(--brand)' }}
               labelFormatter={fmtLabel}
-              formatter={value => [fmtNumber(value), formatScienceLabel(measurement)]}
+              formatter={value => [formatReadingValue(value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
             />
-            <Line type="monotone" dataKey="v" stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
+            <Line type="linear" dataKey="v" stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer></div>
       ) : (
@@ -1308,7 +1319,7 @@ function TimeSeriesChart() {
       )}
 
       <div className="chart-caption">
-        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly average · chart times in UTC</span>
+        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly sample average · chart times in UTC</span>
       </div>
     </section>
   );

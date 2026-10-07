@@ -47,6 +47,9 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Install browser for public dashboard checks
         run: npx playwright install --with-deps chromium
       - name: Verify public dashboard behavior in the production build

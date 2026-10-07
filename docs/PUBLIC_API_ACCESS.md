@@ -103,7 +103,22 @@ print(payload["kpis"]["siteName"])
 GET /air-quality/v1/keyed/timeseries
 ```
 
-Returns hourly mean values for one measurement from the cleaned records.
+Returns hourly sample means for one measurement from the cleaned Silver records.
+These are arithmetic means of the finite readings in each UTC bucket, not
+time-weighted averages and not a separately stored Gold dataset. Zero and
+negative readings are retained; blank/non-finite values, malformed rows and
+invalid timestamps are excluded. Empty hours are omitted, never filled with
+made-up readings. Each point includes `n` (its sample count); `v` is rounded to
+three decimal places. The response identifies `aggregation: "sample_mean"`.
+Unknown/time-only measurement requests and invalid time ranges return HTTP 400
+instead of silently substituting another column or ignoring a filter.
+
+Recent observations are individual Silver values, with their original decimal
+precision. Pagination orders by observation timestamp, not source-file order,
+and `timestamp_iso` explicitly identifies UTC. Historical LI-COR records marked
+`inferred_from_putty_start_1s` have estimated timestamps; CI cannot establish
+instrument calibration, historical clock accuracy, or the scientific validity
+of the nephelometer regression. Those require field-team reference checks.
 
 Parameters:
 

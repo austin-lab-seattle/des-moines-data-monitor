@@ -39,6 +39,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false } = 
     if (url.pathname.endsWith('/timeseries') && instrument) {
       // Include a legacy HHMMSS option: the public UI must still hide it.
       await route.fulfill({ json: {
+        instrument_id: id,
         measurement: url.searchParams.get('measurement') || instrument.columns[0], measurements: instrument.columns,
         series: [{ t: '2026-10-07T07:00:00Z', v: 9000 }],
       } });
@@ -178,4 +179,50 @@ test('mobile Conditions keeps instrument names and popup within the screen', asy
   const width = await page.getByRole('dialog').evaluate(element => element.getBoundingClientRect().width);
   expect(width).toBeLessThanOrEqual(390);
   expect(errors).toEqual([]);
+});
+
+test('Observations pagination uses a forward arrow and the applied filters', async ({ page }) => {
+  const errors = await mockApi(page);
+  const observationRequests = [];
+  await page.route('**/air-quality/v1/observations?**', async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('limit') !== '100') return route.fallback();
+    observationRequests.push(url);
+    const cursor = Number(url.searchParams.get('cursor'));
+    await route.fulfill({ json: {
+      instrument_id: 'NO2-CAPS', columns: ['Concentration'], next_cursor: cursor === 0 ? 1 : null,
+      rows: [{ row_key: `row-${cursor}`, timestamp: '2026-10-07 00:00:00', values: { Concentration: cursor ? '9.87654321' : '10.123456789' }, status: 'normal' }],
+    } });
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Observations', exact: true }).click();
+  const nextPage = page.getByRole('button', { name: 'Next Page', exact: true });
+  await expect(nextPage).toBeVisible();
+  await expect(nextPage.locator('.lucide-arrow-right')).toHaveCount(1);
+  await expect(nextPage.locator('.lucide-refresh-cw')).toHaveCount(0);
+  // Edited-but-not-applied filter controls must not change a paginated query.
+  await page.getByLabel('Start Time (filter)', { exact: true }).fill('2026-10-06T00:00');
+  await nextPage.click();
+  await expect(page.locator('.review-table tbody')).toContainText('9.87654321');
+  expect(observationRequests.at(-1).searchParams.get('cursor')).toBe('1');
+  expect(observationRequests.at(-1).searchParams.has('start')).toBe(false);
+  expect(errors).toEqual([]);
+});
+
+test('changing the Observations instrument clears old rows before the next response', async ({ page }) => {
+  await mockApi(page);
+  let completeCo2;
+  const gate = new Promise(resolve => { completeCo2 = resolve; });
+  await page.route('**/air-quality/v1/observations?**', async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('instrument') === 'CO2-LICOR' && url.searchParams.get('limit') === '100') await gate;
+    return route.fallback();
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Observations', exact: true }).click();
+  await expect(page.locator('.review-table tbody')).toContainText('10.255');
+  await page.locator('.filter-card select').selectOption('CO2-LICOR');
+  await expect(page.locator('.review-table tbody')).not.toContainText('10.255');
+  completeCo2();
+  await expect(page.locator('.review-table tbody')).toContainText('420');
 });
