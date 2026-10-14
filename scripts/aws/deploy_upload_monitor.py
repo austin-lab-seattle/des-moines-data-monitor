@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 
 
@@ -43,7 +44,9 @@ if aws.client("sts").get_caller_identity()["Account"] != ACCOUNT_ID:
     raise RuntimeError("Refusing to deploy into an unexpected AWS account")
 
 iam = aws.client("iam")
-lambda_client = aws.client("lambda")
+lambda_client = aws.client("lambda", config=Config(
+    read_timeout=210, connect_timeout=10, retries={"max_attempts": 0},
+))
 events = aws.client("events")
 
 try:
@@ -158,7 +161,7 @@ try:
         Handler="upload_freshness_monitor.lambda_handler",
         Runtime="python3.12",
         Timeout=180,
-        MemorySize=256,
+        MemorySize=1024,
         Environment={"Variables": environment},
     )
     lambda_client.get_waiter("function_updated_v2").wait(FunctionName=FUNCTION_NAME)
@@ -172,7 +175,7 @@ except lambda_client.exceptions.ResourceNotFoundException:
         Handler="upload_freshness_monitor.lambda_handler",
         Code={"ZipFile": zip_bytes},
         Timeout=180,
-        MemorySize=256,
+        MemorySize=1024,
         Environment={"Variables": environment},
     )
     function_arn = function["FunctionArn"]
@@ -201,17 +204,30 @@ try:
 except lambda_client.exceptions.ResourceConflictException:
     pass
 
-response = lambda_client.invoke(
-    FunctionName=FUNCTION_NAME,
-    InvocationType="RequestResponse",
-    Payload=b'{"dry_run":true}',
-)
-payload = json.loads(response["Payload"].read().decode())
-if response.get("FunctionError"):
-    raise RuntimeError(payload)
-body = json.loads(payload.get("body", "{}"))
-if body.get("status") not in {"waiting-for-first-upload", "healthy", "stale", "unknown"}:
-    raise RuntimeError(f"Unexpected initial monitor state: {body}")
+for attempt in range(4):
+    response = lambda_client.invoke(
+        FunctionName=FUNCTION_NAME,
+        InvocationType="RequestResponse",
+        Payload=b'{"dry_run":true}',
+    )
+    payload = json.loads(response["Payload"].read().decode())
+    if response.get("FunctionError"):
+        raise RuntimeError(payload)
+    body = json.loads(payload.get("body", "{}"))
+    if body.get("status") not in {"waiting-for-first-upload", "healthy", "stale", "unknown"}:
+        raise RuntimeError(f"Unexpected initial monitor state: {body}")
+    permission_errors = {
+        instrument: item["check_errors"]
+        for instrument, item in body.get("instruments", {}).items()
+        if item.get("armed") and any("AccessDenied" in error
+                                    for error in item.get("check_errors", {}).values())
+    }
+    if not permission_errors:
+        break
+    if attempt == 3:
+        raise RuntimeError(f"Deployed monitor cannot read its sources: {permission_errors}")
+    print("Waiting for runtime read permissions to propagate...")
+    time.sleep(10)
 
 print(json.dumps({
     "function": FUNCTION_NAME,
