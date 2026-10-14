@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { formatReadingValue } from '../src/dataPresentation.js';
+import { formatReadingValue, formatSummaryReadingValue } from '../src/dataPresentation.js';
 
 // Exercise real Python handlers against CI-only Silver data. Independent
 // expected values in that script make a wrong backend mean fail this suite.
@@ -20,7 +20,7 @@ test('all five instruments display real handler observations and export independ
   await page.goto('/');
   for (const [id, item] of Object.entries(contract.instruments)) {
     const card = page.getByRole('button', { name: `View latest readings from ${names[id]}` });
-    await expect(card.locator('.pollutant-value')).toHaveText(formatReadingValue(item.expectedLatest));
+    await expect(card.locator('.pollutant-value')).toHaveText(formatSummaryReadingValue(item.expectedLatest));
     await card.click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.locator('tbody tr')).toHaveCount(2);

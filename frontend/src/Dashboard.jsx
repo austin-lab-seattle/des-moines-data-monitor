@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
 import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { formatReadingValue, observationTime } from './dataPresentation.js';
+import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -352,7 +352,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
                   <span className="pollutant-detail">{instrument.detail}</span>
                   <span className="pollutant-instrument">{INSTRUMENT_NAMES[instrument.id]}</span>
                   <span className="pollutant-instrument-id">{instrument.id}</span>
-                  <strong className="pollutant-value">{loading ? '…' : formatReadingValue(value, instrument.column)}</strong>
+                  <strong className="pollutant-value">{loading ? '…' : formatSummaryReadingValue(value)}</strong>
                   <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
                   <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
                     {loading ? 'Loading…' : instrument.latest
