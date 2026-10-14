@@ -46,6 +46,13 @@ The deployment's initial Lambda invocation is a dry run. An invocation with
 sending email or writing monitor state. Normal scheduled invocations send alerts
 for genuine stale conditions.
 
+The monitor uses a 180-second runtime limit and a 1 GB memory/CPU allocation.
+This is for source-scan speed, not because files are loaded into memory: Silver
+rows are streamed. The first live full scan at that allocation took about 23
+seconds. Deployment waits for the full dry run (without automatic invoke retries)
+and retries permission-propagation checks explicitly, failing if an armed
+instrument still cannot be read.
+
 Regression tests in `tests/test_upload_freshness_monitor.py` run in normal CI
 without AWS access or real email. They cover instrument isolation, stale readings
 despite fresh uploads, exact thresholds, recovery, retries, no-data handling,
