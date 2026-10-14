@@ -147,9 +147,14 @@ try:
     lambda_client.update_function_code(FunctionName=FUNCTION_NAME, ZipFile=zip_bytes,
                                        RevisionId=function["RevisionId"])
     lambda_client.get_waiter("function_updated_v2").wait(FunctionName=FUNCTION_NAME)
+    current = lambda_client.get_function(FunctionName=FUNCTION_NAME)["Configuration"]
+    if current.get("Environment", {}).get("Variables", {}) != existing_environment:
+        raise RuntimeError("Monitor settings changed during deployment; refusing to overwrite them")
     lambda_client.update_function_configuration(
         FunctionName=FUNCTION_NAME,
+        RevisionId=current["RevisionId"],
         Role=role["Arn"],
+        Description="Independent per-instrument stale upload and observation alerts.",
         Handler="upload_freshness_monitor.lambda_handler",
         Runtime="python3.12",
         Timeout=180,
@@ -179,10 +184,12 @@ rule = events.put_rule(
     State="ENABLED",
     Description="Checks each Des Moines instrument's upload and reading freshness hourly.",
 )
-events.put_targets(
+targets = events.put_targets(
     Rule=RULE_NAME,
     Targets=[{"Id": FUNCTION_NAME, "Arn": function_arn}],
 )
+if targets.get("FailedEntryCount", 0):
+    raise RuntimeError(f"Could not attach the monitor to its schedule: {targets['FailedEntries']}")
 try:
     lambda_client.add_permission(
         FunctionName=FUNCTION_NAME,

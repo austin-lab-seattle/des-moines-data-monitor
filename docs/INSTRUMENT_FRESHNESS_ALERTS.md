@@ -19,7 +19,7 @@ Silver ETag reuses its previously parsed observation timestamp, not upload time.
 
 Never-reporting instruments stay unarmed, matching the old monitor's behavior.
 Once an instrument has uploads, a missing/unreadable first Silver reading gets
-a six-hour grace period before an `reading-unavailable` alert. Subsequent failed
+a six-hour grace period before a `reading-unavailable` alert. Subsequent failed
 checks retain the last confirmed reading time and cannot clear an active alert.
 One instrument's read failure does not stop checks of the other instruments.
 
