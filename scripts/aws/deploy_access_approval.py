@@ -28,7 +28,8 @@ API_ID = "yvhb48sthk"
 POOL = "us-west-2_oR7CIzxQG"
 CLIENT = "5tno54tskp2tk6lhh6c8jh9ev4"
 ISSUER = f"https://cognito-idp.{REGION}.amazonaws.com/{POOL}"
-APPROVERS = ("elaustin@uw.edu", "jshirai@uw.edu", "yscheong@uw.edu", "pavands@uw.edu")
+# Jeff's invitation and request notifications are deferred at the owner's request.
+APPROVERS = ("elaustin@uw.edu", "yscheong@uw.edu", "pavands@uw.edu")
 CONSOLE = "https://deohs-des-moines-air.vercel.app/team"
 BASE_API_SHA256 = "6d226903ffee517cae64ac224b227ac6f6bb42db595394ce9db74f6505650ad4"
 

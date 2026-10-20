@@ -50,8 +50,10 @@ python scripts/aws/deploy_access_approval.py --credentials-file /secure/path/aws
 The first command is a read-only preflight. The second requires committed,
 reviewed source. It verifies the account, existing API baseline, MFA and invite-only
 settings, and the JWT authorizer. It adds the dedicated approval role for the
-four requested team members, sends an invitation only if an account is missing,
-adds two JWT-protected approval routes and a verification POST route, and updates
+three currently enabled team members (Elena, Yeon and Pavan), sends an invitation
+only if an account is missing, and leaves Jeff's invitation and notifications
+deferred. It adds two JWT-protected approval routes and a verification POST route,
+and updates
 only the dashboard API. Existing environment values and secrets are merged back.
 It does not update Silver processing, instruments, aircraft routes or monitoring.
 It never expands its own operator permissions. Missing AWS authority is a blocker,
