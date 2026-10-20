@@ -92,34 +92,11 @@ class ApiKeyAccessTests(unittest.TestCase):
         lambda_api.ACCESS_REQUEST_FROM_EMAIL = "api-access@example.org"
         lambda_api.API_KEY_HASH_PEPPER = "unit-test-only-pepper"
 
-    def test_email_verification_automatically_issues_and_emails_key(self):
-        request_event = {
-            "headers": {"host": "api.example.org", "x-forwarded-proto": "https"},
-            "body": json.dumps({
-                "name": "Example Researcher",
-                "email": "researcher@example.org",
-                "organization": "Example University",
-                "use_case": "Environmental health analysis",
-            }),
-        }
-        created = lambda_api.create_access_request(request_event)
-        self.assertEqual(created["statusCode"], 202)
-
-        request = next(iter(fake_dynamodb.requests.values()))
-        self.assertEqual(request["status"]["S"], "PENDING_VERIFICATION")
-        self.assertIn("verification_token_hash", request)
-        self.assertEqual(len(fake_ses.messages), 1)
-        verification_text = fake_ses.messages[0]["Message"]["Body"]["Text"]["Data"]
-        raw_token = re.search(r"token=(aqv_[A-Za-z0-9_-]+)", verification_text).group(1)
-        verified = lambda_api.verify_access_request({
-            "queryStringParameters": {"token": raw_token},
-        })
-        self.assertEqual(verified["statusCode"], 200)
-        self.assertEqual(len(fake_ses.messages), 2)
-        key_text = fake_ses.messages[1]["Message"]["Body"]["Text"]["Data"]
-        raw_key = re.search(r"API key: (aqk_[A-Za-z0-9_-]+)", key_text).group(1)
+    def test_existing_active_keys_keep_working_after_human_approval_is_introduced(self):
+        raw_key = "aqk_0123456789abcdef_abcdefghijklmnopqrstuvwxyzABCDEF1234567890_-"
         key_id = lambda_api.API_KEY_PATTERN.fullmatch(raw_key).group(1)
-        self.assertNotEqual(fake_dynamodb.keys[key_id]["key_hash"]["S"], raw_key)
+        fake_dynamodb.keys[key_id] = {"key_id": {"S": key_id}, "key_hash": {"S": lambda_api.key_hash(raw_key)},
+            "status": {"S": "ACTIVE"}, "scopes": {"SS": list(lambda_api.READ_SCOPES.values())}}
         allowed = lambda_api.require_public_api_access(
             {"headers": {"x-api-key": raw_key}},
             "read:summary",

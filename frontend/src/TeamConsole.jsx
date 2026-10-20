@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { Activity, Database, Flag, KeyRound, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import './AccessApproval.css';
 
-const AUTHORITY = import.meta.env.VITE_TEAM_AUTHORITY;
-const CLIENT_ID = import.meta.env.VITE_TEAM_CLIENT_ID;
+// Public OAuth client metadata, not credentials. Authentication and role checks
+// are enforced by API Gateway and the backend, never by these browser values.
+const AUTHORITY = import.meta.env.VITE_TEAM_AUTHORITY || 'https://cognito-idp.us-west-2.amazonaws.com/us-west-2_oR7CIzxQG';
+const CLIENT_ID = import.meta.env.VITE_TEAM_CLIENT_ID || '5tno54tskp2tk6lhh6c8jh9ev4';
 const TEAM_API = import.meta.env.VITE_TEAM_API_URL || 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
 const INSTRUMENTS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
 
@@ -20,7 +23,12 @@ export default function TeamConsole() {
     userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   }) : null, []);
   const [user, setUser] = useState(null);
-  const [tab, setTab] = useState('users');
+  const [tab, setTab] = useState('requests');
+  const [targetRequest, setTargetRequest] = useState(() => {
+    const value = new URLSearchParams(window.location.search).get('request_id');
+    return /^[0-9a-f-]{36}$/.test(value || '') ? value : '';
+  });
+  const [decision, setDecision] = useState(null);
   const [instrument, setInstrument] = useState('NO2-CAPS');
   const [data, setData] = useState(null);
   const [viewer, setViewer] = useState(null);
@@ -36,7 +44,12 @@ export default function TeamConsole() {
       try {
         const params = new URLSearchParams(window.location.search);
         const current = params.has('code') ? await manager.signinRedirectCallback() : await manager.getUser();
-        if (params.has('code')) window.history.replaceState({}, '', '/team');
+        if (params.has('code')) {
+          const target = current?.state?.request_id;
+          const valid = /^[0-9a-f-]{36}$/.test(target || '') ? target : '';
+          setTargetRequest(valid);
+          window.history.replaceState({}, '', valid ? `/team?request_id=${valid}` : '/team');
+        }
         setUser(current && !current.expired ? current : null);
       } catch { setError('Sign-in could not be completed.'); }
     };
@@ -62,7 +75,9 @@ export default function TeamConsole() {
     if (!user) return;
     const requestId = ++loadRequestId.current;
     setLoading(true); setError(''); setNotice('');
-    const path = tab === 'users'
+    const path = tab === 'requests'
+      ? `/air-quality/internal/v1/access-requests${targetRequest ? `?request_id=${encodeURIComponent(targetRequest)}` : ''}`
+      : tab === 'users'
       ? '/air-quality/internal/v1/api-users'
       : tab === 'audit'
         ? '/air-quality/internal/v1/audit'
@@ -78,7 +93,7 @@ export default function TeamConsole() {
     } finally {
       if (requestId === loadRequestId.current) setLoading(false);
     }
-  }, [apiRequest, instrument, tab, user]);
+  }, [apiRequest, instrument, tab, user, targetRequest]);
 
   useEffect(() => {
     const timer = window.setTimeout(load, 0);
@@ -121,29 +136,52 @@ export default function TeamConsole() {
     finally { setLoading(false); }
   };
 
+  const decideRequest = async () => {
+    if (!decision || loading) return;
+    setLoading(true); setError(''); setNotice('');
+    try {
+      const result = await apiRequest('/air-quality/internal/v1/access-requests/decision', {
+        method: 'POST', body: JSON.stringify({ request_id: decision.request.request_id, decision: decision.action }),
+      });
+      setDecision(null);
+      await load();
+      setNotice(result.message);
+    } catch (e) { setError(e.message); }
+    finally { setLoading(false); }
+  };
+
   if (!configured()) return <TeamSetup />;
-  if (!user) return <TeamLogin onLogin={() => manager.signinRedirect()} error={error} />;
+  if (!user) return <TeamLogin onLogin={() => manager.signinRedirect({ state: { request_id: targetRequest } })} error={error} />;
 
   const keys = data?.keys || [];
   const rows = data?.rows || [];
   const events = data?.events || [];
+  const requests = data?.requests || [];
   const roles = new Set(viewer?.roles || []);
   const canReview = roles.has('Admin') || roles.has('Reviewer');
   const canManageKeys = roles.has('Admin') || roles.has('AccessManager');
+  const canApprove = data?.viewer?.can_approve === true;
 
   return <div className="team-shell">
     <header className="team-header"><a href="/" className="team-brand"><ShieldCheck /> <span>Des Moines Air<small>Team Console</small></span></a><div><span>{user.profile.email}</span><button onClick={() => manager.signoutRedirect()}><LogOut size={16}/> Sign out</button></div></header>
     <div className="team-layout">
-      <aside><p>Private workspace</p>{[['users', KeyRound, 'API users'], ['review', Flag, 'Record review'], ['audit', Activity, 'Audit log']].map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setData(null); }}><Icon size={17}/>{label}</button>)}</aside>
-      <main><div className="team-title"><div><span>UW research team</span><h1>{tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1></div><div className="team-title-actions">{tab === 'review' && <select value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}<button onClick={load} disabled={loading}><RefreshCw size={16}/> Refresh</button></div></div>
+      <aside><p>Private workspace</p>{[['requests', KeyRound, 'Access requests'], ['users', KeyRound, 'API users'], ['review', Flag, 'Record review'], ['audit', Activity, 'Audit log']].filter(([id]) => id === 'requests' || id === 'users' && canManageKeys || id === 'review' && (canReview || roles.has('Viewer')) || id === 'audit' && (canManageKeys || canReview)).map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setData(null); }}><Icon size={17}/>{label}</button>)}</aside>
+      <main><div className="team-title"><div><span>UW research team</span><h1>{tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1></div><div className="team-title-actions">{tab === 'review' && <select value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}<button onClick={load} disabled={loading}><RefreshCw size={16}/> Refresh</button></div></div>
         {error && <div className="team-message team-error">{error}</div>}
         {notice && <div className="team-message team-success">{notice}</div>}
+        {tab === 'requests' && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
+          <div className="team-table-wrap"><table><thead><tr><th>Requester</th><th>Intended use</th><th>Status</th><th>Expires</th><th>Decision</th></tr></thead><tbody>{requests.map(request => <tr key={request.request_id}>
+            <td><strong>{request.name}</strong><small>{request.email}</small><small>{request.organization || 'Not provided'}</small></td>
+            <td className="team-request-use">{request.use_case}</td><td>{request.status}</td><td>{new Date(request.expires_at).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', timeZoneName: 'short' })}</td>
+            <td>{request.actionable && canApprove ? <div className="team-request-actions"><button disabled={loading} onClick={() => setDecision({ request, action: 'approve' })}>Approve</button><button disabled={loading} onClick={() => setDecision({ request, action: 'reject' })}>Reject</button></div> : request.approved_by ? `Approved by ${request.approved_by}` : request.rejected_by ? `Rejected by ${request.rejected_by}` : 'Not actionable'}</td>
+          </tr>)}{!requests.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No access requests found.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'users' && <section className="team-card"><div className="team-card-intro"><p>Personal read-only API keys and today&apos;s usage.</p>{data?.limits && <small>{data.limits.requests_per_minute}/minute · {data.limits.requests_per_day}/day · {data.limits.exports_per_day} exports/day</small>}</div><div className="team-table-wrap"><table><thead><tr><th>User</th><th>Key</th><th>Status</th><th>Last used</th><th>Today</th><th>Exports</th><th></th></tr></thead><tbody>{keys.map(key => <tr key={key.key_id}><td><strong>{key.email}</strong><small>{key.organization || '—'}</small></td><td><code>…{key.key_id.slice(-6)}</code></td><td><span className={`team-status ${key.status === 'ACTIVE' ? 'team-status-active' : 'team-status-muted'}`}>{key.status}</span></td><td>{key.last_used_at ? new Date(key.last_used_at).toLocaleString() : 'Never'}</td><td>{key.requests_today || 0}</td><td>{key.exports_today || 0}</td><td>{key.status === 'ACTIVE' && canManageKeys && <button className="team-danger-button" onClick={() => revokeKey(key)}>Revoke</button>}</td></tr>)}{!keys.length && <tr><td colSpan="7" className="team-empty">{loading ? 'Loading…' : 'No keys found.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'review' && <section className="team-card"><div className="team-note"><Database size={17}/> Original measurements remain unchanged; reviews are stored as separate annotations.</div><div className="team-table-wrap"><table><thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead><tbody>{rows.map(row => <tr key={row.row_key}><td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td><td>{canReview ? <button className="team-row-button" disabled={row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td></tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{loading ? 'Loading…' : 'No records loaded.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : '—'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
       </main>
     </div>
     {flagRow && <FlagDialog row={flagRow} busy={loading} onClose={() => setFlagRow(null)} onSubmit={submitFlag}/>}
+    {decision && <div className="team-dialog-backdrop"><section className="team-dialog" role="dialog" aria-modal="true" aria-labelledby="access-decision-title"><h2 id="access-decision-title">{decision.action === 'approve' ? 'Approve API access?' : 'Reject API access?'}</h2><p>{decision.request.name} ({decision.request.email})</p><p>{decision.action === 'approve' ? 'A personal read-only key will be emailed only to this verified requester. The decision is recorded in the audit log.' : 'No key will be issued. The rejection is recorded in the audit log.'}</p><div className="team-dialog-actions"><button disabled={loading} onClick={() => setDecision(null)}>Cancel</button><button disabled={loading} onClick={decideRequest}>{loading ? 'Processing…' : decision.action === 'approve' ? 'Confirm approval' : 'Confirm rejection'}</button></div></section></div>}
   </div>;
 }
 

@@ -957,7 +957,7 @@ function ApiAccessDialog({ onClose }) {
           </button>
         </div>
         <p className="api-dialog-copy">
-          Submit your email, open the verification link, and your personal read-only key will be generated and emailed automatically. API users cannot modify monitoring records.
+          Submit your details and verify your email. The research team will review your request and email a personal read-only key after approval. API users cannot modify monitoring records.
         </p>
         <form className="api-dialog-form" onSubmit={submit}>
           <div className="api-dialog-fields">
@@ -1103,7 +1103,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
           <div className="api-sidebar-access">
             <span>API access</span>
             <strong>Personal read-only keys</strong>
-            <p>Verify your email and your personal read-only key will be generated and emailed automatically.</p>
+            <p>Verify your email, then the research team will review your request. A personal read-only key is emailed after approval.</p>
             <button className="api-text-button" type="button" onClick={() => { closeNav(); setAccessOpen(true); }}>Request a key</button>
           </div>
         </aside>

@@ -1,6 +1,8 @@
 import csv
+import base64
 import hmac
 import hashlib
+import html
 import json
 import math
 import os
@@ -31,6 +33,10 @@ RATE_LIMITS_TABLE = os.environ.get("RATE_LIMITS_TABLE", "AQApiRateLimits")
 ADMIN_AUDIT_TABLE = os.environ.get("ADMIN_AUDIT_TABLE", "AQAdminAudit")
 API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
 ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
+ACCESS_REQUEST_APPROVERS = tuple(dict.fromkeys(
+    email.strip().lower() for email in os.environ.get("ACCESS_REQUEST_APPROVERS", "").split(",") if email.strip()
+))
+TEAM_CONSOLE_URL = os.environ.get("TEAM_CONSOLE_URL", "").rstrip("/")
 API_ROUTES = {
     "summary": "/air-quality/v1/summary",
     "timeseries": "/air-quality/v1/timeseries",
@@ -47,6 +53,8 @@ KEYED_API_ROUTES = {
     "observations_export": "/air-quality/v1/keyed/observations/export",
 }
 INTERNAL_API_ROUTES = {
+    "access_requests": "/air-quality/internal/v1/access-requests",
+    "access_decision": "/air-quality/internal/v1/access-requests/decision",
     "api_users": "/air-quality/internal/v1/api-users",
     "api_users_revoke": "/air-quality/internal/v1/api-users/revoke",
     "observations": "/air-quality/internal/v1/observations",
@@ -168,7 +176,7 @@ def normalized_headers(event):
     return {key.lower(): value for key, value in (event.get("headers") or {}).items()}
 
 
-TEAM_ROLES = {"Admin", "Reviewer", "AccessManager", "Viewer"}
+TEAM_ROLES = {"Admin", "Reviewer", "AccessManager", "ApiApprover", "Viewer"}
 
 
 def _claim_groups(value):
@@ -220,6 +228,7 @@ VERIFICATION_TOKEN_PATTERN = re.compile(r"^aqv_([0-9a-f-]{36})_([A-Za-z0-9_-]{32
 ACCESS_REQUEST_WINDOW_SECONDS = 24 * 60 * 60
 ACCESS_REQUEST_RETENTION_SECONDS = 90 * 24 * 60 * 60
 VERIFICATION_WINDOW_SECONDS = 30 * 60
+APPROVAL_WINDOW_SECONDS = 7 * 24 * 60 * 60
 PER_MINUTE_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "30"))
 PER_DAY_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_DAY", "5000"))
 EXPORTS_PER_DAY_LIMIT = int(os.environ.get("API_EXPORT_LIMIT_PER_DAY", "20"))
@@ -258,7 +267,7 @@ def ddb_string_list(item, name):
 
 def normalize_email(value):
     email = str(value or "").strip().lower()
-    return email if EMAIL_PATTERN.fullmatch(email) else None
+    return email if len(email) <= 254 and EMAIL_PATTERN.fullmatch(email) else None
 
 
 def limit_text(value, maximum):
@@ -266,7 +275,10 @@ def limit_text(value, maximum):
 
 
 def access_registration_ready():
-    return bool(ENABLE_API_KEY_REGISTRATION and API_KEY_HASH_PEPPER and ACCESS_REQUEST_FROM_EMAIL)
+    console = urllib.parse.urlsplit(TEAM_CONSOLE_URL)
+    return bool(ENABLE_API_KEY_REGISTRATION and API_KEY_HASH_PEPPER and ACCESS_REQUEST_FROM_EMAIL
+                and ACCESS_REQUEST_APPROVERS and all(normalize_email(email) for email in ACCESS_REQUEST_APPROVERS)
+                and console.scheme == "https" and console.netloc and not console.query and not console.fragment)
 
 
 def key_hash(raw_key):
@@ -282,10 +294,13 @@ def key_hash(raw_key):
 def verification_email(request, raw_token, event):
     recipient = ddb_string(request, "email")
     name = ddb_string(request, "name") or "researcher"
-    verification_url = f"{request_base_url(event)}{API_ROUTES['verify_access']}?token={raw_token}"
+    console = urllib.parse.urlsplit(TEAM_CONSOLE_URL)
+    # Never build security links from caller-controlled Host/proxy headers.
+    origin = f"{console.scheme}://{console.netloc}"
+    verification_url = f"{origin}{API_ROUTES['verify_access']}?token={raw_token}"
     text = (
         f"Hello {name},\n\n"
-        "Verify your email address to receive a personal read-only Des Moines Air Quality API key.\n\n"
+        "Verify your email address so the research team can review your request for a read-only Des Moines Air Quality API key.\n\n"
         f"Verify email: {verification_url}\n\n"
         "This link expires in 30 minutes and can be used once. If you did not request an API key, ignore this message.\n"
     )
@@ -303,7 +318,7 @@ def key_delivery_email(request, raw_key, key_id):
     recipient = ddb_string(request, "email")
     name = ddb_string(request, "name") or "researcher"
     text = (
-        f"Hello {name},\n\nYour email has been verified. Here is your personal read-only Des Moines Air Quality API key.\n\n"
+        f"Hello {name},\n\nYour verified request has been approved by the research team. Here is your personal read-only Des Moines Air Quality API key.\n\n"
         f"API key: {raw_key}\nKey ID: {key_id}\n\n"
         "Send the key only in the x-api-key request header. Store it in a secret manager or environment variable. "
         "Do not put it in a URL, repository, notebook, screenshot, or shared document.\n\n"
@@ -333,12 +348,12 @@ def find_recent_access_request(email):
 
 
 def create_access_request(event):
-    """Email a short-lived ownership check before issuing an API key."""
+    """Verify email ownership before placing a request in the human-review queue."""
     if not access_registration_ready():
         return access_response(503, {"error": "API access registration is not available"})
 
     payload = parse_body(event)
-    if payload is None:
+    if not isinstance(payload, dict):
         return access_response(400, {"error": "Invalid JSON body"})
 
     email = normalize_email(payload.get("email"))
@@ -366,6 +381,8 @@ def create_access_request(event):
                     "Contact the project team if it must be revoked or replaced."
                 ),
             })
+        if recent_request and recent_status in {"PENDING_APPROVAL", "APPROVING"} and now_epoch < (ddb_number(recent_request, "approval_expires_epoch", 0) or 0):
+            return access_response(202, {"message": "Your verified request is awaiting research-team approval."})
         if (
             recent_request
             and now_epoch - recent_created < ACCESS_REQUEST_WINDOW_SECONDS
@@ -390,6 +407,7 @@ def create_access_request(event):
         "status": {"S": "PENDING_VERIFICATION"},
         "verification_token_hash": {"S": key_hash(raw_token)},
         "verification_expires_epoch": {"N": str(now_epoch + VERIFICATION_WINDOW_SECONDS)},
+        "approval_expires_epoch": {"N": str(now_epoch + APPROVAL_WINDOW_SECONDS)},
         "created_at": {"S": now.isoformat()},
         "created_at_epoch": {"N": str(now_epoch)},
         "ttl": {"N": str(now_epoch + ACCESS_REQUEST_RETENTION_SECONDS)},
@@ -413,7 +431,13 @@ def create_access_request(event):
 def verify_access_request(event):
     if not access_registration_ready():
         return access_response(503, {"error": "API access registration is not available"})
-    raw_token = str(query_params(event).get("token") or "").strip()
+    try:
+        body = event.get("body") or ""
+        if event.get("isBase64Encoded"):
+            body = base64.b64decode(body, validate=True).decode("utf-8")
+        raw_token = str(urllib.parse.parse_qs(body).get("token", [""])[0]).strip()
+    except (ValueError, UnicodeError):
+        return access_response(400, {"error": "Invalid verification submission"})
     match = VERIFICATION_TOKEN_PATTERN.fullmatch(raw_token)
     if not match:
         return access_response(400, {"error": "Invalid verification link"})
@@ -431,82 +455,202 @@ def verify_access_request(event):
         expected_hash = ddb_string(request, "verification_token_hash")
         if (
             not request
-            or ddb_string(request, "status") != "PENDING_VERIFICATION"
+            or ddb_string(request, "status") not in {"PENDING_VERIFICATION", "PENDING_APPROVAL"}
             or not expected_hash
             or now_epoch > (ddb_number(request, "verification_expires_epoch", 0) or 0)
             or not hmac.compare_digest(key_hash(raw_token), expected_hash)
         ):
             return access_response(400, {"error": "Verification link is invalid or expired"})
 
-        key_id = secrets.token_hex(8)
-        raw_key = f"aqk_{key_id}_{secrets.token_urlsafe(32)}"
-        key_item = {
-            "key_id": {"S": key_id},
-            "key_hash": {"S": key_hash(raw_key)},
-            "status": {"S": "ACTIVE"},
-            "request_id": {"S": request_id},
-            "email": {"S": ddb_string(request, "email")},
-            "scopes": {"SS": list(READ_SCOPES.values())},
-            "created_at": {"S": now.isoformat()},
-            "created_at_epoch": {"N": str(now_epoch)},
-        }
-        dynamodb_client.transact_write_items(TransactItems=[
-            {"Put": {
-                "TableName": API_KEYS_TABLE,
-                "Item": key_item,
-                "ConditionExpression": "attribute_not_exists(key_id)",
-            }},
-            {"Update": {
-                "TableName": ACCESS_REQUESTS_TABLE,
-                "Key": {"request_id": {"S": request_id}},
-                "UpdateExpression": (
-                    "SET #status = :active, verified_at = :verified_at, key_id = :key_id "
-                    "REMOVE verification_token_hash"
-                ),
-                "ConditionExpression": "#status = :pending",
-                "ExpressionAttributeNames": {"#status": "status"},
-                "ExpressionAttributeValues": {
-                    ":active": {"S": "ACTIVE"},
-                    ":pending": {"S": "PENDING_VERIFICATION"},
-                    ":verified_at": {"S": now.isoformat()},
-                    ":key_id": {"S": key_id},
-                },
-            }},
-        ])
+        # Claim notification delivery. Retain the verification hash until SES
+        # accepts the notification so a failed send can be retried safely.
         try:
-            ses_client.send_email(**key_delivery_email(request, raw_key, key_id))
-        except Exception:
-            failed_at = datetime.now(timezone.utc).isoformat()
-            dynamodb_client.transact_write_items(TransactItems=[
-                {"Update": {
-                    "TableName": API_KEYS_TABLE,
-                    "Key": {"key_id": {"S": key_id}},
-                    "UpdateExpression": "SET #status = :revoked, revoked_at = :failed_at",
-                    "ExpressionAttributeNames": {"#status": "status"},
-                    "ExpressionAttributeValues": {
-                        ":revoked": {"S": "REVOKED"},
-                        ":failed_at": {"S": failed_at},
-                    },
-                }},
-                {"Update": {
-                    "TableName": ACCESS_REQUESTS_TABLE,
-                    "Key": {"request_id": {"S": request_id}},
-                    "UpdateExpression": "SET #status = :failed, delivery_failed_at = :failed_at",
-                    "ExpressionAttributeNames": {"#status": "status"},
-                    "ExpressionAttributeValues": {
-                        ":failed": {"S": "DELIVERY_FAILED"},
-                        ":failed_at": {"S": failed_at},
-                    },
-                }},
-            ])
+            dynamodb_client.update_item(
+                TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
+                UpdateExpression="SET #status = :pending, verified_at = if_not_exists(verified_at, :now), notification_lease_until = :lease, approval_expires_epoch = if_not_exists(approval_expires_epoch, :expires)",
+                ConditionExpression="(#status = :unverified OR #status = :pending) AND verification_token_hash = :hash AND attribute_not_exists(notification_sent_at) AND (attribute_not_exists(notification_lease_until) OR notification_lease_until < :epoch)",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={":pending": {"S": "PENDING_APPROVAL"}, ":unverified": {"S": "PENDING_VERIFICATION"},
+                    ":now": {"S": now.isoformat()}, ":epoch": {"N": str(now_epoch)}, ":lease": {"N": str(now_epoch + 60)}, ":hash": {"S": expected_hash},
+                    ":expires": {"N": str((ddb_number(request, "created_at_epoch", now_epoch) or now_epoch) + APPROVAL_WINDOW_SECONDS)}},
+            )
+        except Exception as exc:
+            if getattr(exc, "response", {}).get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return access_response(202, {"message": "Verification is already processing. Please retry shortly if needed."})
             raise
-    except Exception as exc:
-        print(f"Could not verify API access request: {exc}")
-        return access_response(503, {"error": "API key delivery is temporarily unavailable"})
+        try:
+            ses_client.send_email(**approval_notification_email(request))
+        except Exception:
+            dynamodb_client.update_item(
+                TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
+                UpdateExpression="SET notification_status = :failed REMOVE notification_lease_until",
+                ExpressionAttributeValues={":failed": {"S": "FAILED"}},
+            )
+            raise
+        dynamodb_client.update_item(
+            TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
+            UpdateExpression="SET notification_sent_at = :now, notification_status = :sent REMOVE verification_token_hash, notification_lease_until",
+            ExpressionAttributeValues={":now": {"S": now.isoformat()}, ":sent": {"S": "SENT"}},
+        )
+    except Exception:
+        # Never include request bodies, verification tokens or keys in logs.
+        print("API access verification/notification failed")
+        return access_response(503, {"error": "Team notification could not be completed. Retry this verification link; no API key has been issued."})
 
     return access_response(200, {
-        "message": "Email verified. Your personal API key has been emailed to you."
+        "message": "Email verified. The research team has been notified. Your key will be emailed only after approval."
     })
+
+
+def approval_notification_email(request):
+    request_id = ddb_string(request, "request_id")
+    url = f"{TEAM_CONSOLE_URL}?request_id={urllib.parse.quote(request_id)}"
+    details = [("Name", "name"), ("Email", "email"), ("Organization", "organization"), ("Intended use", "use_case")]
+    text = "A verified researcher has requested a read-only Des Moines Air Quality API key.\n\n"
+    text += "\n".join(f"{label}: {ddb_string(request, field, '')}" for label, field in details)
+    text += f"\n\nReview, approve or reject: {url}\n\nTeam sign-in and confirmation are required. Opening this link does not approve access. This request expires seven days after submission."
+    rows = "".join(f"<dt><b>{label}</b></dt><dd>{html.escape(ddb_string(request, field, ''))}</dd>" for label, field in details)
+    return {"Source": ACCESS_REQUEST_FROM_EMAIL, "Destination": {"ToAddresses": list(ACCESS_REQUEST_APPROVERS)},
+        "Message": {"Subject": {"Data": "Approval requested: Des Moines Air Quality API access", "Charset": "UTF-8"},
+            "Body": {"Text": {"Data": text, "Charset": "UTF-8"}, "Html": {"Data":
+                f'<h2>API access request</h2><p>Email ownership verified. No key has been issued.</p><dl>{rows}</dl><p><a href="{html.escape(url, quote=True)}">Review / Approve / Reject</a></p><p>Team sign-in and explicit confirmation are required. Opening this email or link cannot approve access.</p>', "Charset": "UTF-8"}}}}
+
+
+def require_access_approver(event):
+    identity, denied = require_team_role(event, {"Admin", "AccessManager", "ApiApprover"})
+    if denied:
+        return None, denied
+    claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+    if identity["email"] not in ACCESS_REQUEST_APPROVERS or str(claims.get("email_verified")).lower() != "true":
+        return None, response(403, {"error": "Only configured approvers with a verified team account can review access requests"})
+    return identity, None
+
+
+def access_request_public_fields(item):
+    return {field: ddb_string(item, field, "") for field in (
+        "request_id", "name", "email", "organization", "use_case", "status", "created_at", "verified_at", "approved_by", "approved_at", "rejected_by", "rejected_at")} | {
+        "expires_at": datetime.fromtimestamp(ddb_number(item, "approval_expires_epoch", 0) or 0, timezone.utc).isoformat(),
+        "actionable": ddb_string(item, "status") == "PENDING_APPROVAL" and bool(ddb_string(item, "verified_at"))
+            and time.time() < (ddb_number(item, "approval_expires_epoch", 0) or 0)}
+
+
+def verification_page(event, result=None):
+    # Email scanners may open GET links. Neither GET nor a preview sends mail,
+    # verifies ownership, changes status or issues a key.
+    if result is None:
+        token = str(query_params(event).get("token") or "")
+        if not VERIFICATION_TOKEN_PATTERN.fullmatch(token):
+            result = access_response(400, {"error": "Invalid verification link"})
+        else:
+            body = f'<h1>Confirm your email</h1><p>Submit below to verify email ownership and send your request to the research team. No API key is issued until a team member approves.</p><form method="post" action="{API_ROUTES["verify_access"]}"><input type="hidden" name="token" value="{html.escape(token, quote=True)}"><button type="submit">Verify email and request review</button></form>'
+    if result is not None:
+        payload = json.loads(result["body"])
+        body = f'<h1>API access request</h1><p>{html.escape(payload.get("message") or payload.get("error") or "Request processed")}</p>'
+    return {"statusCode": result["statusCode"] if result else 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
+            "Content-Security-Policy": "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'", "X-Content-Type-Options": "nosniff"},
+        "body": f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Des Moines API access</title></head><body>{body}</body></html>'}
+
+
+def get_access_requests(event, identity):
+    request_id = str(query_params(event).get("request_id") or "").strip()
+    if request_id and not re.fullmatch(r"[0-9a-f-]{36}", request_id):
+        return response(400, {"error": "Invalid request ID"})
+    try:
+        if request_id:
+            item = dynamodb_client.get_item(TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}}, ConsistentRead=True).get("Item")
+            items = [item] if item else []
+        else:
+            items = query_by_status(ACCESS_REQUESTS_TABLE, "PENDING_APPROVAL")
+        return response(200, {"requests": [access_request_public_fields(item) for item in items],
+            "viewer": {"email": identity["email"], "roles": sorted(identity["roles"]), "can_approve": True}}, {"Cache-Control": "no-store"})
+    except Exception:
+        return response(503, {"error": "Access requests could not be loaded"})
+
+
+def decide_access_request(event, identity):
+    payload = parse_body(event)
+    if not isinstance(payload, dict):
+        return response(400, {"error": "Invalid JSON body"})
+    request_id = str(payload.get("request_id") or "")
+    decision = payload.get("decision")
+    if not re.fullmatch(r"[0-9a-f-]{36}", request_id) or decision not in {"approve", "reject"}:
+        return response(400, {"error": "A valid request ID and approve/reject decision are required"})
+    if not access_registration_ready():
+        return response(503, {"error": "Access approval is not configured"})
+    now = datetime.now(timezone.utc)
+    epoch = int(now.timestamp())
+    audit_id = None
+    claimed = False
+    key_id = None
+    try:
+        request = dynamodb_client.get_item(TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}}, ConsistentRead=True).get("Item")
+        if not request:
+            return response(404, {"error": "Access request not found"})
+        if ddb_string(request, "status") != "PENDING_APPROVAL" or not ddb_string(request, "verified_at"):
+            return response(409, {"error": "Only verified requests awaiting approval can be decided"})
+        if epoch >= (ddb_number(request, "approval_expires_epoch", 0) or 0):
+            return response(410, {"error": "This request has expired. The researcher must submit a new request"})
+        audit_id = begin_audit_event(identity, f"{decision.upper()}_API_REQUEST", request_id)
+        if not audit_id:
+            return response(503, {"error": "Audit logging is unavailable; no change was made"})
+        condition = "#status = :pending AND attribute_exists(verified_at) AND approval_expires_epoch > :epoch"
+        values = {":pending": {"S": "PENDING_APPROVAL"}, ":epoch": {"N": str(epoch)}, ":now": {"S": now.isoformat()}, ":actor": {"S": identity["email"]}}
+        if decision == "reject":
+            dynamodb_client.update_item(TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
+                UpdateExpression="SET #status = :rejected, rejected_by = :actor, rejected_at = :now REMOVE verification_token_hash",
+                ConditionExpression=condition, ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues=values | {":rejected": {"S": "REJECTED"}})
+            finish_audit_event(audit_id, "SUCCEEDED")
+            return response(200, {"message": "Request rejected. No key was issued", "audit_id": audit_id})
+        key_id = secrets.token_hex(8)
+        raw_key = f"aqk_{key_id}_{secrets.token_urlsafe(32)}"
+        key_item = {"key_id": {"S": key_id}, "key_hash": {"S": key_hash(raw_key)}, "status": {"S": "PENDING_DELIVERY"},
+            "request_id": {"S": request_id}, "email": {"S": ddb_string(request, "email")}, "scopes": {"SS": list(READ_SCOPES.values())},
+            "created_at": {"S": now.isoformat()}, "created_at_epoch": {"N": str(epoch)}}
+        dynamodb_client.transact_write_items(TransactItems=[
+            {"Put": {"TableName": API_KEYS_TABLE, "Item": key_item, "ConditionExpression": "attribute_not_exists(key_id)"}},
+            {"Update": {"TableName": ACCESS_REQUESTS_TABLE, "Key": {"request_id": {"S": request_id}},
+                "UpdateExpression": "SET #status = :issuing, approved_by = :actor, approved_at = :now, key_id = :key_id REMOVE verification_token_hash",
+                "ConditionExpression": condition, "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": values | {":issuing": {"S": "APPROVING"}, ":key_id": {"S": key_id}}}},
+        ])
+        claimed = True
+        ses_client.send_email(**key_delivery_email(request, raw_key, key_id))
+        dynamodb_client.transact_write_items(TransactItems=[
+            {"Update": {"TableName": API_KEYS_TABLE, "Key": {"key_id": {"S": key_id}}, "UpdateExpression": "SET #status = :active",
+                "ConditionExpression": "#status = :delivery", "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {":active": {"S": "ACTIVE"}, ":delivery": {"S": "PENDING_DELIVERY"}}}},
+            {"Update": {"TableName": ACCESS_REQUESTS_TABLE, "Key": {"request_id": {"S": request_id}}, "UpdateExpression": "SET #status = :active",
+                "ConditionExpression": "#status = :issuing AND key_id = :key_id", "ExpressionAttributeNames": {"#status": "status"},
+                "ExpressionAttributeValues": {":active": {"S": "ACTIVE"}, ":issuing": {"S": "APPROVING"}, ":key_id": {"S": key_id}}}},
+        ])
+        finish_audit_event(audit_id, "SUCCEEDED")
+        return response(200, {"message": "Request approved. The read-only key was emailed to the verified requester", "key_id": key_id, "audit_id": audit_id})
+    except Exception as exc:
+        code = getattr(exc, "response", {}).get("Error", {}).get("Code")
+        if claimed:
+            # A network timeout may hide a successful activation. Read back
+            # before cleanup; never revoke an unrelated or already active key.
+            try:
+                current = dynamodb_client.get_item(TableName=API_KEYS_TABLE, Key={"key_id": {"S": key_id}}, ConsistentRead=True).get("Item")
+                if ddb_string(current, "status") == "ACTIVE":
+                    finish_audit_event(audit_id, "SUCCEEDED")
+                    return response(200, {"message": "Request approved and key delivery accepted", "key_id": key_id, "audit_id": audit_id})
+                dynamodb_client.transact_write_items(TransactItems=[
+                    {"Update": {"TableName": API_KEYS_TABLE, "Key": {"key_id": {"S": key_id}}, "UpdateExpression": "SET #status = :revoked, revocation_reason = :reason",
+                        "ConditionExpression": "#status = :delivery", "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {":revoked": {"S": "REVOKED"}, ":delivery": {"S": "PENDING_DELIVERY"}, ":reason": {"S": "DELIVERY_FAILED"}}}},
+                    {"Update": {"TableName": ACCESS_REQUESTS_TABLE, "Key": {"request_id": {"S": request_id}}, "UpdateExpression": "SET #status = :pending REMOVE key_id, approved_at, approved_by",
+                        "ConditionExpression": "#status = :issuing AND key_id = :key_id", "ExpressionAttributeNames": {"#status": "status"},
+                        "ExpressionAttributeValues": {":pending": {"S": "PENDING_APPROVAL"}, ":issuing": {"S": "APPROVING"}, ":key_id": {"S": key_id}}}},
+                ])
+            except Exception:
+                print("API approval delivery needs operator reconciliation; no pending-delivery key can authenticate")
+        if audit_id:
+            finish_audit_event(audit_id, "FAILED", "Access decision failed; secrets omitted")
+        status = 409 if code in {"ConditionalCheckFailedException", "TransactionCanceledException"} else 503
+        return response(status, {"error": "The request changed or delivery failed. Refresh before retrying; no raw key is returned"})
 
 
 def public_api_key(event):
@@ -2002,6 +2146,17 @@ def lambda_handler(event, context):
             return access_response(204)
         return response(204)
 
+    if route_matches(path, INTERNAL_API_ROUTES["access_requests"]) and method == "GET":
+        identity, denied = require_access_approver(event)
+        return denied or get_access_requests(event, identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["access_decision"]) and method == "POST":
+        identity, denied = require_access_approver(event)
+        return denied or decide_access_request(event, identity)
+
+    if route_matches(path, INTERNAL_API_ROUTES["access_requests"], INTERNAL_API_ROUTES["access_decision"]):
+        return response(405, {"error": "Method not allowed"})
+
     if route_matches(path, INTERNAL_API_ROUTES["api_users"]) and method == "GET":
         identity, auth_response = require_team_role(event, {"Admin", "AccessManager"})
         return auth_response or get_team_api_users(event, identity)
@@ -2041,8 +2196,12 @@ def lambda_handler(event, context):
     if route_matches(path, API_ROUTES["access_requests"]) and method == "POST":
         return create_access_request(event)
 
-    if route_matches(path, API_ROUTES["verify_access"]) and method == "GET":
-        return verify_access_request(event)
+    if route_matches(path, API_ROUTES["verify_access"]):
+        if method == "GET":
+            return verification_page(event)
+        if method == "POST":
+            return verification_page(event, verify_access_request(event))
+        return response(405, {"error": "Method not allowed"})
 
     if route_matches(path, KEYED_API_ROUTES["timeseries"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"], force=True)
