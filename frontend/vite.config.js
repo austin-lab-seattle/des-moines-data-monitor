@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 const LIVE_API_BASE = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com'
 const developmentRouteBridge = {
+  '/air-quality/v1/access-requests': '/air-quality/v1/access-requests',
   '/air-quality/v1/summary': '/air-quality/v1/summary',
   '/air-quality/v1/timeseries': '/air-quality/v1/timeseries',
   '/air-quality/v1/observations/export': '/air-quality/v1/observations/export',

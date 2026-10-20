@@ -33,6 +33,7 @@ GROUPS = [
     ("Admin", "Full Team Console administration", 0),
     ("Reviewer", "Review and flag environmental observations", 10),
     ("AccessManager", "View and revoke researcher API keys", 20),
+    ("ApiApprover", "Review verified API requests and approve or reject access only", 25),
     ("Viewer", "Read-only access to reviewed observations", 30),
 ]
 

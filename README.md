@@ -237,7 +237,8 @@ POST /air-quality/v1/access-requests
 ```
 
 When API key registration is enabled, users request access, verify their email,
-and automatically receive a personal read-only key at that same address. Keys
+and wait for a named team approver to approve access. Only then is a personal
+read-only key emailed to the verified address. Keys
 are rate-limited and are stored only as one-way keyed hashes.
 
 Observation exports default to the latest 14 days, are capped at a 31-day
@@ -266,9 +267,15 @@ export API_KEY_HASH_PEPPER="set-this-from-a-secret-manager"
 ENABLE_API_KEY_REGISTRATION=1 python scripts/aws/deploy_backend.py
 ```
 
-After the user opens the verification link, SES emails the key to that verified
-address. If delivery fails, the new key is revoked. The Lambda execution role
-needs permission to send from `ACCESS_REQUEST_FROM_EMAIL`.
+The requester opens the verification link and explicitly submits confirmation.
+The named approvers then receive a request email. Its review link opens the
+MFA-protected Team Console, where an approver must confirm approval or rejection.
+Previewing either email cannot issue a key. A key is unusable until delivery
+is accepted; failed delivery revokes it and returns the request for review.
+The Lambda execution role needs permission to send from `ACCESS_REQUEST_FROM_EMAIL`.
+Registration also requires `ACCESS_REQUEST_APPROVERS`, `TEAM_CONSOLE_URL`, and
+the configured team authentication. Missing approval configuration fails closed.
+See [API access approvals](docs/API_ACCESS_APPROVAL.md) for the targeted rollout.
 
 Keep `PUBLIC_API_KEY_REQUIRED=0` until the public dashboard has a server-side
 data proxy. A static browser dashboard cannot keep a shared key secret.

@@ -21,6 +21,8 @@ ENABLE_API_KEY_REGISTRATION = ENABLE_API_KEY_REGISTRATION_RAW == "1"
 PUBLIC_API_KEY_REQUIRED = PUBLIC_API_KEY_REQUIRED_RAW == "1"
 API_KEY_HASH_PEPPER = os.environ.get("API_KEY_HASH_PEPPER")
 ACCESS_REQUEST_FROM_EMAIL = os.environ.get("ACCESS_REQUEST_FROM_EMAIL")
+ACCESS_REQUEST_APPROVERS = os.environ.get("ACCESS_REQUEST_APPROVERS")
+TEAM_CONSOLE_URL = os.environ.get("TEAM_CONSOLE_URL")
 
 print("Starting AWS deployment script...")
 
@@ -113,12 +115,16 @@ API_KEY_HASH_PEPPER = API_KEY_HASH_PEPPER or existing_api_environment.get("API_K
 ACCESS_REQUEST_FROM_EMAIL = (
     ACCESS_REQUEST_FROM_EMAIL or existing_api_environment.get("ACCESS_REQUEST_FROM_EMAIL")
 )
+ACCESS_REQUEST_APPROVERS = ACCESS_REQUEST_APPROVERS or existing_api_environment.get("ACCESS_REQUEST_APPROVERS")
+TEAM_CONSOLE_URL = TEAM_CONSOLE_URL or existing_api_environment.get("TEAM_CONSOLE_URL")
 TEAM_AUTH_ISSUER = TEAM_AUTH_ISSUER or existing_api_environment.get("TEAM_AUTH_ISSUER")
 TEAM_AUTH_AUDIENCE = TEAM_AUTH_AUDIENCE or existing_api_environment.get("TEAM_AUTH_AUDIENCE")
 ENABLE_TEAM_CONSOLE = bool(TEAM_AUTH_ISSUER and TEAM_AUTH_AUDIENCE)
 
 print(f"Internal cost KPI: {'enabled' if ENABLE_COST_KPI else 'disabled'}")
 print(f"API key registration: {'enabled' if ENABLE_API_KEY_REGISTRATION else 'disabled'}")
+if ENABLE_API_KEY_REGISTRATION and not (ACCESS_REQUEST_APPROVERS and TEAM_CONSOLE_URL and ENABLE_TEAM_CONSOLE):
+    raise SystemExit("API registration now requires ACCESS_REQUEST_APPROVERS, TEAM_CONSOLE_URL, and configured team authentication. No resources were changed.")
 print(f"Public API key enforcement: {'enabled' if PUBLIC_API_KEY_REQUIRED else 'disabled'}")
 
 if PUBLIC_API_KEY_REQUIRED and not API_KEY_HASH_PEPPER:
@@ -453,6 +459,10 @@ def api_lambda_environment(existing_env=None):
         environment["API_KEY_HASH_PEPPER"] = API_KEY_HASH_PEPPER
     if ACCESS_REQUEST_FROM_EMAIL:
         environment["ACCESS_REQUEST_FROM_EMAIL"] = ACCESS_REQUEST_FROM_EMAIL
+    if ACCESS_REQUEST_APPROVERS:
+        environment["ACCESS_REQUEST_APPROVERS"] = ACCESS_REQUEST_APPROVERS
+    if TEAM_CONSOLE_URL:
+        environment["TEAM_CONSOLE_URL"] = TEAM_CONSOLE_URL
     if TEAM_AUTH_ISSUER:
         environment["TEAM_AUTH_ISSUER"] = TEAM_AUTH_ISSUER
     if TEAM_AUTH_AUDIENCE:
@@ -664,6 +674,7 @@ canonical_public_route_keys = [
 public_access_route_keys = [
     "POST /air-quality/v1/access-requests",
     "GET /air-quality/v1/access-requests/verify",
+    "POST /air-quality/v1/access-requests/verify",
 ]
 keyed_api_route_keys = [
     "GET /air-quality/v1/keyed/summary",
@@ -672,6 +683,8 @@ keyed_api_route_keys = [
     "GET /air-quality/v1/keyed/observations/export",
 ]
 internal_route_keys = [
+    "GET /air-quality/internal/v1/access-requests",
+    "POST /air-quality/internal/v1/access-requests/decision",
     "GET /air-quality/internal/v1/api-users",
     "POST /air-quality/internal/v1/api-users/revoke",
     "GET /air-quality/internal/v1/observations",
