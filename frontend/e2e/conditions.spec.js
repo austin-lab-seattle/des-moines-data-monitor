@@ -9,7 +9,7 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {} } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
@@ -39,7 +39,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
         row_key: `${id}-${index}`,
         timestamp: `2026-10-07 00:06:${String(59 - index).padStart(2, '0')}`,
         timestamp_iso: `2026-10-07T07:06:${String(59 - index).padStart(2, '0')}${id === 'NO2-CAPS' ? '' : '+00:00'}`,
-        values: { [instrument.columns[0]]: instrument.value, HHMMSS: '000659' },
+        values: { [instrument.columns[0]]: readingValues[id] ?? instrument.value, HHMMSS: '000659' },
         status: 'normal',
       }));
       await route.fulfill({ json: { instrument_id: id, columns: instrument.columns, rows } });
@@ -67,7 +67,7 @@ test('Conditions shows pollutant readings and hides internal counters and aircra
   await page.goto('/');
   for (const instrument of Object.values(instruments)) {
     await expect(page.getByRole('button', { name: `View latest readings from ${instrument.name}` }))
-      .toContainText(Number(instrument.value).toLocaleString('en-US', { maximumFractionDigits: 3 }));
+      .toContainText(Number(instrument.value).toLocaleString('en-US', { maximumFractionDigits: 2 }));
   }
   for (const id of Object.keys(instruments)) {
     await expect(page.locator('.pollutant-instrument-id', { hasText: id })).toBeVisible();
@@ -95,6 +95,36 @@ test('each pollutant opens eight labeled readings in Conditions', async ({ page 
     await page.keyboard.press('Escape');
     await expect(dialog).not.toBeVisible();
     expect(new URL(page.url()).pathname).toBe('/');
+  }
+  expect(errors).toEqual([]);
+});
+
+test('latest cards use ordinary numbers with two decimals while recent readings keep source precision', async ({ page }) => {
+  const cases = {
+    'CO2-LICOR': { raw: '4.23256e2', display: '423.26' },
+    'NEPH-PM25': { raw: '3.615586', display: '3.62' },
+    'NO2-CAPS': { raw: '2.141', display: '2.14' },
+    SMPS: { raw: '4.54308e+3', display: '4,543.08' },
+  };
+  const errors = await mockApi(page, { missingBlackCarbon: true,
+    readingValues: Object.fromEntries(Object.entries(cases).map(([id, value]) => [id, value.raw])),
+  });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'View latest readings from Black carbon' }).locator('.pollutant-value')).toHaveText('N/A');
+  for (const [id, value] of Object.entries(cases)) {
+    const card = page.getByRole('button', { name: `View latest readings from ${instruments[id].name}` });
+    await expect(card.locator('.pollutant-value')).toHaveText(value.display);
+    await card.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.locator('tbody tr').first().locator('td').nth(1)).toHaveText(value.raw);
+    await page.keyboard.press('Escape');
+  }
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Use dark theme' }).click();
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.locator('.pollutant-value').evaluateAll(elements => elements.every(element => element.scrollWidth <= element.clientWidth))).toBe(true);
+    }
   }
   expect(errors).toEqual([]);
 });
@@ -314,7 +344,7 @@ test('night sky has subtle stars with no alteration of instrument values', async
   await mockApi(page, { siteWeather: { is_day: false, cloud_cover: 0 } });
   await page.goto('/');
   await expect(page.locator('.sky-night .sky-star')).toHaveCount(16);
-  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' })).toContainText('10.255');
+  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' })).toContainText('10.26');
   await expect(page.locator('main')).not.toContainText(/\u2014|\u2013/);
 });
 
