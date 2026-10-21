@@ -76,6 +76,17 @@ class TeamAccessTests(unittest.TestCase):
         identity = lambda_api.team_identity(event("/", groups="[Admin,Reviewer]"))
         self.assertEqual(identity["roles"], {"Admin", "Reviewer"})
 
+    def test_gateway_flattened_role_arrays_are_normalized(self):
+        for groups in (["Admin", "ApiApprover"], '["Admin","ApiApprover"]',
+                       "[Admin ApiApprover]", "Admin ApiApprover", "Admin,ApiApprover"):
+            with self.subTest(groups=groups):
+                self.assertEqual(lambda_api.team_identity(event("/", groups=groups))["roles"], {"Admin", "ApiApprover"})
+
+    def test_malformed_or_unknown_group_names_cannot_grant_roles_by_substring(self):
+        for groups in ('["Not Admin"]', "[Not Admin]", "Not Admin", "[Admin", "[[Admin]]", "[Admin,Not Admin]", {"Admin": True}, 1):
+            with self.subTest(groups=groups):
+                self.assertEqual(lambda_api.team_identity(event("/", groups=groups))["roles"], set())
+
     def test_dashboard_counts_field_neph_timestamp(self):
         row = "2026-09-17 13:13:50, 8.174, 25.114, 26.847, 39.478, 1011.836,00,07"
         self.assertTrue(lambda_api.is_data_row("NEPH-PM25", row))

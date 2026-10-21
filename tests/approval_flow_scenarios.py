@@ -155,6 +155,20 @@ class ApprovalFlowTests(unittest.TestCase):
             event["requestContext"]["http"]["method"] = method
             self.assertEqual(self.api.lambda_handler(event, None)["statusCode"], 403)
 
+    def test_gateway_space_flattened_groups_can_review_with_existing_security_gates(self):
+        for groups in ("[Admin ApiApprover]", "[ApiApprover Viewer]"):
+            event = self.actor()
+            event["rawPath"] = self.api.INTERNAL_API_ROUTES["access_requests"]
+            event["requestContext"]["http"]["method"] = "GET"
+            claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+            claims["cognito:groups"] = groups
+            self.assertEqual(self.api.lambda_handler(event, None)["statusCode"], 200)
+            claims["email_verified"] = "false"
+            self.assertEqual(self.api.lambda_handler(event, None)["statusCode"], 403)
+            claims["email_verified"] = "true"
+            claims["email"] = "unlisted@example.org"
+            self.assertEqual(self.api.lambda_handler(event, None)["statusCode"], 403)
+
     def test_pending_verification_cannot_be_approved(self):
         request_id, _ = self.request()
         self.assertEqual(self.decide(request_id)["statusCode"], 409)

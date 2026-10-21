@@ -182,18 +182,32 @@ TEAM_ROLES = {"Admin", "Reviewer", "AccessManager", "ApiApprover", "Viewer"}
 def _claim_groups(value):
     """Normalize API Gateway's Cognito groups claim into a set."""
     if isinstance(value, list):
-        return {str(group) for group in value}
-    if not value:
+        return {group for group in value if isinstance(group, str)}
+    if not isinstance(value, str) or not value.strip():
         return set()
-    text = str(value).strip()
+    text = value.strip()
     if text.startswith("["):
+        if not text.endswith("]"):
+            return set()
         try:
             parsed = json.loads(text)
             if isinstance(parsed, list):
-                return {str(group) for group in parsed}
+                return {group for group in parsed if isinstance(group, str)}
         except json.JSONDecodeError:
-            text = text.strip("[]")
-    return {group.strip().strip("'\"") for group in text.split(",") if group.strip()}
+            pass
+        text = text[1:-1].strip()
+    if not text:
+        return set()
+    if "," in text:
+        groups = [group.strip().strip("'\"") for group in text.split(",")]
+        return set(groups) if all(re.fullmatch(r"[\w.:-]+", group) for group in groups) else set()
+    # HTTP API authorizers can flatten an array as "[Admin ApiApprover]".
+    # Only accept a whitespace-flattened list composed entirely of our known
+    # roles. Never turn an unknown group named "Not Admin" into Admin access.
+    groups = text.split()
+    if len(groups) > 1:
+        return set(groups) if set(groups) <= TEAM_ROLES else set()
+    return {text} if re.fullmatch(r"[\w.:-]+", text) else set()
 
 
 def team_identity(event):
