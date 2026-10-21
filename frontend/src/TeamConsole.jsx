@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { Activity, Database, Flag, KeyRound, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import './AccessApproval.css';
+import TeamEmailVerification from './TeamEmailVerification.jsx';
+import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
 
 // Public OAuth client metadata, not credentials. Authentication and role checks
 // are enforced by API Gateway and the backend, never by these browser values.
@@ -19,7 +21,7 @@ export default function TeamConsole() {
     redirect_uri: `${window.location.origin}/team`,
     post_logout_redirect_uri: `${window.location.origin}/team`,
     response_type: 'code',
-    scope: 'openid email profile',
+    scope: TEAM_LOGIN_SCOPE,
     userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   }) : null, []);
   const [user, setUser] = useState(null);
@@ -72,7 +74,7 @@ export default function TeamConsole() {
   }, [user]);
 
   const load = useCallback(async () => {
-    if (!user) return;
+    if (!user || !teamEmailVerified(user)) return;
     const requestId = ++loadRequestId.current;
     setLoading(true); setError(''); setNotice('');
     const path = tab === 'requests'
@@ -152,6 +154,9 @@ export default function TeamConsole() {
 
   if (!configured()) return <TeamSetup />;
   if (!user) return <TeamLogin onLogin={() => manager.signinRedirect({ state: { request_id: targetRequest } })} error={error} />;
+  if (!teamEmailVerified(user)) return <TeamEmailVerification authority={AUTHORITY} user={user}
+    onSignInAgain={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}
+    onSignOut={() => manager.signoutRedirect()}/>;
 
   const keys = data?.keys || [];
   const rows = data?.rows || [];

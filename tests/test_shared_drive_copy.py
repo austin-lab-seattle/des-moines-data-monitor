@@ -7,6 +7,35 @@ from scripts.field import copy_to_shared_drive
 
 
 class SharedDriveCopyTests(unittest.TestCase):
+    def test_new_co_and_bc_subfolders_are_copied_without_registration(self):
+        # Opaque, synthetic copy-test bytes, not an asserted instrument format.
+        payloads = {
+            "CO/vendor export/2026-10/raw.csv": b"COPY TEST ONLY\r\nCO\x00opaque\r\n",
+            "BC/vendor export/2026-10/raw.csv": b"\xef\xbb\xbfCOPY TEST ONLY\r\nBC\r\n",
+            "co2_li_cor/raw.csv": b"COPY TEST ONLY\r\nCO2 is not CO\r\n",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            source, destination = Path(root) / "local", Path(root) / "shared"
+            source.mkdir()
+            self.assertTrue(copy_to_shared_drive.copy_tree(source, destination))
+            # These folders appear after the copy job was already installed.
+            for relative, payload in payloads.items():
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            self.assertTrue(copy_to_shared_drive.copy_tree(source, destination))
+            for relative, payload in payloads.items():
+                with self.subTest(relative=relative):
+                    self.assertEqual(payload, (source / relative).read_bytes())
+                    self.assertEqual(payload, (destination / relative).read_bytes())
+            self.assertEqual(set(payloads), {
+                path.relative_to(destination).as_posix()
+                for path in destination.rglob("*") if path.is_file()
+            })
+            # No duplicate versions or lingering partial files on a repeat run.
+            self.assertTrue(copy_to_shared_drive.copy_tree(source, destination))
+            self.assertEqual(3, sum(path.is_file() for path in destination.rglob("*")))
+
     def test_copy_is_non_destructive_and_skips_current_files(self):
         with tempfile.TemporaryDirectory() as root:
             source = Path(root) / "local"
