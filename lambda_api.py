@@ -26,6 +26,7 @@ BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
 ENABLE_COST_KPI = os.environ.get("ENABLE_COST_KPI") == "1"
 ENABLE_API_KEY_REGISTRATION = os.environ.get("ENABLE_API_KEY_REGISTRATION") == "1"
+ENABLE_EMAIL_LINK_APPROVAL = os.environ.get("ENABLE_EMAIL_LINK_APPROVAL") == "1"
 PUBLIC_API_KEY_REQUIRED = os.environ.get("PUBLIC_API_KEY_REQUIRED") == "1"
 ACCESS_REQUESTS_TABLE = os.environ.get("ACCESS_REQUESTS_TABLE", "AQApiAccessRequests")
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "AQApiKeys")
@@ -45,6 +46,7 @@ API_ROUTES = {
     "flights": "/air-quality/v1/flights",
     "access_requests": "/air-quality/v1/access-requests",
     "verify_access": "/air-quality/v1/access-requests/verify",
+    "email_decision": "/air-quality/v1/access-requests/email-decision",
 }
 KEYED_API_ROUTES = {
     "summary": "/air-quality/v1/keyed/summary",
@@ -239,10 +241,12 @@ def require_team_role(event, allowed_roles):
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 API_KEY_PATTERN = re.compile(r"^aqk_([a-z0-9]{16})_([A-Za-z0-9_-]{32,})$")
 VERIFICATION_TOKEN_PATTERN = re.compile(r"^aqv_([0-9a-f-]{36})_([A-Za-z0-9_-]{32,})$")
+EMAIL_APPROVAL_TOKEN_PATTERN = re.compile(r"^aqa_([0-9a-f-]{36})_([A-Za-z0-9_-]{43})$")
 ACCESS_REQUEST_WINDOW_SECONDS = 24 * 60 * 60
 ACCESS_REQUEST_RETENTION_SECONDS = 90 * 24 * 60 * 60
 VERIFICATION_WINDOW_SECONDS = 30 * 60
 APPROVAL_WINDOW_SECONDS = 7 * 24 * 60 * 60
+EMAIL_APPROVAL_WINDOW_SECONDS = 24 * 60 * 60
 PER_MINUTE_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "30"))
 PER_DAY_LIMIT = int(os.environ.get("API_RATE_LIMIT_PER_DAY", "5000"))
 EXPORTS_PER_DAY_LIMIT = int(os.environ.get("API_EXPORT_LIMIT_PER_DAY", "20"))
@@ -493,7 +497,12 @@ def verify_access_request(event):
                 return access_response(202, {"message": "Verification is already processing. Please retry shortly if needed."})
             raise
         try:
-            ses_client.send_email(**approval_notification_email(request))
+            if ENABLE_EMAIL_LINK_APPROVAL:
+                request = prepare_email_approval(request_id, now_epoch)
+                for recipient in ACCESS_REQUEST_APPROVERS:
+                    ses_client.send_email(**approval_notification_email(request, recipient))
+            else:
+                ses_client.send_email(**approval_notification_email(request))
         except Exception:
             dynamodb_client.update_item(
                 TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
@@ -509,14 +518,50 @@ def verify_access_request(event):
     except Exception:
         # Never include request bodies, verification tokens or keys in logs.
         print("API access verification/notification failed")
-        return access_response(503, {"error": "Team notification could not be completed. Retry this verification link; no API key has been issued."})
+        return access_response(503, {"error": "Team notification could not be completed. Retry this verification link while it remains valid, or contact the team to check your request status."})
 
     return access_response(200, {
         "message": "Email verified. The research team has been notified. Your key will be emailed only after approval."
     })
 
 
-def approval_notification_email(request):
+def email_approval_token(request, recipient, decision):
+    # A stored nonce lets notification retries reproduce the same links without
+    # storing bearer credentials. The server-only pepper and a separate HMAC
+    # domain are required to derive them; nonce + stored hashes are not enough.
+    material = json.dumps(["email-approval-v1", ddb_string(request, "request_id"),
+        ddb_string(request, "email_approval_nonce"), recipient, decision], separators=(",", ":"))
+    secret = hmac.new(API_KEY_HASH_PEPPER.encode(), material.encode(), hashlib.sha256).digest()
+    return f"aqa_{ddb_string(request, 'request_id')}_{base64.urlsafe_b64encode(secret).decode().rstrip('=')}"
+
+
+def prepare_email_approval(request_id, epoch):
+    request = dynamodb_client.get_item(TableName=ACCESS_REQUESTS_TABLE,
+        Key={"request_id": {"S": request_id}}, ConsistentRead=True).get("Item")
+    if ddb_string(request, "status") != "PENDING_APPROVAL" or not ddb_string(request, "verified_at"):
+        raise ValueError("Request is no longer awaiting approval")
+    if ddb_string(request, "email_approval_nonce"):
+        # Never rotate already-delivered links during a partial SES retry.
+        return request
+    request["email_approval_nonce"] = {"S": secrets.token_urlsafe(32)}
+    expires = min(epoch + EMAIL_APPROVAL_WINDOW_SECONDS, ddb_number(request, "approval_expires_epoch", 0) or 0)
+    tokens = {}
+    for recipient in ACCESS_REQUEST_APPROVERS:
+        for decision in ("approve", "reject"):
+            tokens[key_hash(email_approval_token(request, recipient, decision))] = {"M": {
+                "recipient": {"S": recipient}, "decision": {"S": decision}, "expires": {"N": str(expires)}}}
+    dynamodb_client.update_item(TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
+        UpdateExpression="SET email_approval_nonce = :nonce, email_approval_tokens = :tokens, email_approval_expires = :expires",
+        ConditionExpression="#status = :pending AND attribute_exists(verified_at) AND approval_expires_epoch > :epoch AND attribute_not_exists(email_approval_nonce)",
+        ExpressionAttributeNames={"#status": "status"}, ExpressionAttributeValues={
+            ":nonce": request["email_approval_nonce"], ":tokens": {"M": tokens}, ":expires": {"N": str(expires)},
+            ":pending": {"S": "PENDING_APPROVAL"}, ":epoch": {"N": str(epoch)}})
+    request["email_approval_tokens"] = {"M": tokens}
+    request["email_approval_expires"] = {"N": str(expires)}
+    return request
+
+
+def approval_notification_email(request, recipient=None):
     request_id = ddb_string(request, "request_id")
     url = f"{TEAM_CONSOLE_URL}?request_id={urllib.parse.quote(request_id)}"
     details = [("Name", "name"), ("Email", "email"), ("Organization", "organization"), ("Intended use", "use_case")]
@@ -524,6 +569,27 @@ def approval_notification_email(request):
     text += "\n".join(f"{label}: {ddb_string(request, field, '')}" for label, field in details)
     text += f"\n\nReview, approve or reject: {url}\n\nTeam sign-in and confirmation are required. Opening this link does not approve access. This request expires seven days after submission."
     rows = "".join(f"<dt><b>{label}</b></dt><dd>{html.escape(ddb_string(request, field, ''))}</dd>" for label, field in details)
+    if recipient is not None:
+        console = urllib.parse.urlsplit(TEAM_CONSOLE_URL)
+        origin = f"{console.scheme}://{console.netloc}"
+        links = {decision: f"{origin}{API_ROUTES['email_decision']}?token={email_approval_token(request, recipient, decision)}"
+            for decision in ("approve", "reject")}
+        expires = datetime.fromtimestamp(ddb_number(request, "email_approval_expires"), timezone.utc).strftime("%b %d, %Y %H:%M UTC")
+        text = "A verified researcher has requested a read-only Des Moines Air Quality API key.\n\n"
+        text += "\n".join(f"{label}: {ddb_string(request, field, '')}" for label, field in details)
+        text += (f"\n\nApprove: {links['approve']}\nReject: {links['reject']}\n\n"
+            f"No sign-in is required. Review the details and confirm your decision on the next page. Links expire {expires} and can be used once. "
+            "Opening a link does not approve or reject. Do not forward this email: anyone holding a link can use it. "
+            f"The key is sent only to the verified requester. Team Console fallback: {url}")
+        return {"Source": ACCESS_REQUEST_FROM_EMAIL, "Destination": {"ToAddresses": [recipient]},
+            "Message": {"Subject": {"Data": "Approval requested: Des Moines Air Quality API access", "Charset": "UTF-8"},
+                "Body": {"Text": {"Data": text, "Charset": "UTF-8"}, "Html": {"Data":
+                    f'<h2>API access request</h2><p>Email ownership verified. No key has been issued.</p><dl>{rows}</dl>'
+                    f'<p><a href="{html.escape(links["approve"], quote=True)}">Approve access</a> &nbsp; '
+                    f'<a href="{html.escape(links["reject"], quote=True)}">Reject access</a></p>'
+                    f'<p>No sign-in required. Confirm on the next page. Links expire {expires} and can be used once. Opening a link cannot decide access.</p>'
+                    f'<p><b>Do not forward:</b> anyone holding a link can use it.</p><p><a href="{html.escape(url, quote=True)}">Team Console fallback</a></p>',
+                    "Charset": "UTF-8"}}}}
     return {"Source": ACCESS_REQUEST_FROM_EMAIL, "Destination": {"ToAddresses": list(ACCESS_REQUEST_APPROVERS)},
         "Message": {"Subject": {"Data": "Approval requested: Des Moines Air Quality API access", "Charset": "UTF-8"},
             "Body": {"Text": {"Data": text, "Charset": "UTF-8"}, "Html": {"Data":
@@ -566,6 +632,85 @@ def verification_page(event, result=None):
         "body": f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Des Moines API access</title></head><body>{body}</body></html>'}
 
 
+def email_decision_page(event):
+    """Possession of a scoped email link is authority, not proof of identity.
+
+    GET only previews; an explicit POST is required even for email scanners.
+    No Cognito session is required and no supplied email/request/decision is
+    trusted: those values come exclusively from the stored token authority.
+    """
+    status, message, content = 400, "This approval link is invalid, expired or already used.", ""
+    try:
+        if not ENABLE_EMAIL_LINK_APPROVAL or not access_registration_ready():
+            status, message = 503, "Email approval is unavailable. Use the Team Console instead."
+        else:
+            method = event.get("requestContext", {}).get("http", {}).get("method", "GET").upper()
+            if method not in {"GET", "POST"}:
+                return response(405, {"error": "Method not allowed"})
+            if method == "POST":
+                raw_body = event.get("body") or ""
+                if len(raw_body) > 4096:
+                    raise ValueError("Oversized submission")
+                if event.get("isBase64Encoded"):
+                    raw_body = base64.b64decode(raw_body, validate=True).decode("utf-8")
+                submitted = urllib.parse.parse_qs(raw_body, max_num_fields=8)
+                token = submitted.get("token", [""])[0]
+            else:
+                token = str(query_params(event).get("token") or "")
+            match = EMAIL_APPROVAL_TOKEN_PATTERN.fullmatch(token)
+            if match:
+                request_id, token_hash = match.group(1), key_hash(token)
+                request = dynamodb_client.get_item(TableName=ACCESS_REQUESTS_TABLE,
+                    Key={"request_id": {"S": request_id}}, ConsistentRead=True).get("Item")
+                authority = (request or {}).get("email_approval_tokens", {}).get("M", {}).get(token_hash, {}).get("M", {})
+                recipient, decision = ddb_string(authority, "recipient"), ddb_string(authority, "decision")
+                epoch = int(time.time())
+                valid = (ddb_string(request, "status") == "PENDING_APPROVAL" and ddb_string(request, "verified_at")
+                    and recipient in ACCESS_REQUEST_APPROVERS and decision in {"approve", "reject"}
+                    and epoch < (ddb_number(authority, "expires", 0) or 0)
+                    and epoch < (ddb_number(request, "approval_expires_epoch", 0) or 0))
+                if valid and method == "GET":
+                    status, message = 200, "Review the request and confirm your decision. No sign-in is required."
+                    details = [("Name", "name"), ("Verified email", "email"), ("Organization", "organization"), ("Intended use", "use_case")]
+                    rows = "".join(f'<dt>{label}</dt><dd>{html.escape(ddb_string(request, field, ""))}</dd>' for label, field in details)
+                    action = "Approve" if decision == "approve" else "Reject"
+                    explanation = ("A read-only API key will be emailed only to the verified requester above."
+                        if decision == "approve" else "No API key will be issued.")
+                    content = (f'<dl>{rows}</dl><p>{explanation}</p><p>This link was sent to {html.escape(recipient)}. '
+                        'Possession of the link authorizes this decision; do not forward it.</p>'
+                        f'<form method="post" action="{API_ROUTES["email_decision"]}">'
+                        f'<input type="hidden" name="token" value="{html.escape(token, quote=True)}">'
+                        f'<button type="submit">Confirm: {action} access</button></form>')
+                elif valid:
+                    source_ip = str(event.get("requestContext", {}).get("http", {}).get("sourceIp") or "unknown")
+                    limited = increment_rate_counter(f"email-approval:{key_hash(source_ip)}:{epoch // 60}", 30,
+                        epoch + 120, max(1, 60 - epoch % 60))
+                    # Audit the link recipient as such, never as a verified
+                    # Cognito person or MFA-authenticated account.
+                    identity = {"email": recipient, "subject": f"email-link:{recipient}", "roles": set()}
+                    result = limited or decide_access_request({"body": json.dumps({"request_id": request_id, "decision": decision})},
+                        identity, email_authority=token_hash)
+                    status = result["statusCode"]
+                    payload = json.loads(result["body"])
+                    message = payload.get("message") or payload.get("error") or "Request processed."
+                    if status >= 500:
+                        message += " If this link no longer works, use the Team Console to review the request."
+    except (ValueError, UnicodeError, TypeError):
+        pass
+    except Exception:
+        # Do not log the event, link, form, request details or bearer token.
+        status, message = 503, "Email approval is temporarily unavailable. No key is returned here."
+        print("Email approval could not be completed; secrets omitted")
+    style = "body{margin:0;background:#eef5f8;color:#152633;font:17px/1.6 system-ui,sans-serif}main{max-width:640px;margin:6vh auto;padding:32px;background:white;border:1px solid #ccdfe8;border-radius:18px}h1{color:#10677e;font-size:30px}dt{font-weight:700;color:#365565}dd{margin:0 0 16px;overflow-wrap:anywhere;white-space:pre-wrap}button{background:#087e9c;color:white;border:0;border-radius:8px;padding:14px 22px;font:700 17px system-ui;cursor:pointer}a{color:#10677e}small{color:#557080}@media(max-width:700px){main{margin:20px;padding:24px}}"
+    return {"statusCode": status, "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"},
+        "body": '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>Des Moines API access</title><style>{style}</style></head><body><main><small>Des Moines Air | Research API</small>'
+            f'<h1>API access decision</h1><p>{html.escape(message)}</p>{content}'
+            f'<p><a href="{html.escape(TEAM_CONSOLE_URL, quote=True)}">Open Team Console</a></p></main></body></html>'}
+
+
 def get_access_requests(event, identity):
     request_id = str(query_params(event).get("request_id") or "").strip()
     if request_id and not re.fullmatch(r"[0-9a-f-]{36}", request_id):
@@ -582,7 +727,7 @@ def get_access_requests(event, identity):
         return response(503, {"error": "Access requests could not be loaded"})
 
 
-def decide_access_request(event, identity):
+def decide_access_request(event, identity, email_authority=None):
     payload = parse_body(event)
     if not isinstance(payload, dict):
         return response(400, {"error": "Invalid JSON body"})
@@ -605,15 +750,24 @@ def decide_access_request(event, identity):
             return response(409, {"error": "Only verified requests awaiting approval can be decided"})
         if epoch >= (ddb_number(request, "approval_expires_epoch", 0) or 0):
             return response(410, {"error": "This request has expired. The researcher must submit a new request"})
-        audit_id = begin_audit_event(identity, f"{decision.upper()}_API_REQUEST", request_id)
+        audit_id = begin_audit_event(identity, f"{decision.upper()}_API_REQUEST", request_id,
+            {"authorization_method": "email_link", "identity_verified": False} if email_authority else None)
         if not audit_id:
             return response(503, {"error": "Audit logging is unavailable; no change was made"})
         condition = "#status = :pending AND attribute_exists(verified_at) AND approval_expires_epoch > :epoch"
         values = {":pending": {"S": "PENDING_APPROVAL"}, ":epoch": {"N": str(epoch)}, ":now": {"S": now.isoformat()}, ":actor": {"S": identity["email"]}}
+        names = {"#status": "status"}
+        if email_authority:
+            # Check token authority inside the same conditional claim that
+            # inserts the key. A pre-read alone cannot prevent revoke/race use.
+            names["#email_token"] = email_authority
+            condition += " AND email_approval_tokens.#email_token.recipient = :actor AND email_approval_tokens.#email_token.decision = :decision AND email_approval_tokens.#email_token.#expires > :epoch"
+            names["#expires"] = "expires"
+            values[":decision"] = {"S": decision}
         if decision == "reject":
             dynamodb_client.update_item(TableName=ACCESS_REQUESTS_TABLE, Key={"request_id": {"S": request_id}},
-                UpdateExpression="SET #status = :rejected, rejected_by = :actor, rejected_at = :now REMOVE verification_token_hash",
-                ConditionExpression=condition, ExpressionAttributeNames={"#status": "status"},
+                UpdateExpression="SET #status = :rejected, rejected_by = :actor, rejected_at = :now REMOVE verification_token_hash, email_approval_tokens",
+                ConditionExpression=condition, ExpressionAttributeNames=names,
                 ExpressionAttributeValues=values | {":rejected": {"S": "REJECTED"}})
             finish_audit_event(audit_id, "SUCCEEDED")
             return response(200, {"message": "Request rejected. No key was issued", "audit_id": audit_id})
@@ -625,8 +779,8 @@ def decide_access_request(event, identity):
         dynamodb_client.transact_write_items(TransactItems=[
             {"Put": {"TableName": API_KEYS_TABLE, "Item": key_item, "ConditionExpression": "attribute_not_exists(key_id)"}},
             {"Update": {"TableName": ACCESS_REQUESTS_TABLE, "Key": {"request_id": {"S": request_id}},
-                "UpdateExpression": "SET #status = :issuing, approved_by = :actor, approved_at = :now, key_id = :key_id REMOVE verification_token_hash",
-                "ConditionExpression": condition, "ExpressionAttributeNames": {"#status": "status"},
+                "UpdateExpression": "SET #status = :issuing, approved_by = :actor, approved_at = :now, key_id = :key_id REMOVE verification_token_hash, email_approval_tokens",
+                "ConditionExpression": condition, "ExpressionAttributeNames": names,
                 "ExpressionAttributeValues": values | {":issuing": {"S": "APPROVING"}, ":key_id": {"S": key_id}}}},
         ])
         claimed = True
@@ -2209,6 +2363,9 @@ def lambda_handler(event, context):
 
     if route_matches(path, API_ROUTES["access_requests"]) and method == "POST":
         return create_access_request(event)
+
+    if route_matches(path, API_ROUTES["email_decision"]):
+        return email_decision_page(event)
 
     if route_matches(path, API_ROUTES["verify_access"]):
         if method == "GET":

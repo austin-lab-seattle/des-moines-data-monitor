@@ -4,11 +4,31 @@ The requester submits name, email, organization and intended use, then confirms
 email ownership with an explicit form submission. Link previews never confirm
 ownership or issue a key. Verified requests expire seven days after submission.
 
-The configured approvers receive a notification with a link to the private Team
-Console. They sign in with their invited account and required authenticator-app
-MFA, inspect the request and confirm approval or rejection. The email link
-contains only a request identifier, not credentials or approval authority.
-Forwarding that link does not grant the recipient permission to approve.
+With `ENABLE_EMAIL_LINK_APPROVAL=1`, Elena, Yeon and Pavan receive separate
+notification emails with Approve and Reject links. Jeff's notifications remain
+deferred. A link opens a compact request preview with an explicit confirmation
+button. No active Team Console session, account login or MFA is required for
+this email-link path. GET previews never consume a link or decide access.
+
+**Security model:** possession of the email link authorizes its specific
+decision on its specific request. Anyone receiving a forwarded link can use it;
+it does not prove the clicker's identity. This tradeoff was explicitly accepted
+by the project owner. Do not forward these emails. Audit records identify the
+link's recipient with an `email-link:` subject and `identity_verified=false`,
+not a Cognito/MFA-authenticated person. This authority cannot edit measurements,
+list users, revoke keys or make decisions on other requests.
+
+Links expire 24 hours after generation, or when the request expires if sooner.
+The first conditional decision claim consumes **all** links for that request,
+including those sent to other approvers. Each recipient and each decision has a
+different token. Only token hashes and a nonce are stored; retrying notification
+delivery derives the same links with a domain-separated server-secret HMAC,
+without storing bearer tokens or invalidating links already received.
+
+The MFA-protected Team Console remains a fallback. Its request-ID-only links
+grant no authority and still require a verified, allowlisted team identity and
+appropriate role. Older notification emails retain that fallback behavior;
+deploying this change does not resend them or send any unsolicited emails.
 
 ## Readiness checks before a real request
 
@@ -17,10 +37,11 @@ Check the following without creating fake production requesters or issuing keys:
 
 - The deployed API source matches the reviewed release, registration is enabled,
   and the notification/approver list contains only the intended recipients.
-- Both private approval routes require API Gateway JWT authentication; unsigned
+- Both private approval routes still require API Gateway JWT authentication; unsigned
   calls must return 401. Invalid public submissions must not create requests or
-  send mail. Verification-link GET requests must never change state.
-- Each approver has an enabled, confirmed Cognito account, its intended email
+  send mail. Verification-link and email-decision GET requests never change state.
+  Email decisions require an unexpired, single-use token plus explicit POST.
+- For the Team Console fallback, each approver has an enabled, confirmed Cognito account, its intended email
   address has `email_verified=true`, and its group is permitted by the API.
   `CONFIRMED` alone does not prove that email verification is complete. SES
   sender verification is separate from the team-login email-verification flag.
@@ -35,8 +56,9 @@ normal authorized team sign-in; do not broaden operator permissions or bypass
 API Gateway authentication.
 
 The final end-to-end check needs a genuine consenting requester, delivery of the
-verification email, explicit verification, an authorized approver's MFA sign-in
-and decision, and delivery of a read-only key only to that verified requester.
+verification email, explicit verification, receipt of an approver notification,
+explicit email-link confirmation without a team session (or normal MFA-protected
+console approval), and delivery of a read-only key only to that verified requester.
 Obtain permission for notification emails before running that live test.
 
 ## Self-service team email verification
@@ -78,7 +100,7 @@ just to enable this scope. Existing sessions may need a new sign-in to obtain it
 
 `ApiApprover` is deliberately narrower than `Admin` or `AccessManager`. It does
 not grant record edits, user management, revocation or general audit access.
-The API checks both the authenticated role and the configured approver address
+For console decisions, the API checks both the authenticated role and the configured approver address
 and requires a verified account email. Existing roles and active researcher
 keys are preserved.
 
@@ -87,7 +109,10 @@ request are conditional and atomic: only one can claim key delivery. Keys are
 read-only, hashed at rest, never returned to an approver, and emailed only to the
 verified requester. A pending-delivery key cannot authenticate. If delivery
 fails, it is revoked and the request returns to the approval queue for explicit
-retry. A process crash with an `APPROVING` request requires operator inspection;
+console retry. Email links remain consumed after a delivery failure; never replay
+them to mint another key. Token authority, decision, recipient, expiry and request
+status are checked in the same conditional claim as key creation, not just during
+the page preview. A process crash with an `APPROVING` request requires operator inspection;
 do not issue a replacement without checking delivery and the recorded key state.
 
 If an approver notification fails, the requester can retry their verification
@@ -97,7 +122,39 @@ timeout, a duplicate notification is possible, but duplicate decisions cannot
 create a second key for that request. The private queue remains the source of
 truth when email delivery is delayed.
 
-## Targeted rollout
+## Email-link rollout
+
+Use the narrowly scoped release script, not the original provisioning script:
+
+```sh
+python scripts/aws/deploy_email_approvals.py --credentials-file /secure/path/aws_creds.json
+python scripts/aws/deploy_email_approvals.py --credentials-file /secure/path/aws_creds.json --apply
+# Publish frontend/vercel.json and wait for the production deployment to succeed.
+python scripts/aws/deploy_email_approvals.py --credentials-file /secure/path/aws_creds.json --apply --enable
+```
+
+The first command is read-only. Staging updates only API code and adds GET/POST
+email-decision routes with token authorization inside the handler. Enabling first
+checks the production rewrite with a harmless tokenless GET. It adds only the
+feature flag to the preserved environment. The script guards the AWS account,
+reviewed live-source baseline, approver list, JWT-protected private routes, MFA
+and invite-only settings, and performs readbacks. It never changes accounts,
+roles, IAM, instrument processing or Silver, and never sends emails or issues
+keys. Protected rollback files contain secrets and must never be shared.
+
+Rollback by setting only `ENABLE_EMAIL_LINK_APPROVAL=0` while preserving all other
+Lambda environment values. This disables outstanding email links and restores
+console-only notifications; existing issued keys and console access are unchanged.
+Do not change the key-hash pepper to revoke links: that would break existing keys.
+Tokens appear in email URLs; avoid recording query strings in application,
+proxy or analytics logs. Pages use no external resources or scripts and send
+`no-store`, `no-referrer`, restrictive CSP and frame-denial headers.
+
+## Original Team Console provisioning
+
+The original rollout below is historical bootstrap guidance, not the routine
+email-link deployment path. It may invite missing accounts, so do not rerun it
+merely to publish approval-link changes.
 
 First run all tests with `python -m pip install -r requirements-test.txt` and
 `python -m unittest discover -s tests`. The approval integration suite uses an
@@ -121,7 +178,7 @@ and updates
 only the dashboard API. Existing environment values and secrets are merged back.
 It does not update Silver processing, instruments, aircraft routes or monitoring.
 It never expands its own operator permissions. Missing AWS authority is a blocker,
-not a reason to weaken the role or switch to unauthenticated email approvals.
+not a reason to weaken private-route roles or skip email-token authorization.
 
 The script saves the previous API package and configuration in an operator-only
 temporary backup before deployment. The configuration contains secrets: never

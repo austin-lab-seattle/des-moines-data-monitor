@@ -268,8 +268,10 @@ ENABLE_API_KEY_REGISTRATION=1 python scripts/aws/deploy_backend.py
 ```
 
 The requester opens the verification link and explicitly submits confirmation.
-The named approvers then receive a request email. Its review link opens the
-MFA-protected Team Console, where an approver must confirm approval or rejection.
+The named approvers then receive a request email. With email-link approval enabled,
+its Approve/Reject links open a small confirmation page without requiring login.
+Links expire after 24 hours and authorize one request-specific decision, so do
+not forward them. The MFA-protected Team Console remains a fallback.
 Previewing either email cannot issue a key. A key is unusable until delivery
 is accepted; failed delivery revokes it and returns the request for review.
 The Lambda execution role needs permission to send from `ACCESS_REQUEST_FROM_EMAIL`.
