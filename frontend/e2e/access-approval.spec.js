@@ -12,7 +12,7 @@ async function setup(page, { loggedIn = true, canApprove = true, failure = false
   if (loggedIn) await page.addInitScript(({ authority, client }) => {
     sessionStorage.setItem(`oidc.user:${authority}:${client}`, JSON.stringify({
       id_token: 'CI-only-not-a-real-token', access_token: 'CI-only-not-a-real-token', token_type: 'Bearer',
-      profile: { sub: 'ci-only-subject', email: 'ci-approver@example.org' }, expires_at: Date.now() / 1000 + 3600,
+      profile: { sub: 'ci-only-subject', email: 'ci-approver@example.org', email_verified: true }, expires_at: Date.now() / 1000 + 3600,
     }));
   }, { authority, client });
   const decisions = [];

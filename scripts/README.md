@@ -15,6 +15,9 @@ clutter the checkout.
   uploads raw bytes to S3 Bronze without applying scientific transformations.
 - `field/copy_to_shared_drive.py` makes non-destructive, stable snapshots from
   `C:\des_moines\data` into the UW OneDrive shared folder.
+  It recursively includes new CO/BC subfolders without registering instruments.
+  This is copy-only; see [CO and BC readiness](../docs/CO_BC_INTEGRATION.md) for
+  the separate validation and AWS/dashboard activation requirements.
 - `field/windows/install_tasks.ps1` installs the serial logger, AWS uploader,
   and staggered shared-drive copy tasks.
 - `field/macos/install_upload_schedule.sh` and `field/macos/run_uploader.sh`

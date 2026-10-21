@@ -157,7 +157,7 @@ def ensure_client(client, pool_id):
         "CallbackURLs": CALLBACK_URLS,
         "LogoutURLs": CALLBACK_URLS,
         "AllowedOAuthFlows": ["code"],
-        "AllowedOAuthScopes": ["openid", "email", "profile"],
+        "AllowedOAuthScopes": ["openid", "email", "profile", "aws.cognito.signin.user.admin"],
         "AllowedOAuthFlowsUserPoolClient": True,
         "PreventUserExistenceErrors": "ENABLED",
         "EnableTokenRevocation": True,

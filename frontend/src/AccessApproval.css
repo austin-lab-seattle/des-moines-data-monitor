@@ -4,3 +4,12 @@
 .team-request-actions button:disabled { opacity:.5; cursor:not-allowed; }
 .team-request-use { min-width:160px; max-width:340px; white-space:normal; overflow-wrap:anywhere; }
 .team-dialog-actions button:last-child { background:#168aad; border-color:#168aad; color:#fff; }
+.team-verification-email { overflow-wrap:anywhere; font-weight:750; }
+.team-email-code { display:grid; gap:.7rem; margin-top:1.3rem; }
+.team-email-code label { color:#315367; font-size:.85rem; font-weight:750; }
+.team-email-code input { width:100%; box-sizing:border-box; border:1px solid #aabdc9; border-radius:8px; padding:.75rem; font-size:1rem; }
+.team-auth-submit:disabled { opacity:.6; cursor:not-allowed; }
+.team-verification-signout { display:block; margin:1.2rem auto 0; padding:.5rem .8rem; color:#315367; border:1px solid #c9d7df; border-radius:8px; background:#fff; }
+.team-email-verification-shell { width:min(560px,100%); grid-template-columns:minmax(0,1fr); }
+.team-email-verification-shell .team-auth-card { margin:1.5rem; }
+@media (max-width:480px) { .team-email-verification-shell .team-auth-card { margin:.65rem; } }

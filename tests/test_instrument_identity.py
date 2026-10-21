@@ -97,6 +97,25 @@ class InstrumentIdentityTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertIn("no recognizable NO2-CAPS", result["reason"])
 
+    def test_unimplemented_co_cannot_be_enabled_by_a_folder_or_config_label(self):
+        # CO must get its own validated adapter, not reuse the CO2/NO2 parser.
+        for label in ("CO", "CO-UNKNOWN"):
+            for payload in ("COPY TEST ONLY", LICOR, NO2):
+                with self.subTest(label=label, payload=payload):
+                    result = inspect_batch(label, payload)
+                    self.assertFalse(result["valid"])
+                    self.assertIn("unsupported configured instrument", result["reason"])
+
+    def test_supplied_unmapped_co_code_value_row_is_not_another_instrument(self):
+        # User-supplied excerpt, not a validated concentration/unit mapping.
+        row = (
+            "C,2026/10/01 00:00:00, 53,  0.228123, 13,       201, 49,       128,"
+            " 75, 50.010742, 72,737.102421, 73,753.970830, 77, 32.500000,"
+            " 79,  1.237625, 83,         2,110,         1, 86,  0.199414, 84,  3.928615"
+        )
+        self.assertIsNone(classify_line(row))
+        self.assertIsNone(classify_line(row.rsplit(", 83,", 1)[0] + ", 83,"))
+
     def test_split_licor_xml_is_recognized_as_a_batch(self):
         split = LICOR.replace("><", ">\n<")
         result = inspect_batch("CO2-LICOR", split)
