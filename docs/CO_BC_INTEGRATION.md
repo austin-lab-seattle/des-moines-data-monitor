@@ -103,3 +103,14 @@ timezone offset. The instrument model, field-code meanings, concentration units
 and timezone remain unconfirmed. Do not label code 53 as CO, assume ppm, treat
 all numeric diagnostics as measurements, or repair incomplete rows by inventing
 values. No BC export was included with that excerpt.
+
+There is a tentative match to the Serinus protocol, not a confirmed model
+identification. The manufacturer-hosted
+[Serinus 30 manual, Appendix A, pages 207-213](https://metone.com/wp-content/uploads/2022/08/Acoem-Met-One-Instruments-GAS-1030-user-manual-version-3.3-20220726.pdf)
+maps code 53 to the primary gas average, 50 to the instantaneous primary gas
+concentration, 86 to primary raw concentration, 116 to instrument units and
+163 to the averaging-period setting. Codes 50, 116 and 163 are absent from the
+excerpt. Confirm the actual model/firmware and these settings before applying
+that mapping. Do not present repeated running-average values as independent
+instantaneous observations or average them again without labeling the source
+window and defining the intended statistic.
