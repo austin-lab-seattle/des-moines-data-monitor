@@ -92,3 +92,19 @@ test('backend-denied approver has no approval controls and mobile view stays wit
   expect(decisions).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
+
+test('a failed access-request load is never shown as an empty queue and can be retried', async ({ page }) => {
+  await setup(page);
+  let denied = true;
+  await page.route('**/air-quality/internal/v1/access-requests*', route => route.fulfill(denied
+    ? { status: 403, json: { error: 'Your team role does not allow this action' } }
+    : { json: { requests: [], viewer: { roles: ['ApiApprover'], can_approve: true } } }));
+  await page.goto('/team');
+  await expect(page.getByRole('alert')).toContainText('Your team role does not allow this action');
+  await expect(page.getByRole('button', { name: 'Refresh sign-in', exact: true })).toBeVisible();
+  await expect(page.getByText('No access requests found.', { exact: true })).toHaveCount(0);
+  denied = false;
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('No access requests found.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+});

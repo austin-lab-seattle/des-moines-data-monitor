@@ -35,6 +35,7 @@ export default function TeamConsole() {
   const [data, setData] = useState(null);
   const [viewer, setViewer] = useState(null);
   const [error, setError] = useState('');
+  const [authDenied, setAuthDenied] = useState(false);
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [flagRow, setFlagRow] = useState(null);
@@ -69,14 +70,18 @@ export default function TeamConsole() {
       },
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const failure = new Error(payload.error || `Request failed (${response.status})`);
+      failure.status = response.status;
+      throw failure;
+    }
     return payload;
   }, [user]);
 
   const load = useCallback(async () => {
     if (!user || !teamEmailVerified(user)) return;
     const requestId = ++loadRequestId.current;
-    setLoading(true); setError(''); setNotice('');
+    setLoading(true); setError(''); setAuthDenied(false); setNotice('');
     const path = tab === 'requests'
       ? `/air-quality/internal/v1/access-requests${targetRequest ? `?request_id=${encodeURIComponent(targetRequest)}` : ''}`
       : tab === 'users'
@@ -91,7 +96,7 @@ export default function TeamConsole() {
         setViewer(payload.viewer || null);
       }
     } catch (e) {
-      if (requestId === loadRequestId.current) { setError(e.message); setData(null); }
+      if (requestId === loadRequestId.current) { setError(e.message); setAuthDenied(e.status === 401 || e.status === 403); setData(null); setViewer(null); }
     } finally {
       if (requestId === loadRequestId.current) setLoading(false);
     }
@@ -172,9 +177,9 @@ export default function TeamConsole() {
     <div className="team-layout">
       <aside><p>Private workspace</p>{[['requests', KeyRound, 'Access requests'], ['users', KeyRound, 'API users'], ['review', Flag, 'Record review'], ['audit', Activity, 'Audit log']].filter(([id]) => id === 'requests' || id === 'users' && canManageKeys || id === 'review' && (canReview || roles.has('Viewer')) || id === 'audit' && (canManageKeys || canReview)).map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setData(null); }}><Icon size={17}/>{label}</button>)}</aside>
       <main><div className="team-title"><div><span>UW research team</span><h1>{tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1></div><div className="team-title-actions">{tab === 'review' && <select value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}<button onClick={load} disabled={loading}><RefreshCw size={16}/> Refresh</button></div></div>
-        {error && <div className="team-message team-error">{error}</div>}
+        {error && <div role="alert" className="team-message team-error">{error}{authDenied && <div className="team-auth-retry"><p>If your roles were recently assigned, refresh your sign-in to obtain current permissions.</p><button onClick={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}>Refresh sign-in</button></div>}</div>}
         {notice && <div className="team-message team-success">{notice}</div>}
-        {tab === 'requests' && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
+        {tab === 'requests' && !error && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
           <div className="team-table-wrap"><table><thead><tr><th>Requester</th><th>Intended use</th><th>Status</th><th>Expires</th><th>Decision</th></tr></thead><tbody>{requests.map(request => <tr key={request.request_id}>
             <td><strong>{request.name}</strong><small>{request.email}</small><small>{request.organization || 'Not provided'}</small></td>
             <td className="team-request-use">{request.use_case}</td><td>{request.status}</td><td>{new Date(request.expires_at).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', timeZoneName: 'short' })}</td>

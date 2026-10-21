@@ -1,4 +1,6 @@
 .team-request-actions { display:flex; flex-wrap:wrap; gap:.4rem; }
+.team-auth-retry p { margin:.5rem 0; }
+.team-auth-retry button { padding:.5rem .75rem; border:1px solid #a9363d; border-radius:7px; background:#fff; color:#8a2931; font-weight:750; }
 .team-request-actions button { border:1px solid #168aad; border-radius:7px; background:#fff; color:#0c5f7b; padding:.5rem .7rem; font-weight:750; }
 .team-request-actions button:first-child { background:#168aad; color:#fff; }
 .team-request-actions button:disabled { opacity:.5; cursor:not-allowed; }
