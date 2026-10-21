@@ -1,5 +1,6 @@
 {
   "rewrites": [
+    { "source": "/air-quality/v1/access-requests/email-decision", "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/access-requests/email-decision" },
     { "source": "/air-quality/v1/access-requests/verify", "destination": "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/access-requests/verify" },
     { "source": "/developers", "destination": "/" },
     { "source": "/observations", "destination": "/" },

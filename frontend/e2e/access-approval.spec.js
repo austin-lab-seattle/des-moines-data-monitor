@@ -32,7 +32,7 @@ async function setup(page, { loggedIn = true, canApprove = true, failure = false
   return decisions;
 }
 
-test('email link requires sign-in and cannot auto-approve on page load', async ({ page }) => {
+test('Team Console fallback requires sign-in and cannot auto-approve on page load', async ({ page }) => {
   const decisions = await setup(page, { loggedIn: false });
   await page.goto(`/team?request_id=${requestId}`);
   await expect(page.getByRole('button', { name: 'Continue securely' })).toBeVisible();

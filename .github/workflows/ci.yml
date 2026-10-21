@@ -52,6 +52,8 @@ jobs:
           python-version: "3.12"
       - name: Install browser for public dashboard checks
         run: npx playwright install --with-deps chromium
+      - name: Install offline approval emulator for real-handler browser contracts
+        run: python -m pip install -r ../requirements-test.txt
       - name: Verify public dashboard behavior in the production build
         run: npm run test:browser
       - uses: actions/upload-artifact@v4
