@@ -9,7 +9,7 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {}, readingWait = {} } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {}, readingWait = {}, seriesWait } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
@@ -26,7 +26,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
       return;
     }
     if (url.pathname.endsWith('/observations') && instrument) {
-      if (url.searchParams.get('limit') === '1' && readingWait[id]) await readingWait[id];
+      if (url.searchParams.get('limit') === '1' && readingWait[id]) await (typeof readingWait[id] === 'function' ? readingWait[id]() : readingWait[id]);
       if (id === 'BC-MA200' && missingBlackCarbon) {
         await route.fulfill({ status: 404, json: { error: 'Records not found' } });
         return;
@@ -47,6 +47,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
       return;
     }
     if (url.pathname.endsWith('/timeseries') && instrument) {
+      if (seriesWait) await seriesWait();
       // Include a legacy HHMMSS option: the public UI must still hide it.
       await route.fulfill({ json: {
         instrument_id: id,
@@ -381,4 +382,54 @@ test('developer menu opens and closes on desktop and mobile, with friendly API U
   await expect(sidebar).not.toBeVisible();
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Air Quality Data API', exact: true })).toBeVisible();
+});
+
+test('refresh spins until readings and chart finish while preserving displayed readings', async ({ page }) => {
+  let readingCalls = 0, chartCalls = 0, releaseReading, releaseChart;
+  const reading = new Promise(resolve => { releaseReading = resolve; });
+  const chart = new Promise(resolve => { releaseChart = resolve; });
+  await mockApi(page, {
+    readingWait: { 'NO2-CAPS': () => ++readingCalls === 2 ? reading : undefined },
+    seriesWait: () => ++chartCalls === 2 ? chart : undefined,
+  });
+  await page.goto('/');
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  await expect(refresh).toBeEnabled();
+  const card = page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' });
+  await expect(card.locator('.pollutant-value')).toHaveText('10');
+  await refresh.click();
+  await expect(page.getByRole('button', { name: 'Refreshing', exact: true })).toBeDisabled();
+  await expect(card.getByLabel('Refreshing Nitrogen dioxide')).toBeVisible();
+  await expect(card.locator('.pollutant-value')).toHaveText('10');
+  await expect(page.locator('.chart-plot')).toBeVisible();
+  releaseReading();
+  await expect(card.getByLabel('Refreshing Nitrogen dioxide')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Refreshing', exact: true })).toBeDisabled();
+  releaseChart();
+  await expect(refresh).toBeEnabled();
+  expect(chartCalls).toBe(2);
+});
+
+test('automatic refresh uses five minutes and pauses while the page is hidden', async ({ page }) => {
+  let reads = 0;
+  await page.clock.install();
+  await mockApi(page, { readingWait: { 'NO2-CAPS': () => { reads++; } } });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  expect(reads).toBe(1);
+  await page.clock.fastForward(60000);
+  expect(reads).toBe(1);
+  await page.clock.fastForward(240001);
+  await expect.poll(() => reads).toBe(2);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await page.clock.fastForward(900000);
+  expect(reads).toBe(2);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await expect.poll(() => reads).toBe(3);
 });
