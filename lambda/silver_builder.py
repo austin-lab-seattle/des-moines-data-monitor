@@ -11,13 +11,18 @@ file in the silver layer. For each instrument it:
     {instrument}/silver/{instrument}_data.csv      column header + unique rows
     {instrument}/silver/{instrument}_metadata.txt  preamble/header + provenance
 
-It does a full rebuild each run, so it is safe to invoke repeatedly (idempotent).
+It skips unchanged input manifests. For changed inputs it reuses version-checked
+raw batches from private daily bundles and runs the original full consolidation.
+It also publishes counts and the default dashboard views.
 Invoke on demand from the Lambda console or the CLI:
 
     aws lambda invoke --function-name aq-silver-builder /dev/stdout
 """
 
 import csv
+import gzip
+import hashlib
+from pathlib import Path
 import io
 import json
 import math
@@ -124,21 +129,72 @@ def is_excluded_bronze_key(instrument_id, key):
     return bronze_source_name(key) in EXCLUDED_BRONZE_SOURCES.get(instrument_id, set())
 
 
+def list_bronze_objects(instrument_id):
+    objects = []
+    for page in s3_client.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix=f"{instrument_id}/bronze/"):
+        objects.extend(obj for obj in page.get("Contents", []) if not obj["Key"].endswith((".keep", "/")))
+    return sorted(objects, key=lambda obj: obj["Key"])
+
+
 def list_bronze_keys(instrument_id):
-    paginator = s3_client.get_paginator("list_objects_v2")
-    keys = []
-    for page in paginator.paginate(Bucket=BUCKET, Prefix=f"{instrument_id}/bronze/"):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith(".keep") or key.endswith("/"):
-                continue
-            keys.append(key)
-    return sorted(keys)
+    return [obj["Key"] for obj in list_bronze_objects(instrument_id)]
 
 
-def download_text(key):
-    body = s3_client.get_object(Bucket=BUCKET, Key=key)["Body"].read()
+def download_text(key, etag=None):
+    condition = {"IfMatch": etag} if etag else {}
+    body = s3_client.get_object(Bucket=BUCKET, Key=key, **condition)["Body"].read()
     return key, body.decode("utf-8", errors="replace")
+
+
+def object_version(obj):
+    return [obj["Key"], obj.get("ETag"), obj["Size"], obj["LastModified"].isoformat()]
+
+
+def load_cached_bronze(instrument_id, objects):
+    """Reuse exact source text in private daily bundles, never derived values.
+
+    A listed key/ETag/size/time and a content digest must all match. New,
+    changed or corrupt entries read Bronze conditionally. Deleted entries are
+    omitted. Existing consolidate/transform functions still process every row.
+    """
+    groups = {}
+    for obj in objects:
+        groups.setdefault(obj["LastModified"].strftime("%Y-%m-%d"), []).append(obj)
+    def load_group(item):
+        day, source_objects = item
+        key = f"_processing_cache/v1/{instrument_id}/bronze-{day}.json.gz"
+        cached = {}
+        try:
+            saved = json.loads(gzip.decompress(s3_client.get_object(Bucket=BUCKET, Key=key)["Body"].read()))
+            if (isinstance(saved, dict) and saved.get("schema_version") == 1
+                    and saved.get("instrument_id") == instrument_id and isinstance(saved.get("objects"), dict)):
+                cached = saved.get("objects", {})
+        except Exception:
+            pass
+        entries, texts, reads = {}, [], 0
+        for obj in source_objects:
+            old = cached.get(obj["Key"], {})
+            if not isinstance(old, dict):
+                old = {}
+            text = old.get("text")
+            if (old.get("version") != object_version(obj) or not isinstance(text, str)
+                    or old.get("sha256") != hashlib.sha256(text.encode()).hexdigest()):
+                _, text = download_text(obj["Key"], obj.get("ETag"))
+                reads += 1
+            entries[obj["Key"]] = {"version": object_version(obj), "text": text,
+                "sha256": hashlib.sha256(text.encode()).hexdigest()}
+            texts.append((obj["Key"], text))
+        if entries != cached:
+            try:
+                s3_client.put_object(Bucket=BUCKET, Key=key,
+                    Body=gzip.compress(json.dumps({"schema_version": 1, "instrument_id": instrument_id, "objects": entries}).encode(), mtime=0),
+                    ContentType="application/gzip")
+            except Exception as exc:
+                print(f"Optional Bronze bundle write failed for {instrument_id}: {exc}")
+        return texts, reads
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        loaded = list(pool.map(load_group, groups.items()))
+    return sorted((text for texts, _ in loaded for text in texts), key=lambda item: item[0]), sum(reads for _, reads in loaded)
 
 
 # --- Row detection: mirrors lambda_api.py ---------------------------------
@@ -690,7 +746,7 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
     ] + metadata
     meta_body = "\n".join(meta_lines) + "\n"
 
-    s3_client.put_object(
+    uploaded = s3_client.put_object(
         Bucket=BUCKET,
         Key=f"{instrument_id}/silver/{instrument_id}_data.csv",
         Body=data_body.encode("utf-8"),
@@ -702,54 +758,64 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
         Body=meta_body.encode("utf-8"),
         ContentType="text/plain; charset=utf-8",
     )
+    return data_body, uploaded["ETag"]
 
 
 def build_instrument(instrument_id):
-    all_keys = list_bronze_keys(instrument_id)
+    # Package the API reader with this Lambda so there is exactly one parser
+    # and aggregation implementation for both published and requested views.
+    import lambda_api as api
+    objects = list_bronze_objects(instrument_id)
+    state_key = f"_pipeline_state/v1/{instrument_id}.json"
+    fingerprint = hashlib.sha256(json.dumps([object_version(obj) for obj in objects]).encode()).hexdigest()
+    code_version = hashlib.sha256(Path(__file__).read_bytes() + api.SILVER_VIEW_CODE_VERSION.encode()).hexdigest()
+    previous = {}
+    try:
+        previous = json.loads(s3_client.get_object(Bucket=BUCKET, Key=state_key)["Body"].read())
+    except Exception:
+        pass
+    if (previous.get("source_fingerprint") == fingerprint and previous.get("builder_version") == code_version):
+        if not objects:
+            return {**previous["result"], "skipped_unchanged": True, "bronze_reads": 0}
+        try:
+            current = s3_client.head_object(Bucket=BUCKET, Key=f"{instrument_id}/silver/{instrument_id}_data.csv")
+            if current["ETag"] == previous.get("silver_etag") and previous.get("views_version") == api.SILVER_VIEW_CODE_VERSION:
+                return {**previous["result"], "skipped_unchanged": True, "bronze_reads": 0}
+        except Exception:
+            pass
+    all_keys = [obj["Key"] for obj in objects]
     keys = [key for key in all_keys if not is_excluded_bronze_key(instrument_id, key)]
-    excluded_sources = sorted({
-        bronze_source_name(key)
-        for key in all_keys
-        if key not in keys
-    })
-    if not keys:
-        return {
-            "objects": 0,
-            "rows": 0,
-            "unique": 0,
-            "duplicates": 0,
-            "excluded_objects": len(all_keys),
-            "excluded_sources": excluded_sources,
-            "written": False,
-        }
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        texts = list(pool.map(download_text, keys))
-    texts.sort(key=lambda kt: kt[0])
-
-    header, data_rows, metadata, total, duplicates, schema_mismatches = consolidate(instrument_id, texts)
-    header, data_rows = transform_silver(instrument_id, header, data_rows)
-    stats = {
-        "objects": len(keys),
-        "total": total,
-        "unique": len(data_rows),
-        "duplicates": duplicates,
-        "expected_fields": len(split_fields(header)) if header else None,
-        "schema_mismatches": schema_mismatches,
-        "excluded_objects": len(all_keys) - len(keys),
-        "excluded_sources": excluded_sources,
-    }
-    write_silver(instrument_id, header, data_rows, metadata, stats)
-    return {
-        "objects": len(keys),
-        "rows": total,
-        "unique": len(data_rows),
-        "duplicates": duplicates,
-        "schema_mismatches": schema_mismatches,
-        "excluded_objects": len(all_keys) - len(keys),
-        "excluded_sources": excluded_sources,
-        "written": True,
-    }
+    included = set(keys)
+    excluded_sources = sorted({bronze_source_name(key) for key in all_keys if key not in included})
+    texts, bronze_reads = load_cached_bronze(instrument_id, objects) if objects else ([], 0)
+    # Same detector as the legacy summary, including excluded test/dev sources.
+    raw_rows = sum(1 for _, text in texts for line in text.splitlines() if api.is_data_row(instrument_id, line))
+    source_texts = [(key, text) for key, text in texts if key in included]
+    result = {"objects": len(keys), "rows": 0, "unique": 0, "duplicates": 0,
+        "excluded_objects": len(all_keys) - len(keys), "excluded_sources": excluded_sources, "written": False}
+    silver_etag, views_version = None, None
+    if keys:
+        header, rows, metadata, total, duplicates, mismatches = consolidate(instrument_id, source_texts)
+        header, rows = transform_silver(instrument_id, header, rows)
+        stats = {"objects": len(keys), "total": total, "unique": len(rows), "duplicates": duplicates,
+            "expected_fields": len(split_fields(header)) if header else None, "schema_mismatches": mismatches,
+            "excluded_objects": len(all_keys) - len(keys), "excluded_sources": excluded_sources}
+        silver_text, silver_etag = write_silver(instrument_id, header, rows, metadata, stats)
+        result.update(rows=total, unique=len(rows), duplicates=duplicates, schema_mismatches=mismatches, written=True)
+        try:
+            api.publish_dashboard_views(instrument_id, silver_text, silver_etag)
+            views_version = api.SILVER_VIEW_CODE_VERSION
+        except Exception as exc:
+            print(f"Dashboard view publication failed for {instrument_id}: {exc}")
+    generated_at = datetime.now(timezone.utc).isoformat()
+    latest = max((obj["LastModified"] for obj in objects), default=None)
+    state = {"schema_version": 1, "source_fingerprint": fingerprint, "builder_version": code_version,
+        "silver_etag": silver_etag, "views_version": views_version, "generated_at": generated_at,
+        "inventory": {"id": instrument_id, "name": instrument_id.replace("-", " "),
+            "bronzeSize": sum(obj["Size"] for obj in objects), "bronzeRows": raw_rows,
+            "silverRows": result["unique"], "lastUpdate": latest.isoformat() if latest else None}, "result": result}
+    s3_client.put_object(Bucket=BUCKET, Key=state_key, Body=json.dumps(state).encode(), ContentType="application/json")
+    return {**result, "bronze_reads": bronze_reads, "skipped_unchanged": False}
 
 
 def lambda_handler(event, context):

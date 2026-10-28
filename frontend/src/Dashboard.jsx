@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react'
 import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
+import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -103,6 +104,8 @@ export default function Dashboard() {
   const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : window.location.pathname === '/developers' ? 'api' : window.location.pathname === '/observations' ? 'review' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
   const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [chartBusy, setChartBusy] = useState(false);
   const readingsRequestId = useRef(0);
   const readingsController = useRef(null);
 
@@ -118,6 +121,7 @@ export default function Dashboard() {
   };
 
   const loadReadings = useCallback(async () => {
+    setRefreshing(true);
     const requestId = ++readingsRequestId.current;
     readingsController.current?.abort();
     const controller = new AbortController();
@@ -160,20 +164,21 @@ export default function Dashboard() {
     readingsController.current?.abort();
   }, []);
 
+  const handleRefresh = useCallback(() => {
+    setUploadRefreshKey(key => key + 1);
+    return loadReadings();
+  }, [loadReadings]);
+
   useEffect(() => {
     const initial = setTimeout(loadReadings, 0);
-    const interval = setInterval(loadReadings, 60000);
+    const stopPolling = startVisiblePolling(handleRefresh, DASHBOARD_REFRESH_MS);
     return () => {
-      clearTimeout(initial); clearInterval(interval);
+      clearTimeout(initial); stopPolling();
       cancelReadings();
     };
-  }, [loadReadings, cancelReadings]);
+  }, [loadReadings, cancelReadings, handleRefresh]);
 
-  const handleRefresh = () => {
-    setRefreshing(true);
-    setUploadRefreshKey(key => key + 1);
-    loadReadings();
-  };
+  const refreshBusy = refreshing || (activeView === 'overview' && (uploadBusy || chartBusy));
 
   const instruments = data?.instruments || INSTRUMENT_IDS.map(id => ({ id, ...PUBLIC_INSTRUMENTS[id] }));
 
@@ -215,9 +220,9 @@ export default function Dashboard() {
             <button className="icon-action" type="button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={`Use ${theme === 'light' ? 'dark' : 'light'} theme`} title={`Use ${theme === 'light' ? 'dark' : 'light'} theme`}>
               {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
             </button>
-            <button className="refresh-action" type="button" onClick={handleRefresh} disabled={refreshing}>
-              <RefreshCw size={17} className={refreshing ? 'animate-spin' : ''} />
-              <span>{refreshing ? 'Refreshing' : 'Refresh'}</span>
+            <button className="refresh-action" type="button" onClick={handleRefresh} disabled={refreshBusy} aria-busy={refreshBusy}>
+              <RefreshCw size={17} className={refreshBusy ? 'refresh-spinner' : ''} aria-hidden="true" />
+              <span>{refreshBusy ? 'Refreshing' : 'Refresh'}</span>
             </button>
           </div>
         </header>}
@@ -240,6 +245,8 @@ export default function Dashboard() {
             formatSeattleTime={formatSeattleTime}
             loading={loading}
             uploadRefreshKey={uploadRefreshKey}
+            onUploadBusy={setUploadBusy}
+            onChartBusy={setChartBusy}
           />
         )}
         {activeView === 'review' && <DataReview />}
@@ -260,11 +267,13 @@ export default function Dashboard() {
   );
 }
 
-function LatestUploadWidget({ formatSeattleTime, refreshKey }) {
+function LatestUploadWidget({ formatSeattleTime, refreshKey, onBusy }) {
   const [upload, setUpload] = useState({ loading: true });
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
+      onBusy(true);
+      setUpload(previous => ({ ...previous, loading: true }));
       try {
         const response = await fetchApi(`${API_PATHS.summary}?view=latest-upload`, { signal: controller.signal });
         const result = await response.json();
@@ -278,16 +287,17 @@ function LatestUploadWidget({ formatSeattleTime, refreshKey }) {
         if (!controller.signal.aborted) setUpload({ ...result, loading: false, error: false });
       } catch {
         if (!controller.signal.aborted) setUpload(previous => ({ ...previous, loading: false, error: true }));
+      } finally {
+        if (!controller.signal.aborted) onBusy(false);
       }
     };
     const initial = setTimeout(load, 0);
-    const interval = setInterval(load, 60000);
-    return () => { controller.abort(); clearTimeout(initial); clearInterval(interval); };
-  }, [refreshKey]);
+    return () => { controller.abort(); clearTimeout(initial); onBusy(false); };
+  }, [refreshKey, onBusy]);
 
   return (
     <aside className="latest-upload-widget" aria-label="Latest upload">
-      <Clock size={23} aria-hidden="true" />
+      {upload.loading ? <RefreshCw size={23} className="refresh-spinner" aria-label="Refreshing upload information" /> : <Clock size={23} aria-hidden="true" />}
       <div>
         <span className="upload-widget-label">{upload.error && upload.uploaded_at ? 'Last confirmed upload' : 'Latest upload'}</span>
         {upload.uploaded_at ? <time dateTime={upload.uploaded_at}>{formatSeattleTime(upload.uploaded_at)}</time>
@@ -330,8 +340,8 @@ function SkyDecoration() {
       }
     };
     const initial = setTimeout(load, 0);
-    const interval = setInterval(load, 1800000);
-    return () => { controller.abort(); clearTimeout(initial); clearInterval(interval); };
+    const stopPolling = startVisiblePolling(load, 1800000);
+    return () => { controller.abort(); clearTimeout(initial); stopPolling(); };
   }, []);
   const day = weather?.is_day ?? fallbackDay;
   const clouds = weather ? weather.cloud_cover >= 65 ? 4 : weather.cloud_cover >= 25 ? 2 : 1 : day ? 2 : 0;
@@ -344,7 +354,7 @@ function SkyDecoration() {
   </>;
 }
 
-function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey }) {
+function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, onUploadBusy, onChartBusy }) {
   const [recentInstrument, setRecentInstrument] = useState(null);
 
   return (
@@ -356,7 +366,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
           <h1>Air monitoring conditions</h1>
           <p>Explore recent pollutant measurements near Sea-Tac Airport.</p>
         </div>
-        <LatestUploadWidget formatSeattleTime={formatSeattleTime} refreshKey={uploadRefreshKey} />
+        <LatestUploadWidget formatSeattleTime={formatSeattleTime} refreshKey={uploadRefreshKey} onBusy={onUploadBusy} />
       </section>
 
       <section className="latest-conditions" aria-labelledby="latest-conditions-title">
@@ -376,7 +386,9 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
                   <span className="pollutant-detail">{instrument.detail}</span>
                   <span className="pollutant-instrument">{INSTRUMENT_NAMES[instrument.id]}</span>
                   <span className="pollutant-instrument-id">{instrument.id}</span>
-                  <strong className="pollutant-value">{cardLoading ? '…' : formatSummaryReadingValue(value, instrument.id)}</strong>
+                  <strong className="pollutant-value">{cardLoading ? '…' : formatSummaryReadingValue(value, instrument.id)}
+                    {instrument.pending && <RefreshCw size={14} className="refresh-spinner reading-refresh" aria-label={`Refreshing ${instrument.name}`} />}
+                  </strong>
                   <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
                   <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
                     {cardLoading ? 'Loading…' : instrument.latest
@@ -390,7 +402,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
         </div>
       </section>
 
-      <TimeSeriesChart />
+      <TimeSeriesChart refreshKey={uploadRefreshKey} onBusy={onChartBusy} />
 
       {recentInstrument && (
         <LatestReadingsDialog
@@ -1236,7 +1248,7 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
   );
 }
 
-function TimeSeriesChart() {
+function TimeSeriesChart({ refreshKey, onBusy }) {
   const [instrument, setInstrument] = useState('SMPS');
   const [measurement, setMeasurement] = useState('');
   const [measurements, setMeasurements] = useState([]);
@@ -1248,12 +1260,15 @@ function TimeSeriesChart() {
   const [exportMessage, setExportMessage] = useState('');
   const [seriesError, setSeriesError] = useState('');
   const seriesRequestId = useRef(0);
+  const appliedQuery = useRef({ inst: 'SMPS', meas: '', s: '', e: '' });
 
   const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
+    if (JSON.stringify(appliedQuery.current) !== JSON.stringify({ inst, meas, s, e })) setSeries([]);
+    appliedQuery.current = { inst, meas, s, e };
     const requestId = ++seriesRequestId.current;
     setLoading(true);
+    onBusy(true);
     setSeriesError('');
-    setSeries([]);
     try {
       const params = new URLSearchParams({ instrument: inst });
       if (meas) params.set('measurement', meas);
@@ -1285,16 +1300,21 @@ function TimeSeriesChart() {
     } catch (err) {
       if (requestId === seriesRequestId.current) setSeriesError(err.message || 'Measurements could not be loaded.');
     } finally {
-      if (requestId === seriesRequestId.current) setLoading(false);
+      if (requestId === seriesRequestId.current) { setLoading(false); onBusy(false); }
     }
-  }, []);
+  }, [onBusy]);
+
+  const cancelSeries = useCallback(() => {
+    ++seriesRequestId.current;
+    onBusy(false);
+  }, [onBusy]);
 
   useEffect(() => {
     const task = setTimeout(() => {
-      fetchSeries({ inst: 'SMPS' });
+      fetchSeries(appliedQuery.current);
     }, 0);
-    return () => clearTimeout(task);
-  }, [fetchSeries]);
+    return () => { clearTimeout(task); cancelSeries(); };
+  }, [fetchSeries, refreshKey, cancelSeries]);
 
   const downloadCSV = () => {
     if (!series.length) return;
@@ -1403,9 +1423,8 @@ function TimeSeriesChart() {
           </div>
       </div>
 
-      {loading ? (
-        <div className="chart-empty">Loading measurements…</div>
-      ) : seriesError ? (
+      {loading && <div className="chart-refresh-status" role="status"><RefreshCw size={15} className="refresh-spinner" /> Refreshing measurements…</div>}
+      {seriesError ? (
         <div className="chart-empty" role="alert">{seriesError}</div>
       ) : series.length ? (
         <div className="chart-plot"><ResponsiveContainer width="100%" height={320}>
@@ -1424,7 +1443,7 @@ function TimeSeriesChart() {
           </LineChart>
         </ResponsiveContainer></div>
       ) : (
-        <div className="chart-empty">No measurements are available for this selection.</div>
+        <div className="chart-empty">{loading ? 'Loading measurements…' : 'No measurements are available for this selection.'}</div>
       )}
 
       <div className="chart-caption">

@@ -5,6 +5,7 @@ import hashlib
 import heapq
 import html
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,8 @@ import boto3
 s3_client = boto3.client("s3")
 dynamodb_client = boto3.client("dynamodb")
 ses_client = boto3.client("ses")
+request_logger = logging.getLogger("dashboard.requests")
+request_logger.setLevel(logging.INFO)
 
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
 INSTRUMENT_IDS = ["BC-MA200", "CO2-LICOR", "NEPH-PM25", "NO2-CAPS", "SMPS"]
@@ -74,10 +77,9 @@ LEGACY_API_ROUTES = {
     "observations_export": "/silver-download",
 }
 
-# Row/size counts are recomputed live from S3, but cached briefly so a burst of
-# refreshes does not each trigger a full scan. New data only lands every few
-# minutes, so a short cache still feels live on the dashboard.
-INVENTORY_TTL_SECONDS = 30
+# Inventory counts come from builder snapshots. Upload metadata can be shared
+# for one minute without relisting Bronze independently in each runtime.
+INVENTORY_TTL_SECONDS = 60
 COST_TTL_SECONDS = 3600
 _inventory_cache = {"data": None, "ts": 0.0}
 _latest_upload_cache = {"data": None, "ts": 0.0}
@@ -86,13 +88,13 @@ _cost_cache = {"data": None, "ts": 0.0}
 # Cache only small response bodies, never the growing Silver CSVs. Every hit
 # requires the current S3 ETag and (for recent records) current review content.
 _silver_view_cache = OrderedDict()
+_missing_silver_cache = {}
+MISSING_SILVER_TTL_SECONDS = 60
 SILVER_VIEW_CACHE_ENTRIES = 16
 SILVER_VIEW_CACHE_MAX_BODY_BYTES = 512 * 1024
-SILVER_VIEW_CODE_VERSION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+SILVER_VIEW_CODE_VERSION = hashlib.sha256(Path(__file__).read_bytes()
+    + os.environ.get("DATA_TIMEZONE", "America/Los_Angeles").encode()).hexdigest()
 
-# Counting many small batch objects is dominated by per-object request latency,
-# so fan the downloads out across threads.
-MAX_WORKERS = 24
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("DATA_TIMEZONE", "America/Los_Angeles"))
 
 
@@ -1177,15 +1179,6 @@ def count_data_rows(instrument_id, s3_key):
     return sum(1 for line in raw.splitlines() if is_data_row(instrument_id, line))
 
 
-def _safe_count(task):
-    instrument_id, key = task
-    try:
-        return instrument_id, count_data_rows(instrument_id, key)
-    except Exception as exc:
-        print(f"Could not count rows in {key}: {exc}")
-        return instrument_id, 0
-
-
 def get_silver_rows(instrument_id):
     """Read the consolidated row count from the silver metadata sidecar (cheap)."""
     try:
@@ -1855,6 +1848,9 @@ def get_cached_silver_view(event, kind):
     instrument = params.get("instrument") or params.get("instrument_id")
     if not is_valid_instrument(instrument):
         return handler(event)
+    missing_at = _missing_silver_cache.get(instrument)
+    if missing_at is not None and 0 <= time.time() - missing_at < MISSING_SILVER_TTL_SECONDS:
+        return _view_response(response(404, {"error": "Silver data not found", "instrument_id": instrument}), "missing-cached")
     if kind == "records":
         try:
             recent = (params.get("order") == "desc" and int(params.get("cursor", 0)) == 0
@@ -1877,6 +1873,7 @@ def get_cached_silver_view(event, kind):
     shared_key = f"_dashboard_cache/v1/{instrument}/{slot}.json" if slot else None
     try:
         etag = s3_client.head_object(Bucket=BUCKET, Key=f"{instrument}/silver/{instrument}_data.csv")["ETag"]
+        _missing_silver_cache.pop(instrument, None)
         reviews = None
         review_version = ""
         if kind == "records":
@@ -1885,7 +1882,7 @@ def get_cached_silver_view(event, kind):
         key = (SILVER_VIEW_CODE_VERSION, kind, instrument, etag, review_version, json.dumps(params, sort_keys=True))
         if key in _silver_view_cache:
             _silver_view_cache.move_to_end(key)
-            return _silver_view_cache[key]
+            return _view_response(_silver_view_cache[key], "memory")
         if shared_key:
             try:
                 cache_text = s3_client.get_object(Bucket=BUCKET, Key=shared_key)["Body"].read(SILVER_VIEW_CACHE_MAX_BODY_BYTES + 8192)
@@ -1895,11 +1892,14 @@ def get_cached_silver_view(event, kind):
                     payload = json.loads(cached["body"])
                     if payload.get("instrument_id") == instrument:
                         _remember_silver_view(key, cached)
-                        return cached
+                        return _view_response(cached, "shared")
             except Exception:
                 pass  # An absent/invalid optional cache falls back to Silver.
         text = get_silver_text(instrument, expected_etag=etag)
     except Exception as exc:
+        if getattr(exc, "response", {}).get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+            _missing_silver_cache[instrument] = time.time()
+            return _view_response(response(404, {"error": "Silver data not found", "instrument_id": instrument}), "missing-source")
         # A missing source, failed HEAD/review read or concurrent rebuild must
         # never serve an older cached value as a successful fresh response.
         print(f"Silver view cache bypass for {instrument}: {exc}")
@@ -1917,7 +1917,11 @@ def get_cached_silver_view(event, kind):
                     ContentType="application/json", CacheControl="no-store")
             except Exception as exc:
                 print(f"Optional Silver view cache write failed for {instrument}: {exc}")
-    return result
+    return _view_response(result, "computed")
+
+
+def _view_response(result, cache_status):
+    return {**result, "headers": {**result.get("headers", {}), "X-Data-Cache": cache_status}}
 
 
 def _remember_silver_view(key, result):
@@ -1925,6 +1929,36 @@ def _remember_silver_view(key, result):
     _silver_view_cache.move_to_end(key)
     while len(_silver_view_cache) > SILVER_VIEW_CACHE_ENTRIES:
         _silver_view_cache.popitem(last=False)
+
+
+def publish_dashboard_views(instrument, silver_text, etag):
+    """Prepare the exact API responses in the builder, using the same readers.
+
+    Review fingerprints and source/code versions retain normal invalidation.
+    No alternate aggregation implementation or rounding is introduced here.
+    """
+    reviews = (read_review_objects(instrument, "flags"), read_review_objects(instrument, "corrections"))
+    version = hashlib.sha256(json.dumps(reviews, sort_keys=True).encode()).hexdigest()
+    params = {"instrument": instrument, "order": "desc", "limit": "8"}
+    recent = get_silver_records({"queryStringParameters": params}, silver_text=silver_text, review_items=reviews)
+    views = [("records", params, "recent-8", version, recent)]
+    if recent["statusCode"] == 200:
+        payload = json.loads(recent["body"])
+        latest = {**payload, "rows": payload["rows"][:1],
+                  "next_cursor": 1 if len(payload["rows"]) > 1 else payload["next_cursor"]}
+        views.append(("records", {**params, "limit": "1"}, "recent-1", version, response(200, latest)))
+    params = {"instrument": instrument}
+    views.append(("series", params, "series-default", "",
+                  get_series({"queryStringParameters": params}, silver_text=silver_text)))
+    published = 0
+    for kind, params, slot, review_version, result in views:
+        if result["statusCode"] != 200 or len(result["body"].encode()) > SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+            continue
+        key = (SILVER_VIEW_CODE_VERSION, kind, instrument, etag, review_version, json.dumps(params, sort_keys=True))
+        s3_client.put_object(Bucket=BUCKET, Key=f"_dashboard_cache/v1/{instrument}/{slot}.json",
+            Body=json.dumps({"key": key, "result": result}).encode(), ContentType="application/json", CacheControl="no-store")
+        published += 1
+    return published
 
 
 def get_observations_export(event):
@@ -2070,6 +2104,22 @@ def get_latest_upload():
     if _latest_upload_cache["data"] is not None and now - _latest_upload_cache["ts"] < INVENTORY_TTL_SECONDS:
         return response(200, _latest_upload_cache["data"])
     try:
+        saved = json.loads(s3_client.get_object(Bucket=BUCKET, Key="_dashboard_cache/v1/latest-upload.json")["Body"].read())
+        payload = saved.get("payload", {})
+        instrument, stamp = payload.get("instrument_id"), payload.get("uploaded_at")
+        valid_upload = (instrument is None and stamp is None) or (
+            instrument in INSTRUMENT_IDS and isinstance(stamp, str)
+            and datetime.fromisoformat(stamp.replace("Z", "+00:00")).tzinfo is not None)
+        valid_counts = all(payload.get(k) is None or (isinstance(payload[k], int)
+            and not isinstance(payload[k], bool) and payload[k] >= 0) for k in ("upload_rows", "upload_bytes"))
+        if (saved.get("version") == SILVER_VIEW_CODE_VERSION and valid_upload and valid_counts
+                and {"instrument_id", "uploaded_at", "upload_rows", "upload_bytes"} <= payload.keys()
+                and 0 <= now - saved["checked_at"] < INVENTORY_TTL_SECONDS):
+            _latest_upload_cache.update(data=payload, ts=saved["checked_at"])
+            return response(200, payload)
+    except Exception:
+        pass
+    try:
         def latest_for(instrument):
             latest = max(iter_s3_objects(f"{instrument}/bronze/"), key=lambda obj: obj["LastModified"], default=None)
             return instrument, latest
@@ -2088,6 +2138,12 @@ def get_latest_upload():
     except Exception as exc:
         print(f"Upload metadata error: {exc}")
         return response(503, {"error": "Upload information is temporarily unavailable"})
+    try:
+        s3_client.put_object(Bucket=BUCKET, Key="_dashboard_cache/v1/latest-upload.json",
+            Body=json.dumps({"version": SILVER_VIEW_CODE_VERSION, "checked_at": now, "payload": payload}).encode(),
+            ContentType="application/json", CacheControl="no-store")
+    except Exception:
+        pass
     _latest_upload_cache.update(data=payload, ts=now)
     return response(200, payload)
 
@@ -2121,54 +2177,40 @@ def get_site_weather():
 
 
 def compute_inventory():
-    """List every bronze object, count rows in parallel, aggregate per instrument."""
-    per_instrument_objects = {
-        instrument_id: list(iter_s3_objects(f"{instrument_id}/bronze/"))
-        for instrument_id in INSTRUMENT_IDS
-    }
-    tasks = [
-        (instrument_id, obj["Key"])
-        for instrument_id, objects in per_instrument_objects.items()
-        for obj in objects
-    ]
+    """Read builder-maintained counts. Never recount Bronze on a visitor request.
 
-    counts = {instrument_id: 0 for instrument_id in INSTRUMENT_IDS}
-    if tasks:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            for instrument_id, row_count in pool.map(_safe_count, tasks):
-                counts[instrument_id] += row_count
-
+    Missing snapshots use listing metadata and an unknown row count, never a
+    fabricated zero or a fallback that downloads historical measurements.
+    """
     instruments = []
-    latest_global_update = None
-    latest_global_instrument = "NONE"
-    any_data = False
-
-    for instrument_id in INSTRUMENT_IDS:
-        objects = per_instrument_objects[instrument_id]
-        bronze_size = sum(obj["Size"] for obj in objects)
-        last_modified = max((obj["LastModified"] for obj in objects), default=None)
-
-        if last_modified:
-            any_data = True
-            if latest_global_update is None or last_modified > latest_global_update:
-                latest_global_update = last_modified
-                latest_global_instrument = instrument_id
-
-        instruments.append({
-            "id": instrument_id,
-            "name": instrument_id.replace("-", " "),
-            "bronzeSize": bronze_size,
-            "bronzeRows": counts[instrument_id],
-            "silverRows": get_silver_rows(instrument_id),
-            "lastUpdate": last_modified.isoformat() if last_modified else None,
-        })
-
-    return {
-        "instruments": instruments,
-        "refreshTime": latest_global_update.isoformat() if latest_global_update else None,
-        "systemStatus": "ONLINE" if any_data else "DEGRADED",
-        "lastUpdatedInstrument": latest_global_instrument,
-    }
+    latest_update = None
+    latest_instrument = "NONE"
+    for instrument in INSTRUMENT_IDS:
+        snapshot = None
+        try:
+            saved = json.loads(s3_client.get_object(Bucket=BUCKET,
+                Key=f"_pipeline_state/v1/{instrument}.json")["Body"].read())
+            data = saved.get("inventory", {})
+            if (saved.get("schema_version") == 1 and data.get("id") == instrument
+                    and all(isinstance(data.get(k), int) and not isinstance(data[k], bool) and data[k] >= 0
+                            for k in ("bronzeSize", "bronzeRows", "silverRows"))):
+                snapshot = {**data, "snapshotGeneratedAt": saved["generated_at"]}
+        except Exception:
+            pass
+        if snapshot is None:
+            objects = list(iter_s3_objects(f"{instrument}/bronze/"))
+            stamp = max((obj["LastModified"] for obj in objects), default=None)
+            snapshot = {"id": instrument, "name": instrument.replace("-", " "),
+                "bronzeSize": sum(obj["Size"] for obj in objects), "bronzeRows": None,
+                "silverRows": get_silver_rows(instrument),
+                "lastUpdate": stamp.isoformat() if stamp else None, "snapshotGeneratedAt": None}
+        stamp = datetime_for_compare(snapshot.get("lastUpdate"))
+        if stamp is not None and (latest_update is None or stamp > latest_update):
+            latest_update, latest_instrument = stamp, instrument
+        instruments.append(snapshot)
+    return {"instruments": instruments,
+        "refreshTime": latest_update.replace(tzinfo=timezone.utc).isoformat() if latest_update else None,
+        "systemStatus": "ONLINE" if latest_update else "DEGRADED", "lastUpdatedInstrument": latest_instrument}
 
 
 def get_inventory():
@@ -2424,7 +2466,7 @@ def get_flights(event):
     return response(200, data)
 
 
-def lambda_handler(event, context):
+def _dispatch_request(event, context):
     method, path = get_route(event)
     if method == "OPTIONS":
         if route_matches(path, API_ROUTES["access_requests"]):
@@ -2574,3 +2616,20 @@ def lambda_handler(event, context):
         payload["kpis"]["costPeriodEnd"] = mtd_cost["periodEnd"]
 
     return response(200, payload)
+
+
+def lambda_handler(event, context):
+    """One structured timing event, without query strings, keys or identities."""
+    started = time.perf_counter()
+    result = None
+    try:
+        result = _dispatch_request(event, context)
+        return result
+    finally:
+        path = event.get("rawPath") or event.get("path") or API_ROUTES["summary"]
+        known = set(API_ROUTES.values()) | set(KEYED_API_ROUTES.values()) | set(INTERNAL_API_ROUTES.values()) | set(LEGACY_API_ROUTES.values())
+        request_logger.info(json.dumps({"event": "dashboard_request", "route": path if path in known else "other",
+            "status": result.get("statusCode", 500) if result else 500,
+            "view": query_params(event).get("view") if query_params(event).get("view") in {"latest-upload", "weather"} else None,
+            "cache": result.get("headers", {}).get("X-Data-Cache") if result else None,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 2)}))
