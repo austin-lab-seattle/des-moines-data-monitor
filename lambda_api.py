@@ -2,6 +2,7 @@ import csv
 import base64
 import hmac
 import hashlib
+import heapq
 import html
 import json
 import math
@@ -12,6 +13,8 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from collections import OrderedDict
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -80,6 +83,12 @@ _inventory_cache = {"data": None, "ts": 0.0}
 _latest_upload_cache = {"data": None, "ts": 0.0}
 _weather_cache = {"data": None, "ts": 0.0}
 _cost_cache = {"data": None, "ts": 0.0}
+# Cache only small response bodies, never the growing Silver CSVs. Every hit
+# requires the current S3 ETag and (for recent records) current review content.
+_silver_view_cache = OrderedDict()
+SILVER_VIEW_CACHE_ENTRIES = 16
+SILVER_VIEW_CACHE_MAX_BODY_BYTES = 512 * 1024
+SILVER_VIEW_CODE_VERSION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 # Counting many small batch objects is dominated by per-object request latency,
 # so fan the downloads out across threads.
@@ -1063,7 +1072,15 @@ def parse_datetime_value(value, prefer_month_first=False):
         "%m/%d/%Y %H:%M:%S",
         "%m/%d/%Y %H:%M",
     ]
-    formats = base_formats + slash_formats
+    # SMPS exports use slash dates. Avoid six failed ISO strptime attempts per
+    # row while preserving the established day-first/fallback precedence.
+    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}\s", cleaned):
+        fractional = "." in cleaned
+        formats = [fmt for fmt in slash_formats if ("%f" in fmt) == fractional] + base_formats
+    elif re.match(r"^\d{4}/\d{1,2}/\d{1,2}\s", cleaned):
+        formats = base_formats[-2:] + base_formats[:-2] + slash_formats
+    else:
+        formats = base_formats + slash_formats
     for fmt in formats:
         try:
             return datetime.strptime(cleaned, fmt)
@@ -1117,8 +1134,9 @@ def value_at(fields, index):
     return fields[index]
 
 
-def record_timestamp(instrument_id, columns, fields):
-    index = column_index(columns)
+def record_timestamp(instrument_id, columns, fields, index=None):
+    if index is None:
+        index = column_index(columns)
     if instrument_id == "BC-MA200":
         direct = value_at(fields, first_existing(index, ["Date / time local"]))
         if direct:
@@ -1183,9 +1201,10 @@ def get_silver_rows(instrument_id):
     return None
 
 
-def get_silver_text(instrument_id):
+def get_silver_text(instrument_id, expected_etag=None):
     key = f"{instrument_id}/silver/{instrument_id}_data.csv"
-    return s3_client.get_object(Bucket=BUCKET, Key=key)["Body"].read().decode("utf-8", errors="replace")
+    condition = {"IfMatch": expected_etag} if expected_etag else {}
+    return s3_client.get_object(Bucket=BUCKET, Key=key, **condition)["Body"].read().decode("utf-8", errors="replace")
 
 
 def read_review_objects(instrument_id, review_type):
@@ -1239,10 +1258,11 @@ def review_item_applies_to_row(item, row):
     return False
 
 
-def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100, cursor=0, order="asc"):
+def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100, cursor=0, order="asc",
+                         silver_text=None, review_items=None):
     if order not in {"asc", "desc"}:
         raise ValueError("order must be asc or desc")
-    text = get_silver_text(instrument_id)
+    text = get_silver_text(instrument_id) if silver_text is None else silver_text
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return [], [], None, 0
@@ -1252,30 +1272,37 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
     end_time = datetime_for_compare(end_raw)
     validate_time_range(start_raw, end_raw, start_time, end_time)
     rows = []
-    skipped = 0
     limit = min(max(int(limit or 100), 1), 500)
     cursor = max(int(cursor or 0), 0)
 
-    flags = read_review_objects(instrument_id, "flags")
-    corrections = read_review_objects(instrument_id, "corrections")
-    source_rows = []
-    for source_index, raw_line in enumerate(lines[1:]):
-        fields = split_fields(raw_line)
-        if len(fields) != len(columns):
-            continue
-        timestamp_raw = record_timestamp(instrument_id, columns, fields)
-        timestamp_compare = datetime_for_instrument(instrument_id, timestamp_raw)
-        if not row_matches_time_range(timestamp_compare, start_time, end_time):
-            continue
-        source_rows.append((timestamp_compare, source_index, raw_line, fields, timestamp_raw))
+    flags, corrections = review_items if review_items is not None else (
+        read_review_objects(instrument_id, "flags"), read_review_objects(instrument_id, "corrections"))
+    timestamp_index = column_index(columns)
+    valid_count = 0
+    def candidates():
+        nonlocal valid_count
+        for source_index, raw_line in enumerate(lines[1:]):
+            fields = split_fields(raw_line)
+            if len(fields) != len(columns):
+                continue
+            timestamp_raw = record_timestamp(instrument_id, columns, fields, timestamp_index)
+            timestamp_compare = datetime_for_instrument(instrument_id, timestamp_raw)
+            if not row_matches_time_range(timestamp_compare, start_time, end_time):
+                continue
+            valid_count += 1
+            yield timestamp_compare, source_index, raw_line, fields, timestamp_raw
     # Bronze batches are sorted by source filename, NOT necessarily observation
     # time. Paginate only after chronological sorting, preserving source identity.
-    source_rows.sort(key=lambda row: (row[0], row[1]), reverse=order == "desc")
+    # A one/eight-row request need not allocate and sort every parsed record.
+    # Inspect every timestamp, keeping only the requested chronological prefix.
+    key = lambda row: (row[0], row[1])
+    if cursor + limit <= 5000:
+        select = heapq.nlargest if order == "desc" else heapq.nsmallest
+        source_rows = select(cursor + limit, candidates(), key=key)
+    else:
+        source_rows = sorted(candidates(), key=key, reverse=order == "desc")
 
-    for timestamp_compare, source_index, raw_line, fields, timestamp_raw in source_rows:
-        if skipped < cursor:
-            skipped += 1
-            continue
+    for timestamp_compare, source_index, raw_line, fields, timestamp_raw in source_rows[cursor:]:
 
         values = {
             columns[index] if index < len(columns) else f"column_{index + 1}": value
@@ -1301,7 +1328,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
         if len(rows) >= limit:
             break
 
-    next_cursor = cursor + len(rows) if cursor + len(rows) < len(source_rows) else None
+    next_cursor = cursor + len(rows) if cursor + len(rows) < valid_count else None
     return columns, rows, next_cursor, len(flags) + len(corrections)
 
 
@@ -1315,18 +1342,19 @@ def count_silver_records(instrument_id, start_raw=None, end_raw=None):
     end_time = datetime_for_compare(end_raw)
     validate_time_range(start_raw, end_raw, start_time, end_time)
     columns = split_fields(lines[0])
+    timestamp_index = column_index(columns)
     count = 0
     for raw_line in lines[1:]:
         fields = split_fields(raw_line)
         if len(fields) != len(columns):
             continue
-        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
+        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields, timestamp_index))
         if row_matches_time_range(moment, start_time, end_time):
             count += 1
     return count
 
 
-def get_silver_records(event):
+def get_silver_records(event, silver_text=None, review_items=None):
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
     if not is_valid_instrument(instrument_id):
@@ -1354,6 +1382,8 @@ def get_silver_records(event):
             params.get("limit", 100),
             params.get("cursor", 0),
             params.get("order", "asc"),
+            silver_text=silver_text,
+            review_items=review_items,
         )
     except ValueError as exc:
         return response(400, {"error": str(exc)})
@@ -1674,15 +1704,17 @@ def numeric_columns(columns, data_lines):
     # Sparse columns from rollover/schema unions may be empty in the first 25
     # records. A finite reading anywhere makes the measurement available.
     present = [False] * len(columns)
+    remaining = set(range(len(columns)))
     for raw_line in data_lines:
         fields = split_fields(raw_line)
         if len(fields) != len(columns):
             continue
-        for index in range(min(len(columns), len(fields))):
-            if present[index]:
-                continue
+        for index in tuple(remaining):
             if is_float(fields[index]):
                 present[index] = True
+                remaining.remove(index)
+        if not remaining:
+            break
     return [columns[index] for index in range(len(columns)) if present[index]]
 
 
@@ -1716,7 +1748,7 @@ def pick_default_measurement(instrument_id, options):
     return options[0] if options else None
 
 
-def get_series(event):
+def get_series(event, silver_text=None):
     """Bucketed mean of one measurement over time, computed on demand from silver."""
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
@@ -1724,7 +1756,7 @@ def get_series(event):
         return response(400, {"error": "Invalid or missing instrument"})
 
     try:
-        text = get_silver_text(instrument_id)
+        text = get_silver_text(instrument_id) if silver_text is None else silver_text
     except s3_client.exceptions.NoSuchKey:
         return response(404, {"error": "Silver data not found", "instrument_id": instrument_id})
     except Exception as exc:
@@ -1737,6 +1769,7 @@ def get_series(event):
 
     columns = split_fields(lines[0])
     data_lines = lines[1:]
+    timestamp_index = column_index(columns)
     numeric = numeric_columns(columns, data_lines)
     # The picker shows only meaningful measurements, but any numeric column can
     # still be requested directly by name via ?measurement=.
@@ -1776,7 +1809,7 @@ def get_series(event):
         if col_index >= len(fields) or not is_float(fields[col_index]):
             skipped_invalid_measurement += 1
             continue
-        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
+        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields, timestamp_index))
         if moment is None or not row_matches_time_range(moment, start_time, end_time):
             if moment is None:
                 skipped_no_timestamp += 1
@@ -1808,6 +1841,90 @@ def get_series(event):
         "skipped_invalid_measurement": skipped_invalid_measurement,
         "skipped_no_timestamp": skipped_no_timestamp,
     })
+
+
+def get_cached_silver_view(event, kind):
+    """Reuse small results only while their source and review versions match.
+
+    Authorization/rate limiting stays in the route handler before this call.
+    S3 HEAD on every request prevents a warm cache hiding a new Silver rebuild.
+    A conditional GET prevents associating a result with a different version.
+    """
+    handler = get_series if kind == "series" else get_silver_records
+    params = query_params(event)
+    instrument = params.get("instrument") or params.get("instrument_id")
+    if not is_valid_instrument(instrument):
+        return handler(event)
+    if kind == "records":
+        try:
+            recent = (params.get("order") == "desc" and int(params.get("cursor", 0)) == 0
+                      and 1 <= int(params.get("limit", 100)) <= 8
+                      and not any(params.get(k) for k in ("start", "end", "count_only")))
+        except (TypeError, ValueError):
+            recent = False
+        if not recent:
+            return handler(event)
+    # Fixed object names keep shared caching bounded to three small objects per
+    # instrument. Arbitrary researcher queries stay in the bounded memory cache.
+    slot = None
+    if kind == "records" and set(params) <= {"instrument", "instrument_id", "order", "limit", "cursor"}:
+        slot = f"recent-{int(params['limit'])}"
+    elif kind == "series" and set(params) <= {"instrument", "instrument_id"}:
+        slot = "series-default"
+    # Only the dashboard's one/eight-row views need shared cache objects.
+    if slot and slot not in {"recent-1", "recent-8", "series-default"}:
+        slot = None
+    shared_key = f"_dashboard_cache/v1/{instrument}/{slot}.json" if slot else None
+    try:
+        etag = s3_client.head_object(Bucket=BUCKET, Key=f"{instrument}/silver/{instrument}_data.csv")["ETag"]
+        reviews = None
+        review_version = ""
+        if kind == "records":
+            reviews = (read_review_objects(instrument, "flags"), read_review_objects(instrument, "corrections"))
+            review_version = hashlib.sha256(json.dumps(reviews, sort_keys=True).encode()).hexdigest()
+        key = (SILVER_VIEW_CODE_VERSION, kind, instrument, etag, review_version, json.dumps(params, sort_keys=True))
+        if key in _silver_view_cache:
+            _silver_view_cache.move_to_end(key)
+            return _silver_view_cache[key]
+        if shared_key:
+            try:
+                cache_text = s3_client.get_object(Bucket=BUCKET, Key=shared_key)["Body"].read(SILVER_VIEW_CACHE_MAX_BODY_BYTES + 8192)
+                saved = json.loads(cache_text)
+                cached = saved.get("result", {})
+                if saved.get("key") == list(key) and cached.get("statusCode") == 200:
+                    payload = json.loads(cached["body"])
+                    if payload.get("instrument_id") == instrument:
+                        _remember_silver_view(key, cached)
+                        return cached
+            except Exception:
+                pass  # An absent/invalid optional cache falls back to Silver.
+        text = get_silver_text(instrument, expected_etag=etag)
+    except Exception as exc:
+        # A missing source, failed HEAD/review read or concurrent rebuild must
+        # never serve an older cached value as a successful fresh response.
+        print(f"Silver view cache bypass for {instrument}: {exc}")
+        return handler(event)
+    kwargs = {"silver_text": text}
+    if kind == "records":
+        kwargs["review_items"] = reviews
+    result = handler(event, **kwargs)
+    if result["statusCode"] == 200 and len(result["body"].encode()) <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+        _remember_silver_view(key, result)
+        if shared_key:
+            try:
+                s3_client.put_object(Bucket=BUCKET, Key=shared_key,
+                    Body=json.dumps({"key": key, "result": result}).encode(),
+                    ContentType="application/json", CacheControl="no-store")
+            except Exception as exc:
+                print(f"Optional Silver view cache write failed for {instrument}: {exc}")
+    return result
+
+
+def _remember_silver_view(key, result):
+    _silver_view_cache[key] = result
+    _silver_view_cache.move_to_end(key)
+    while len(_silver_view_cache) > SILVER_VIEW_CACHE_ENTRIES:
+        _silver_view_cache.popitem(last=False)
 
 
 def get_observations_export(event):
@@ -2376,7 +2493,7 @@ def lambda_handler(event, context):
 
     if route_matches(path, KEYED_API_ROUTES["timeseries"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"], force=True)
-        return auth_response or get_series(event)
+        return auth_response or get_cached_silver_view(event, "series")
 
     if route_matches(path, KEYED_API_ROUTES["observations_export"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations_export"], force=True)
@@ -2384,7 +2501,7 @@ def lambda_handler(event, context):
 
     if route_matches(path, KEYED_API_ROUTES["observations"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations"], force=True)
-        return auth_response or get_silver_records(event)
+        return auth_response or get_cached_silver_view(event, "records")
 
     if route_matches(path, KEYED_API_ROUTES["summary"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["summary"], force=True)
@@ -2405,7 +2522,7 @@ def lambda_handler(event, context):
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"])
         if auth_response:
             return auth_response
-        return get_series(event)
+        return get_cached_silver_view(event, "series")
 
     if route_matches(path, API_ROUTES["observations_export"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations_export"])
@@ -2417,7 +2534,7 @@ def lambda_handler(event, context):
         auth_response = require_public_api_access(event, READ_SCOPES["observations"])
         if auth_response:
             return auth_response
-        return get_silver_records(event)
+        return get_cached_silver_view(event, "records")
 
     if route_matches(path, API_ROUTES["flights"]) and method == "GET":
         return get_flights(event)

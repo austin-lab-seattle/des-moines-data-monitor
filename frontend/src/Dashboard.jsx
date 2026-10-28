@@ -22,9 +22,7 @@ const RESEARCH_API_PATHS = {
 };
 const apiUrl = (path) => path;
 const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
-// A cold summary request currently rebuilds the S3 inventory and can take
-// slightly over 15 seconds. Keep the UI loading rather than reporting a false
-// outage just before the response arrives.
+// Bound individual API requests. Instrument cards resolve independently.
 const API_TIMEOUT_MS = 30000;
 const fetchApi = async (pathWithQuery, options = {}) => {
   const controller = new AbortController();
@@ -105,6 +103,8 @@ export default function Dashboard() {
   const [activeView, setActiveView] = useState(isAircraftWorkspace ? 'aircraft' : window.location.pathname === '/developers' ? 'api' : window.location.pathname === '/observations' ? 'review' : 'overview');
   const [theme, setTheme] = useState(getInitialTheme);
   const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
+  const readingsRequestId = useRef(0);
+  const readingsController = useRef(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -118,33 +118,56 @@ export default function Dashboard() {
   };
 
   const loadReadings = useCallback(async () => {
+    const requestId = ++readingsRequestId.current;
+    readingsController.current?.abort();
+    const controller = new AbortController();
+    readingsController.current = controller;
+    setData(previous => ({ instruments: INSTRUMENT_IDS.map(id => ({
+      ...previous?.instruments?.find(instrument => instrument.id === id),
+      id, ...PUBLIC_INSTRUMENTS[id], pending: true,
+    })) }));
     const results = await Promise.allSettled(INSTRUMENT_IDS.map(async id => {
-      const params = new URLSearchParams({ instrument: id, limit: '1', order: 'desc' });
-      const response = await fetchApi(`${API_PATHS.observations}?${params}`);
-      if (response.status === 404) return { id, ...PUBLIC_INSTRUMENTS[id], latest: null };
-      if (!response.ok) throw new Error(`API returned ${response.status}`);
-      const result = await response.json();
-      const latest = result.rows?.[0] || null;
-      const stamp = observationTime(latest);
-      return { id, ...PUBLIC_INSTRUMENTS[id], latest,
-        older: Boolean(stamp && Date.now() - new Date(stamp).getTime() > 60 * 60 * 1000) };
+      try {
+        const params = new URLSearchParams({ instrument: id, limit: '1', order: 'desc' });
+        const response = await fetchApi(`${API_PATHS.observations}?${params}`, { signal: controller.signal });
+        if (!response.ok && response.status !== 404) throw new Error(`API returned ${response.status}`);
+        const result = response.status === 404 ? null : await response.json();
+        if (result && (result.instrument_id !== id || !Array.isArray(result.rows))) {
+          throw new Error('The response does not match the requested instrument.');
+        }
+        const latest = result?.rows[0] || null;
+        const stamp = observationTime(latest);
+        if (requestId !== readingsRequestId.current) return;
+        const instrument = { id, ...PUBLIC_INSTRUMENTS[id], latest, pending: false,
+          older: Boolean(stamp && Date.now() - new Date(stamp).getTime() > 60 * 60 * 1000) };
+        setData(previous => ({ instruments: previous.instruments.map(item => item.id === id ? instrument : item) }));
+      } catch (err) {
+        if (requestId === readingsRequestId.current) {
+          setData(previous => ({ instruments: previous.instruments.map(item => item.id === id
+            ? { ...item, pending: false, unavailable: true } : item) }));
+        }
+        throw err;
+      }
     }));
-    setData(previous => ({ instruments: results.map((result, index) => {
-      if (result.status === 'fulfilled') return result.value;
-      const id = INSTRUMENT_IDS[index];
-      const cached = previous?.instruments?.find(instrument => instrument.id === id);
-      return { ...cached, id, ...PUBLIC_INSTRUMENTS[id], unavailable: true };
-    }) }));
+    if (requestId !== readingsRequestId.current) return;
     setError(results.some(result => result.status === 'rejected') ? 'Some readings could not be refreshed.' : null);
     setLoading(false);
     setRefreshing(false);
   }, []);
 
+  const cancelReadings = useCallback(() => {
+    ++readingsRequestId.current;
+    readingsController.current?.abort();
+  }, []);
+
   useEffect(() => {
     const initial = setTimeout(loadReadings, 0);
     const interval = setInterval(loadReadings, 60000);
-    return () => { clearTimeout(initial); clearInterval(interval); };
-  }, [loadReadings]);
+    return () => {
+      clearTimeout(initial); clearInterval(interval);
+      cancelReadings();
+    };
+  }, [loadReadings, cancelReadings]);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -344,6 +367,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
               const value = instrument.latest?.values?.[instrument.column];
               const stamp = observationTime(instrument.latest);
               const oldReading = instrument.older;
+              const cardLoading = !instrument.latest && (instrument.pending ?? loading);
               return (
                 <button key={instrument.id} type="button" className="pollutant-card"
                   onClick={() => setRecentInstrument(instrument)}
@@ -352,10 +376,10 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey })
                   <span className="pollutant-detail">{instrument.detail}</span>
                   <span className="pollutant-instrument">{INSTRUMENT_NAMES[instrument.id]}</span>
                   <span className="pollutant-instrument-id">{instrument.id}</span>
-                  <strong className="pollutant-value">{loading ? '…' : formatSummaryReadingValue(value)}</strong>
+                  <strong className="pollutant-value">{cardLoading ? '…' : formatSummaryReadingValue(value, instrument.id)}</strong>
                   <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
                   <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
-                    {loading ? 'Loading…' : instrument.latest
+                    {cardLoading ? 'Loading…' : instrument.latest
                       ? `${instrument.unavailable ? 'Last available: ' : oldReading ? 'Older reading: ' : ''}${formatSeattleTime(stamp || instrument.latest.timestamp)}`
                       : instrument.unavailable ? 'Temporarily unavailable' : 'No reading available'}
                   </span>

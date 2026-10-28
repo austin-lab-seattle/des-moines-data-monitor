@@ -22,6 +22,18 @@ test('summary rounding never turns missing or invalid readings into zero', () =>
   }
 });
 
+test('NO2 and SMPS cards round to whole numbers without changing other instruments or source rows', () => {
+  for (const id of ['NO2-CAPS', 'SMPS']) {
+    for (const [raw, expected] of [['10.255', '10'], ['2.5', '3'], ['4.54308e+3', '4,543'], ['-2.6', '-3'], ['-0.1', '0'], ['0', '0']]) {
+      assert.equal(formatSummaryReadingValue(raw, id), expected);
+    }
+    for (const raw of ['', null, 'NaN', 'Infinity']) assert.equal(formatSummaryReadingValue(raw, id), 'N/A');
+  }
+  assert.equal(formatSummaryReadingValue('423.256', 'CO2-LICOR'), '423.26');
+  assert.equal(formatSummaryReadingValue('3.615586', 'NEPH-PM25'), '3.62');
+  assert.equal(formatReadingValue('10.255'), '10.255');
+});
+
 test('missing, invalid and non-finite measurements never become numeric zero', () => {
   for (const value of [null, undefined, '', '   ', 'NaN', 'Infinity', '-Infinity', NaN, Infinity, 'error', '0x10']) {
     assert.equal(formatReadingValue(value, 'Concentration'), 'N/A');

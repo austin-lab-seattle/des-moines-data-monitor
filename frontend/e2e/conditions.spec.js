@@ -9,7 +9,7 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {} } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {}, readingWait = {} } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
@@ -26,6 +26,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
       return;
     }
     if (url.pathname.endsWith('/observations') && instrument) {
+      if (url.searchParams.get('limit') === '1' && readingWait[id]) await readingWait[id];
       if (id === 'BC-MA200' && missingBlackCarbon) {
         await route.fulfill({ status: 404, json: { error: 'Records not found' } });
         return;
@@ -65,9 +66,9 @@ test('Conditions shows pollutant readings and hides internal counters and aircra
   const requests = [];
   page.on('request', request => requests.push(request.url()));
   await page.goto('/');
-  for (const instrument of Object.values(instruments)) {
+  for (const [id, instrument] of Object.entries(instruments)) {
     await expect(page.getByRole('button', { name: `View latest readings from ${instrument.name}` }))
-      .toContainText(Number(instrument.value).toLocaleString('en-US', { maximumFractionDigits: 2 }));
+      .toContainText(Number(instrument.value).toLocaleString('en-US', { maximumFractionDigits: ['NO2-CAPS', 'SMPS'].includes(id) ? 0 : 2 }));
   }
   for (const id of Object.keys(instruments)) {
     await expect(page.locator('.pollutant-instrument-id', { hasText: id })).toBeVisible();
@@ -99,12 +100,12 @@ test('each pollutant opens eight labeled readings in Conditions', async ({ page 
   expect(errors).toEqual([]);
 });
 
-test('latest cards use ordinary numbers with two decimals while recent readings keep source precision', async ({ page }) => {
+test('latest cards use instrument display precision while recent readings keep source precision', async ({ page }) => {
   const cases = {
     'CO2-LICOR': { raw: '4.23256e2', display: '423.26' },
     'NEPH-PM25': { raw: '3.615586', display: '3.62' },
-    'NO2-CAPS': { raw: '2.141', display: '2.14' },
-    SMPS: { raw: '4.54308e+3', display: '4,543.08' },
+    'NO2-CAPS': { raw: '2.141', display: '2' },
+    SMPS: { raw: '4.54308e+3', display: '4,543' },
   };
   const errors = await mockApi(page, { missingBlackCarbon: true,
     readingValues: Object.fromEntries(Object.entries(cases).map(([id, value]) => [id, value.raw])),
@@ -127,6 +128,18 @@ test('latest cards use ordinary numbers with two decimals while recent readings 
     }
   }
   expect(errors).toEqual([]);
+});
+
+test('a delayed instrument does not hold back the other latest cards', async ({ page }) => {
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  await mockApi(page, { readingWait: { SMPS: waiting } });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' }).locator('.pollutant-value')).toHaveText('10');
+  await expect(page.getByRole('button', { name: 'View latest readings from Carbon dioxide' }).locator('.pollutant-value')).toHaveText('420');
+  await expect(page.getByRole('button', { name: 'View latest readings from Particle number' }).locator('.pollutant-value')).toHaveText('…');
+  release();
+  await expect(page.getByRole('button', { name: 'View latest readings from Particle number' }).locator('.pollutant-value')).toHaveText('5,497');
 });
 
 test('instrument labels stay readable in both themes and at mobile width', async ({ page }) => {
@@ -344,7 +357,7 @@ test('night sky has subtle stars with no alteration of instrument values', async
   await mockApi(page, { siteWeather: { is_day: false, cloud_cover: 0 } });
   await page.goto('/');
   await expect(page.locator('.sky-night .sky-star')).toHaveCount(16);
-  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' })).toContainText('10.26');
+  await expect(page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' }).locator('.pollutant-value')).toHaveText('10');
   await expect(page.locator('main')).not.toContainText(/\u2014|\u2013/);
 });
 
