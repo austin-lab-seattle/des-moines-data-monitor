@@ -2,13 +2,18 @@ const numericReading = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
 const summaryNumberFormat = new Intl.NumberFormat('en-US', {
   notation: 'standard', maximumFractionDigits: 2,
 });
+const wholeNumberFormat = new Intl.NumberFormat('en-US', {
+  notation: 'standard', maximumFractionDigits: 0,
+});
 
 // Card-only display rounding. Never use this for stored readings or exports.
-export const formatSummaryReadingValue = (value) => {
+export const formatSummaryReadingValue = (value, instrumentId) => {
   if (value == null) return 'N/A';
   const text = String(value).trim();
   if (!numericReading.test(text) || !Number.isFinite(Number(text))) return 'N/A';
-  const formatted = summaryNumberFormat.format(text);
+  const formatter = instrumentId === 'NO2-CAPS' || instrumentId === 'SMPS'
+    ? wholeNumberFormat : summaryNumberFormat;
+  const formatted = formatter.format(text);
   return formatted === '-0' ? '0' : formatted;
 };
 

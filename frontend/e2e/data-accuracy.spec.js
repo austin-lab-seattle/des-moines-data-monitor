@@ -20,7 +20,7 @@ test('all five instruments display real handler observations and export independ
   await page.goto('/');
   for (const [id, item] of Object.entries(contract.instruments)) {
     const card = page.getByRole('button', { name: `View latest readings from ${names[id]}` });
-    await expect(card.locator('.pollutant-value')).toHaveText(formatSummaryReadingValue(item.expectedLatest));
+    await expect(card.locator('.pollutant-value')).toHaveText(formatSummaryReadingValue(item.expectedLatest, id));
     await card.click();
     const dialog = page.getByRole('dialog');
     await expect(dialog.locator('tbody tr')).toHaveCount(2);
@@ -40,6 +40,6 @@ test('all five instruments display real handler observations and export independ
 test('a mismatched backend response never plots values under the selected instrument', async ({ page }) => {
   await page.route('**/air-quality/**', route => route.fulfill({ json: contract.instruments['NO2-CAPS'].timeseries }));
   await page.goto('/');
-  await expect(page.getByRole('alert')).toContainText('does not match the selected instrument');
+  await expect(page.getByRole('alert').filter({ hasText: 'does not match the selected instrument' })).toBeVisible();
   await expect(page.locator('.chart-plot')).toHaveCount(0);
 });
