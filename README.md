@@ -94,14 +94,15 @@ C:\des_moines\
 - `scripts/field/identify_instrument_data.py` identifies local captures without
   changing config or uploading. Small references for all five formats live in
   `sample-data/`; its manifest distinguishes real field extracts from fixtures.
-- `lambda/silver_builder.py` rebuilds one Silver CSV per instrument from Bronze,
-  keeps only real data rows, removes duplicates, derives Duwamish PM2.5 from
-  corrected BScat, normalizes the SMPS Total Concentration header, and writes a
-  metadata sidecar with the unique row count.
+- `lambda/silver_builder.py` compares source manifests and skips unchanged
+  instruments. For changed inputs it reuses version-checked raw batches in
+  compressed daily bundles, downloads new or changed Bronze sources, and runs
+  the existing full consolidation and scientific transformations. It publishes
+  Silver, count snapshots and default dashboard views using the API readers.
 - `lambda_api.py` serves the dashboard JSON payload through API Gateway at
-  `/air-quality/v1/summary`. On every request it scans the bronze prefix and counts the real
-  data rows and bytes per instrument live (its `is_data_row()` logic skips
-  headers and comment lines), reads Silver row counts from metadata, and exposes
+  `/air-quality/v1/summary`. Summary counts come from small builder snapshots,
+  with their generation timestamps. Missing snapshots use listing metadata and
+  unknown counts instead of downloading historical Bronze objects. It exposes
   public read-only API routes for the dashboard and cleaned data access.
 - `scripts/aws/deploy_backend.py` creates or updates the bucket, Lambda role, the API
   Lambda, and the API Gateway.
@@ -152,8 +153,8 @@ There are three field-laptop tasks plus one cloud schedule:
   instrument files and uploads new bytes to S3 Bronze.
 - The shared-drive copy job snapshots the same canonical local data tree into
   the UW OneDrive folder without deleting destination files.
-- The cloud Silver builder runs every 15 minutes in EventBridge and rebuilds the
-  deduplicated Silver CSVs from Bronze.
+- The cloud Silver builder runs every 15 minutes in EventBridge, skips unchanged
+  source manifests and rebuilds changed instruments from verified source text.
 
 Run one upload pass manually:
 
@@ -354,9 +355,12 @@ over large Silver/Gold datasets.
 - The Lambda execution role attaches the broad managed policy
   `AmazonS3ReadOnlyAccess`; tighten to bucket-scoped least privilege when
   convenient.
-- The API recounts every bronze file on each request. This is fine while the
-  data is small. Once bronze grows large, have the uploader maintain a running
-  count (written to a small file the API reads) instead of recounting live.
+- The API never recounts historical Bronze files for summary requests. Keep
+  count generation in the processing stage and retain source-version checks on
+  prepared dashboard responses.
+
+For refresh indicators, polling intervals, caching and the accuracy boundaries,
+see [Dashboard cost and refresh changes](docs/DASHBOARD_COST_AND_REFRESH.md).
 
 ## Next steps
 

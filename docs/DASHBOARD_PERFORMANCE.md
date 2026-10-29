@@ -1,7 +1,8 @@
 # Dashboard refresh and display precision
 
-The Conditions cards read individual Silver observations. The chart computes an
-arithmetic sample mean on the API's first request for a source version/query.
+The Conditions cards read individual Silver observations. The builder prepares
+recent rows and default hourly sample means using the API's own readers.
+Non-default queries and cache misses can still compute results on request.
 Loading a page does not trigger a Silver rebuild or change instrument readings.
 
 ## Loading behavior
@@ -36,10 +37,16 @@ The API caches small response bodies, with these boundaries:
   an older cached response into a fresh successful reading. Failed responses and
   oversized results are not cached. Authentication and quotas run before reuse.
 
-The first request after a new Silver version can still require a full scan. A
-future improvement is to publish these versioned views during the scheduled
-Silver build, moving that work off the visitor's request path. This release does
-not change the Silver builder, scientific transforms or aggregation arithmetic.
+The scheduled Silver build now publishes these versioned views, moving normal
+default-view computation off the visitor's request path. Publication failures,
+review changes or non-default queries can still require an accurate source
+scan. Scientific transforms and aggregation arithmetic remain unchanged.
+
+Refresh indicators cover the readings, upload widget and applied chart query.
+Polling runs every five minutes while visible, pauses in hidden tabs and runs
+once on return. Previous values and the same-query chart stay visible during
+refresh. See [Dashboard cost and refresh changes](DASHBOARD_COST_AND_REFRESH.md)
+for the processing manifest, raw source bundles and freshness limits.
 
 ## Display precision
 
