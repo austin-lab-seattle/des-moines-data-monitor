@@ -3,6 +3,7 @@ import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
 import { Activity, Database, Flag, KeyRound, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import './AccessApproval.css';
 import TeamEmailVerification from './TeamEmailVerification.jsx';
+import ApiUsagePanel from './ApiUsagePanel.jsx';
 import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
 
 // Public OAuth client metadata, not credentials. Authentication and role checks
@@ -163,7 +164,6 @@ export default function TeamConsole() {
     onSignInAgain={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}
     onSignOut={() => manager.signoutRedirect()}/>;
 
-  const keys = data?.keys || [];
   const rows = data?.rows || [];
   const events = data?.events || [];
   const requests = data?.requests || [];
@@ -185,7 +185,7 @@ export default function TeamConsole() {
             <td className="team-request-use">{request.use_case}</td><td>{request.status}</td><td>{new Date(request.expires_at).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', timeZoneName: 'short' })}</td>
             <td>{request.actionable && canApprove ? <div className="team-request-actions"><button disabled={loading} onClick={() => setDecision({ request, action: 'approve' })}>Approve</button><button disabled={loading} onClick={() => setDecision({ request, action: 'reject' })}>Reject</button></div> : request.approved_by ? `Approved by ${request.approved_by}` : request.rejected_by ? `Rejected by ${request.rejected_by}` : 'Not actionable'}</td>
           </tr>)}{!requests.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No access requests found.'}</td></tr>}</tbody></table></div></section>}
-        {tab === 'users' && <section className="team-card"><div className="team-card-intro"><p>Personal read-only API keys and today&apos;s usage.</p>{data?.limits && <small>{data.limits.requests_per_minute}/minute · {data.limits.requests_per_day}/day · {data.limits.exports_per_day} exports/day</small>}</div><div className="team-table-wrap"><table><thead><tr><th>User</th><th>Key</th><th>Status</th><th>Last used</th><th>Today</th><th>Exports</th><th></th></tr></thead><tbody>{keys.map(key => <tr key={key.key_id}><td><strong>{key.email}</strong><small>{key.organization || '—'}</small></td><td><code>…{key.key_id.slice(-6)}</code></td><td><span className={`team-status ${key.status === 'ACTIVE' ? 'team-status-active' : 'team-status-muted'}`}>{key.status}</span></td><td>{key.last_used_at ? new Date(key.last_used_at).toLocaleString() : 'Never'}</td><td>{key.requests_today || 0}</td><td>{key.exports_today || 0}</td><td>{key.status === 'ACTIVE' && canManageKeys && <button className="team-danger-button" onClick={() => revokeKey(key)}>Revoke</button>}</td></tr>)}{!keys.length && <tr><td colSpan="7" className="team-empty">{loading ? 'Loading…' : 'No keys found.'}</td></tr>}</tbody></table></div></section>}
+        {tab === 'users' && !error && <ApiUsagePanel data={data} loading={loading} apiRequest={apiRequest} revokeKey={revokeKey} canManageKeys={canManageKeys} />}
         {tab === 'review' && <section className="team-card"><div className="team-note"><Database size={17}/> Original measurements remain unchanged; reviews are stored as separate annotations.</div><div className="team-table-wrap"><table><thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead><tbody>{rows.map(row => <tr key={row.row_key}><td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td><td>{canReview ? <button className="team-row-button" disabled={row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td></tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{loading ? 'Loading…' : 'No records loaded.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : '—'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
       </main>

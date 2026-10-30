@@ -43,6 +43,8 @@ class ExportTests(unittest.TestCase):
         payload = json.loads(result["body"])
         self.assertEqual(200, result["statusCode"])
         self.assertEqual(2, payload["rows"])
+        self.assertEqual(3, payload['columns'])
+        self.assertEqual(len(self.s3.puts[0]['Body']), payload['bytes'])
         self.assertEqual(14, payload["default_days"])
         self.assertEqual(31, payload["max_days"])
         self.assertEqual(1, len(self.s3.puts))

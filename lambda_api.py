@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import boto3
+import api_usage
 
 s3_client = boto3.client("s3")
 dynamodb_client = boto3.client("dynamodb")
@@ -945,7 +946,11 @@ def require_public_api_access(event, required_scope, force=False):
         or required_scope not in ddb_string_list(item, "scopes")
     ):
         return response(403, {"error": "Invalid API key"})
-    return enforce_rate_limit(key_id, required_scope)
+    limited = enforce_rate_limit(key_id, required_scope)
+    if limited is None:
+        event['_api_usage'] = {'key_id': key_id, 'email': ddb_string(item, 'email', ''),
+                               'scope': required_scope, 'at': datetime.now(timezone.utc).isoformat()}
+    return limited
 
 
 # --- Row detection: which lines are real data rows vs headers and comments ---
@@ -1536,16 +1541,16 @@ def finish_audit_event(audit_id, result, error=None):
 
 
 def query_by_status(table_name, status, limit=100):
-    result = dynamodb_client.query(
-        TableName=table_name,
-        IndexName="status-created-at-index",
-        KeyConditionExpression="#status = :status",
-        ExpressionAttributeNames={"#status": "status"},
-        ExpressionAttributeValues={":status": {"S": status}},
-        ScanIndexForward=False,
-        Limit=limit,
-    )
-    return result.get("Items") or []
+    params = dict(TableName=table_name, IndexName="status-created-at-index",
+        KeyConditionExpression="#status = :status", ExpressionAttributeNames={"#status": "status"},
+        ExpressionAttributeValues={":status": {"S": status}}, ScanIndexForward=False, Limit=limit)
+    items = []
+    while True:
+        result = dynamodb_client.query(**params)
+        items.extend(result.get("Items") or [])
+        if not result.get("LastEvaluatedKey"):
+            return items
+        params["ExclusiveStartKey"] = result["LastEvaluatedKey"]
 
 
 def rate_counter_value(key_id, counter_type, day_bucket):
@@ -1561,7 +1566,9 @@ def get_team_api_users(event, identity):
     try:
         items = query_by_status(API_KEYS_TABLE, "ACTIVE") + query_by_status(API_KEYS_TABLE, "REVOKED")
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        usage_today = datetime.now(timezone.utc).astimezone(api_usage.DAY_TIMEZONE).date()
         keys = []
+        users = {}
         for item in sorted(items, key=lambda value: ddb_number(value, "created_at_epoch", 0), reverse=True):
             key_id = ddb_string(item, "key_id", "")
             request_id = ddb_string(item, "request_id", "")
@@ -1572,6 +1579,8 @@ def get_team_api_users(event, identity):
                     Key={"request_id": {"S": request_id}},
                 ).get("Item")
                 organization = ddb_string(request, "organization", "")
+            email = ddb_string(item, 'email', '')
+            user_id = api_usage.subject_id(email, key_id)
             keys.append({
                 "key_id": key_id,
                 "email": ddb_string(item, "email", ""),
@@ -1582,9 +1591,41 @@ def get_team_api_users(event, identity):
                 "last_used_at": ddb_string(item, "last_used_at"),
                 "requests_today": rate_counter_value(key_id, "requests", today),
                 "exports_today": rate_counter_value(key_id, "exports", today),
+                'user_id': user_id,
+                'usage': api_usage.read_usage(dynamodb_client, RATE_LIMITS_TABLE, 'key', key_id, usage_today.isoformat()),
             })
+            user = users.setdefault(user_id, {'user_id': user_id, 'email': email, 'organization': organization,
+                'active_keys': 0, 'revoked_keys': 0, 'last_used_at': None})
+            user['active_keys' if ddb_string(item, 'status') == 'ACTIVE' else 'revoked_keys'] += 1
+            stamp = ddb_string(item, 'last_used_at')
+            if stamp and (not user['last_used_at'] or stamp > user['last_used_at']):
+                user['last_used_at'] = stamp
+        for user_id, user in users.items():
+            user['usage'] = api_usage.read_usage(dynamodb_client, RATE_LIMITS_TABLE, 'user', user_id, usage_today.isoformat())
+            tracked_last = (user['usage']['lifetime'] or {}).get('last_used_at')
+            if tracked_last and (not user['last_used_at'] or tracked_last > user['last_used_at']):
+                user['last_used_at'] = tracked_last
+        params = query_params(event)
+        history = None
+        if params.get('user_id'):
+            user_id = params['user_id']
+            if user_id not in users:
+                return response(404, {'error': 'API user not found'})
+            try:
+                days = int(params.get('days', 30))
+            except (TypeError, ValueError):
+                return response(400, {'error': 'days must be 7, 30, or 90'})
+            if days not in {7, 30, 90}:
+                return response(400, {'error': 'days must be 7, 30, or 90'})
+            lifetime = users[user_id]['usage']['lifetime']
+            history = {'user_id': user_id, 'email': users[user_id]['email'],
+                'rows': api_usage.read_history(dynamodb_client, RATE_LIMITS_TABLE, user_id, days, usage_today,
+                    lifetime.get('tracking_since') if lifetime else None)}
         return response(200, {
             "keys": keys,
+            'users': list(users.values()), 'history': history,
+            'usage_day': usage_today.isoformat(), 'usage_timezone': str(api_usage.DAY_TIMEZONE), 'quota_timezone': 'UTC',
+            'usage_definition': 'Authenticated requests admitted by quota, including errors. Exports count CSV links prepared, not completed downloads. Totals cover recorded usage only; older expired quota counters cannot reconstruct lifetime history.',
             "limits": {
                 "requests_per_minute": PER_MINUTE_LIMIT,
                 "requests_per_day": PER_DAY_LIMIT,
@@ -2085,6 +2126,7 @@ def get_observations_export(event):
         "instrument_id": instrument_id,
         "filename": filename,
         "bytes": len(export_body),
+        "columns": len(columns),
         "rows": len(export_lines) - 1,
         "start": start_time.isoformat(),
         "end": end_time.isoformat(),
@@ -2624,6 +2666,23 @@ def lambda_handler(event, context):
     result = None
     try:
         result = _dispatch_request(event, context)
+        usage = event.pop('_api_usage', None)
+        if usage:
+            request_id = event.get('requestContext', {}).get('requestId') or getattr(context, 'aws_request_id', None) or str(uuid.uuid4())
+            try:
+                export = None
+                if usage['scope'] == READ_SCOPES['observations_export'] and result['statusCode'] == 200:
+                    payload = json.loads(result['body'])
+                    export = {'bytes': payload['bytes'], 'rows': payload['rows']}
+                api_usage.record_usage(dynamodb_client, RATE_LIMITS_TABLE, usage, request_id, result['statusCode'],
+                    export=export, at=datetime.fromisoformat(usage['at']))
+                result = {**result, 'headers': {**result.get('headers', {}), 'X-API-Usage-Recorded': 'yes'}}
+            except Exception:
+                # Do not serve an authenticated data response as if its required
+                # accounting succeeded. Public dashboard requests are unaffected.
+                request_logger.error(json.dumps({'event': 'api_usage_accounting_failed', 'request_id': request_id}))
+                result = response(503, {'error': 'API usage accounting is temporarily unavailable. Please retry later.'},
+                    {'Retry-After': '5', 'X-API-Usage-Recorded': 'no'})
         return result
     finally:
         path = event.get("rawPath") or event.get("path") or API_ROUTES["summary"]

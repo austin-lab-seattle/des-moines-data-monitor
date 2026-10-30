@@ -3,6 +3,7 @@ import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyR
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
+import { fetchApiRead } from './apiFetch.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -23,21 +24,7 @@ const RESEARCH_API_PATHS = {
 };
 const apiUrl = (path) => path;
 const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
-// Bound individual API requests. Instrument cards resolve independently.
-const API_TIMEOUT_MS = 30000;
-const fetchApi = async (pathWithQuery, options = {}) => {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-  const abortFromCaller = () => controller.abort();
-  if (options.signal?.aborted) controller.abort();
-  options.signal?.addEventListener('abort', abortFromCaller, { once: true });
-  try {
-    return await fetch(apiUrl(pathWithQuery), { ...options, signal: controller.signal });
-  } finally {
-    window.clearTimeout(timeout);
-    options.signal?.removeEventListener('abort', abortFromCaller);
-  }
-};
+const fetchApi = (pathWithQuery, options) => fetchApiRead(apiUrl(pathWithQuery), options);
 const INSTRUMENT_IDS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
 const PUBLIC_INSTRUMENTS = {
   'BC-MA200': { name: 'Black carbon', detail: 'Soot particles', column: 'BC1' },
@@ -106,6 +93,7 @@ export default function Dashboard() {
   const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [chartBusy, setChartBusy] = useState(false);
+  const [checkedAt, setCheckedAt] = useState(() => Date.now());
   const readingsRequestId = useRef(0);
   const readingsController = useRef(null);
 
@@ -122,6 +110,7 @@ export default function Dashboard() {
 
   const loadReadings = useCallback(async () => {
     setRefreshing(true);
+    setCheckedAt(Date.now());
     const requestId = ++readingsRequestId.current;
     readingsController.current?.abort();
     const controller = new AbortController();
@@ -140,10 +129,8 @@ export default function Dashboard() {
           throw new Error('The response does not match the requested instrument.');
         }
         const latest = result?.rows[0] || null;
-        const stamp = observationTime(latest);
         if (requestId !== readingsRequestId.current) return;
-        const instrument = { id, ...PUBLIC_INSTRUMENTS[id], latest, pending: false,
-          older: Boolean(stamp && Date.now() - new Date(stamp).getTime() > 60 * 60 * 1000) };
+        const instrument = { id, ...PUBLIC_INSTRUMENTS[id], latest, pending: false };
         setData(previous => ({ instruments: previous.instruments.map(item => item.id === id ? instrument : item) }));
       } catch (err) {
         if (requestId === readingsRequestId.current) {
@@ -247,6 +234,7 @@ export default function Dashboard() {
             uploadRefreshKey={uploadRefreshKey}
             onUploadBusy={setUploadBusy}
             onChartBusy={setChartBusy}
+            checkedAt={checkedAt}
           />
         )}
         {activeView === 'review' && <DataReview />}
@@ -354,7 +342,7 @@ function SkyDecoration() {
   </>;
 }
 
-function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, onUploadBusy, onChartBusy }) {
+function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, onUploadBusy, onChartBusy, checkedAt }) {
   const [recentInstrument, setRecentInstrument] = useState(null);
 
   return (
@@ -375,8 +363,9 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, o
         <div className="pollutant-grid">
             {instruments.map(instrument => {
               const value = instrument.latest?.values?.[instrument.column];
+              const formattedValue = formatSummaryReadingValue(value, instrument.id);
               const stamp = observationTime(instrument.latest);
-              const oldReading = instrument.older;
+              const oldReading = Boolean(stamp && Number.isFinite(Date.parse(stamp)) && checkedAt - Date.parse(stamp) > 60 * 60 * 1000);
               const cardLoading = !instrument.latest && (instrument.pending ?? loading);
               return (
                 <button key={instrument.id} type="button" className="pollutant-card"
@@ -386,15 +375,16 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, o
                   <span className="pollutant-detail">{instrument.detail}</span>
                   <span className="pollutant-instrument">{INSTRUMENT_NAMES[instrument.id]}</span>
                   <span className="pollutant-instrument-id">{instrument.id}</span>
-                  <strong className="pollutant-value">{cardLoading ? '…' : formatSummaryReadingValue(value, instrument.id)}
+                  <strong className="pollutant-value">{cardLoading ? '…' : formattedValue}
                     {instrument.pending && <RefreshCw size={14} className="refresh-spinner reading-refresh" aria-label={`Refreshing ${instrument.name}`} />}
                   </strong>
                   <span className="pollutant-unit">{instrument.unit || (value == null ? 'Reading unavailable' : instrument.column)}</span>
-                  <span className={`pollutant-time ${oldReading || instrument.unavailable ? 'pollutant-time-old' : ''}`}>
+                  <span className={`pollutant-time ${oldReading ? 'pollutant-time-old' : ''}`}>
                     {cardLoading ? 'Loading…' : instrument.latest
-                      ? `${instrument.unavailable ? 'Last available: ' : oldReading ? 'Older reading: ' : ''}${formatSeattleTime(stamp || instrument.latest.timestamp)}`
+                      ? `${formattedValue === 'N/A' ? oldReading ? 'Older record: ' : 'Latest record: ' : oldReading ? 'Older reading: ' : ''}${formatSeattleTime(stamp || instrument.latest.timestamp)}`
                       : instrument.unavailable ? 'Temporarily unavailable' : 'No reading available'}
                   </span>
+                  {instrument.unavailable && instrument.latest && <span className="pollutant-refresh-error" role="status">Refresh failed. Showing the previous reading.</span>}
                   <span className="pollutant-open"><Table2 size={14} /> Recent values</span>
                 </button>
               );
@@ -1258,6 +1248,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   const [loading, setLoading] = useState(false);
   const [exportLoading, setExportLoading] = useState(false);
   const [exportMessage, setExportMessage] = useState('');
+  const [exportPrepared, setExportPrepared] = useState(false);
   const [seriesError, setSeriesError] = useState('');
   const seriesRequestId = useRef(0);
   const appliedQuery = useRef({ inst: 'SMPS', meas: '', s: '', e: '' });
@@ -1333,6 +1324,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   const downloadExport = async () => {
     setExportLoading(true);
     setExportMessage('');
+    setExportPrepared(false);
     try {
       const params = new URLSearchParams({ instrument });
       if (start) params.set('start', toIso(start));
@@ -1340,10 +1332,15 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
       const res = await fetchApi(`${API_PATHS.observationsExport}?${params.toString()}`);
       const payload = await res.json();
       if (res.ok && payload.url) {
+        if (!Number.isInteger(payload.rows) || payload.rows < 0 || !Number.isFinite(payload.bytes) || payload.bytes < 0) {
+          throw new Error('Export size information is unavailable. Please try again.');
+        }
         const link = document.createElement('a');
         link.href = payload.url;
         link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
+        setExportPrepared(true);
+        setExportMessage(`Prepared ${Number(payload.rows).toLocaleString('en-US')} rows${Number.isInteger(payload.columns) ? ` × ${payload.columns} columns` : ''} (${formatUploadBytes(payload.bytes)}). Includes all instrument columns and individual observations. Chart CSV contains the hourly averages.`);
       } else if (res.status === 404) {
         setExportMessage('No measurements are available to download for this pollutant yet.');
       } else {
@@ -1382,8 +1379,8 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
         </div>
       </div>
       {exportMessage && (
-        <div className="filter-message filter-message-error" role="status">
-          <AlertTriangle size={14} />
+        <div className={`filter-message ${exportPrepared ? 'filter-message-success' : 'filter-message-error'}`} role="status">
+          {exportPrepared ? <Check size={14} /> : <AlertTriangle size={14} />}
           <span>{exportMessage}</span>
         </div>
       )}

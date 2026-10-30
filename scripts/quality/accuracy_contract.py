@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 CASES = {
     "BC-MA200": ("Date / time local,BC1", ["2026-10-07 00:00:00,0", "2026-10-07 00:00:05,120"], "BC1", "120", 60),
     "CO2-LICOR": ("System_Date_(Y-M-D),System_Time_(h:m:s),CO2_(umol_mol-1)", ["2026-10-07,00:00:00,400", "2026-10-07,00:00:05,440"], "CO2_(umol_mol-1)", "440", 420),
