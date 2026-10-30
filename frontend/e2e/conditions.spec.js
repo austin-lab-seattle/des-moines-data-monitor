@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { Buffer } from 'node:buffer';
 
 const instruments = {
   'BC-MA200': { name: 'Black carbon', columns: ['BC1'], value: '120' },
@@ -432,4 +433,56 @@ test('automatic refresh uses five minutes and pauses while the page is hidden', 
     document.dispatchEvent(new Event('visibilitychange'));
   });
   await expect.poll(() => reads).toBe(3);
+});
+
+test('a refresh failure has its own message and does not label a recent observation as old', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-07T07:07:00Z') });
+  await mockApi(page);
+  await page.goto('/');
+  const refresh = page.getByRole('button', { name: 'Refresh', exact: true });
+  await expect(refresh).toBeEnabled();
+  await page.route('**/air-quality/v1/observations?**', async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get('instrument') === 'NO2-CAPS') return route.fulfill({ status: 503, json: { error: 'CI-only transient read failure' } });
+    return route.fallback();
+  });
+  await refresh.click();
+  await expect(refresh).toBeEnabled();
+  const card = page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' });
+  await expect(card).toContainText('Refresh failed. Showing the previous reading.');
+  await expect(card).not.toContainText('Older reading:');
+  await expect(card.locator('.pollutant-value')).toHaveText('10');
+});
+
+test('one transient observation error recovers on retry without a false stale warning', async ({ page }) => {
+  await mockApi(page);
+  let failures = 0;
+  await page.route('**/air-quality/v1/observations?**', async route => {
+    if (new URL(route.request().url()).searchParams.get('instrument') === 'NO2-CAPS' && failures++ === 0)
+      return route.fulfill({ status: 503, json: { error: 'CI-only first-attempt error' } });
+    return route.fallback();
+  });
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  const card = page.getByRole('button', { name: 'View latest readings from Nitrogen dioxide' });
+  await expect(card.locator('.pollutant-value')).toHaveText('10');
+  await expect(card).not.toContainText('Refresh failed');
+  expect(failures).toBe(2);
+});
+
+test('full export explains its actual rows columns and bytes rather than implying chart averages', async ({ page }) => {
+  await mockApi(page);
+  const csv = Array.from({ length: 146 }, (_, i) => `column_${i}`).join(',') + '\n' + (Array(146).fill('123.45').join(',') + '\n').repeat(3000);
+  const size = Buffer.byteLength(csv);
+  await page.route('**/air-quality/v1/observations/export?**', route => route.fulfill({ json: {
+    instrument_id: 'SMPS', url: 'http://127.0.0.1:4175/ci-only-wide.csv', filename: 'ci-only-wide.csv', rows: 3000, columns: 146, bytes: size,
+  } }));
+  await page.route('**/ci-only-wide.csv', route => route.fulfill({ body: csv, contentType: 'text/csv', headers: { 'Content-Disposition': 'attachment; filename="ci-only-wide.csv"' } }));
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  const downloaded = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export CSV', exact: true }).click();
+  await downloaded;
+  await expect(page.getByText(/Prepared 3,000 rows × 146 columns/)).toBeVisible();
+  await expect(page.getByText(/Includes all instrument columns and individual observations/)).toBeVisible();
 });

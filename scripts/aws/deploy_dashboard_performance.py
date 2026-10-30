@@ -36,6 +36,15 @@ def prepare(lam, function, source_path, expected_ref, include_api=False):
         if deployed not in (baseline, current):
             raise RuntimeError(f'{function} source differs from the reviewed baseline. Inspect before deploying.')
         replacements = {name: current}
+        # Both Lambda packages import the same small usage helper through the
+        # API reader. No new table, role or environment setting is required.
+        usage = ROOT / 'api_usage.py'
+        if usage.exists():
+            replacements['api_usage.py'] = usage.read_bytes()
+            if 'api_usage.py' in old.namelist():
+                baseline_usage = subprocess.check_output(['git', 'show', f'{expected_ref}:api_usage.py'], cwd=ROOT)
+                if old.read('api_usage.py') not in (baseline_usage, replacements['api_usage.py']):
+                    raise RuntimeError('Usage helper differs from the reviewed baseline. Inspect before deploying.')
         if include_api:
             replacements['lambda_api.py'] = (ROOT / 'lambda_api.py').read_bytes()
             if 'lambda_api.py' in old.namelist():
