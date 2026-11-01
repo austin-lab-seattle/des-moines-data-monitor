@@ -116,9 +116,15 @@ role_policy = {
             "Condition": {"StringEquals": {"ses:FromAddress": SOURCE_EMAIL}},
         },
         {
+            "Sid": "CreateOwnLogGroup",
+            "Effect": "Allow",
+            "Action": "logs:CreateLogGroup",
+            "Resource": f"arn:aws:logs:{REGION}:{ACCOUNT_ID}:log-group:/aws/lambda/{FUNCTION_NAME}",
+        },
+        {
             "Sid": "WriteOwnLogs",
             "Effect": "Allow",
-            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+            "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
             "Resource": f"arn:aws:logs:{REGION}:{ACCOUNT_ID}:log-group:/aws/lambda/{FUNCTION_NAME}:*",
         },
     ],
