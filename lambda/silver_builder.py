@@ -779,7 +779,16 @@ def build_instrument(instrument_id):
             return {**previous["result"], "skipped_unchanged": True, "bronze_reads": 0}
         try:
             current = s3_client.head_object(Bucket=BUCKET, Key=f"{instrument_id}/silver/{instrument_id}_data.csv")
-            if current["ETag"] == previous.get("silver_etag") and previous.get("views_version") == api.SILVER_VIEW_CODE_VERSION:
+            if current["ETag"] == previous.get("silver_etag"):
+                if previous.get("views_version") != api.SILVER_VIEW_CODE_VERSION:
+                    try:
+                        silver_text = api.get_silver_text(instrument_id, expected_etag=current["ETag"])
+                        api.publish_dashboard_views(instrument_id, silver_text, current["ETag"])
+                        previous["views_version"] = api.SILVER_VIEW_CODE_VERSION
+                        s3_client.put_object(Bucket=BUCKET, Key=state_key,
+                                             Body=json.dumps(previous).encode(), ContentType="application/json")
+                    except Exception as exc:
+                        print(f"Dashboard view republication failed for {instrument_id}: {exc}")
                 return {**previous["result"], "skipped_unchanged": True, "bronze_reads": 0}
         except Exception:
             pass

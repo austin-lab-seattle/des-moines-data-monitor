@@ -260,7 +260,7 @@ class UploadFreshnessMonitorTests(unittest.TestCase):
     def test_cached_source_keeps_actual_reading_time_not_rebuild_time(self):
         s3, ses = FakeS3([self.bronze(.1)], silver=self.silver(5.5)), FakeSES()
         monitor.run_monitor(s3, ses, self.now)
-        with mock.patch.object(monitor, "datetime_for_instrument", side_effect=AssertionError("should reuse unchanged ETag")):
+        with mock.patch.object(monitor, "datetime_for_record", side_effect=AssertionError("should reuse unchanged ETag")):
             result = monitor.run_monitor(s3, ses, self.now + timedelta(hours=1))
         self.assertTrue(result["alert_sent"])
         self.assertEqual(["stale-reading"], result["instruments"]["NO2-CAPS"]["reasons"])

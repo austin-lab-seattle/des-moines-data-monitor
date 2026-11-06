@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { Buffer } from 'node:buffer';
 
 const instruments = {
-  'BC-MA200': { name: 'Black carbon', columns: ['BC1'], value: '120' },
+  'BC-MA200': { name: 'Black carbon', columns: ['IR BCc', 'IR BC1'], value: '120' },
   'CO2-LICOR': { name: 'Carbon dioxide', columns: ['CO2_(umol_mol-1)', 'H2O_(mmol_mol-1)', 'CO2_Absorption'], value: '420' },
   'NEPH-PM25': { name: 'Fine particles', columns: ['PM2.5 (µg/m³)', 'BScat (10^-4 m^-1)'], value: '5.123' },
   'NO2-CAPS': { name: 'Nitrogen dioxide', columns: ['Concentration', 'Loss', 'Span', 'LastBaseline', 'HHMMSS'], value: '10.255' },

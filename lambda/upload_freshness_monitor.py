@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 
-from lambda_api import datetime_for_instrument, record_timestamp, split_fields
+from lambda_api import column_index, datetime_for_record, split_fields
 
 
 BUCKET = os.environ.get("S3_BUCKET", "des-moines-data-pipeline-austinlab")
@@ -27,6 +27,7 @@ INSTRUMENT_IDS = [
 STATE_KEY = os.environ.get(
     "UPLOAD_MONITOR_STATE_KEY", "_monitor/upload_freshness_state.json"
 )
+READING_TIME_VERSION = 2
 STALE_AFTER_HOURS = float(os.environ.get("STALE_AFTER_HOURS", "6"))
 if not math.isfinite(STALE_AFTER_HOURS) or STALE_AFTER_HOURS <= 0:
     raise ValueError("STALE_AFTER_HOURS must be a positive finite number")
@@ -79,7 +80,8 @@ def latest_reading(s3, instrument_id, previous, now):
     etag = response.get("ETag")
     try:
         cached = parse_timestamp(previous.get("last_reading_at"))
-        if etag and etag == previous.get("silver_etag") and cached and cached <= now + timedelta(minutes=5):
+        if (etag and etag == previous.get("silver_etag") and cached and cached <= now + timedelta(minutes=5)
+                and previous.get("reading_time_version") == READING_TIME_VERSION):
             return cached, etag
         lines = body.iter_lines() if hasattr(body, "iter_lines") else iter(body)
         columns = None
@@ -92,10 +94,11 @@ def latest_reading(s3, instrument_id, previous, now):
             fields = split_fields(line)
             if columns is None:
                 columns = fields
+                index = column_index(columns)
                 continue
             if len(fields) != len(columns):
                 continue
-            moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields))
+            moment = datetime_for_record(instrument_id, columns, fields, index)
             if moment is None:
                 continue
             moment = moment.replace(tzinfo=timezone.utc)
@@ -173,6 +176,7 @@ def check_instrument(s3, instrument_id, previous, now):
     try:
         latest, etag = latest_reading(s3, instrument_id, previous, now)
         result["silver_etag"] = etag
+        result["reading_time_version"] = READING_TIME_VERSION
     except Exception as exc:
         errors["reading"] = str(exc)
     armed = bool(previous.get("armed") or latest_upload or latest)

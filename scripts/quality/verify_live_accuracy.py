@@ -11,7 +11,7 @@ import os
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from urllib.error import HTTPError
@@ -20,7 +20,7 @@ from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 MEASUREMENTS = {
-    "BC-MA200": "BC1", "CO2-LICOR": "CO2_(umol_mol-1)",
+    "BC-MA200": "IR BCc", "CO2-LICOR": "CO2_(umol_mol-1)",
     "NEPH-PM25": "PM2.5 (µg/m³)", "NO2-CAPS": "Concentration",
     "SMPS": "Total Concentration (#/cm³)",
 }
@@ -72,7 +72,15 @@ def source_timestamp(instrument, values):
                 continue
         if parsed is None:
             return None
-    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=ZoneInfo("America/Los_Angeles"))).astimezone(timezone.utc)
+    if parsed.tzinfo is None:
+        zone = ZoneInfo("America/Los_Angeles")
+        if instrument == "BC-MA200":
+            try:
+                zone = timezone(timedelta(minutes=int(values.get("Timezone offset (mins)", ""))))
+            except (TypeError, ValueError, OverflowError):
+                pass
+        parsed = parsed.replace(tzinfo=zone)
+    return parsed.astimezone(timezone.utc)
 
 
 def verify_instrument(base, bucket, instrument, environment):
@@ -111,7 +119,6 @@ def verify_instrument(base, bucket, instrument, environment):
             # Reconcile a complete recent source hour, never an arbitrary last-N
             # subset that could produce a different (and misleading) mean.
             hour = records[0][0].replace(minute=0, second=0, microsecond=0)
-            from datetime import timedelta
             end = hour + timedelta(hours=1) - timedelta(microseconds=1)
             status, series, series_seconds = fetch_api(base, "timeseries", instrument=instrument, measurement=column, start=hour.isoformat(), end=end.isoformat())
             after = aws_json(head_command, environment)
