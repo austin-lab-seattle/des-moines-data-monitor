@@ -27,7 +27,7 @@ const documentedApiUrl = (path) => `${API_BASE_URL}${path}`;
 const fetchApi = (pathWithQuery, options) => fetchApiRead(apiUrl(pathWithQuery), options);
 const INSTRUMENT_IDS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
 const PUBLIC_INSTRUMENTS = {
-  'BC-MA200': { name: 'Black carbon', detail: 'Soot particles', column: 'BC1' },
+  'BC-MA200': { name: 'Black carbon', detail: 'Soot particles', column: 'IR BCc', unit: 'ng/m³' },
   'CO2-LICOR': { name: 'Carbon dioxide', detail: 'CO₂', column: 'CO2_(umol_mol-1)', unit: 'ppm' },
   'NEPH-PM25': { name: 'Fine particles', detail: 'PM₂.₅', column: 'PM2.5 (µg/m³)', unit: 'µg/m³' },
   'NO2-CAPS': { name: 'Nitrogen dioxide', detail: 'NO₂', column: 'Concentration', unit: 'ppb' },
@@ -41,13 +41,16 @@ const INSTRUMENT_NAMES = {
   SMPS: 'SMPS',
 };
 const RECENT_READING_COLUMNS = {
-  'BC-MA200': ['BC1', 'BC2', 'BC3', 'BC4', 'BC5'],
+  'BC-MA200': ['IR BCc', 'IR BC1', 'IR BC2'],
   'CO2-LICOR': ['CO2_(umol_mol-1)'],
   'NEPH-PM25': ['PM2.5 (µg/m³)'],
   'NO2-CAPS': ['Concentration'],
   SMPS: ['Total Concentration (#/cm³)', 'Median (nm)', 'Mean (nm)', 'Geo. Mean (nm)', 'Mode (nm)'],
 };
 const RECENT_READING_LABELS = {
+  'IR BCc': 'IR BCc (ng/m³)',
+  'IR BC1': 'IR BC1 (ng/m³)',
+  'IR BC2': 'IR BC2 (ng/m³)',
   Concentration: 'NO₂ concentration (ppb)',
   Pressure: 'Pressure',
   Temperature: 'Temperature (K)',
@@ -1307,6 +1310,9 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
     return () => { clearTimeout(task); cancelSeries(); };
   }, [fetchSeries, refreshKey, cancelSeries]);
 
+  const clampBlackCarbonPlot = instrument === 'BC-MA200' && measurement === 'IR BCc';
+  const chartValue = point => Math.max(0, point.v);
+
   const downloadCSV = () => {
     if (!series.length) return;
     const header = `time,${measurement || 'value'}`;
@@ -1434,9 +1440,9 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
               labelStyle={{ color: 'var(--text-muted)' }}
               itemStyle={{ color: 'var(--brand)' }}
               labelFormatter={fmtLabel}
-              formatter={value => [formatReadingValue(value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
+              formatter={(value, _name, item) => [formatReadingValue(clampBlackCarbonPlot ? item.payload?.v ?? value : value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
             />
-            <Line type="linear" dataKey="v" stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
+            <Line type="linear" dataKey={clampBlackCarbonPlot ? chartValue : 'v'} stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer></div>
       ) : (
@@ -1445,6 +1451,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
 
       <div className="chart-caption">
         <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly sample average · chart times in UTC</span>
+        {clampBlackCarbonPlot && <span>Negative averages are plotted at zero. Hover and CSV show the signed averages.</span>}
       </div>
     </section>
   );

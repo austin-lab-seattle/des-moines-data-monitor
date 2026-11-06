@@ -1,9 +1,11 @@
 import csv
 import base64
+import gzip
 import hmac
 import hashlib
 import heapq
 import html
+import io
 import json
 import logging
 import math
@@ -1174,6 +1176,25 @@ def make_row_key(instrument_id, timestamp_raw, raw_line):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def datetime_for_record(instrument_id, columns, fields, index=None):
+    if index is None:
+        index = column_index(columns)
+    raw = record_timestamp(instrument_id, columns, fields, index)
+    if instrument_id == "BC-MA200":
+        # MA200 local timestamps are computed from the device's configured
+        # offset, which does not automatically follow daylight saving time.
+        offset_text = value_at(fields, index.get("timezone offset (mins)"))
+        try:
+            offset = timezone(timedelta(minutes=int(offset_text)))
+        except (TypeError, ValueError, OverflowError):
+            pass  # Legacy exports can omit the device offset.
+        else:
+            parsed = parse_datetime_value(raw)
+            if parsed is not None:
+                return (parsed if parsed.tzinfo else parsed.replace(tzinfo=offset)).astimezone(timezone.utc).replace(tzinfo=None)
+    return datetime_for_instrument(instrument_id, raw)
+
+
 def is_valid_instrument(instrument_id):
     return instrument_id in INSTRUMENT_IDS
 
@@ -1284,7 +1305,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
             if len(fields) != len(columns):
                 continue
             timestamp_raw = record_timestamp(instrument_id, columns, fields, timestamp_index)
-            timestamp_compare = datetime_for_instrument(instrument_id, timestamp_raw)
+            timestamp_compare = datetime_for_record(instrument_id, columns, fields, timestamp_index)
             if not row_matches_time_range(timestamp_compare, start_time, end_time):
                 continue
             valid_count += 1
@@ -1346,7 +1367,7 @@ def count_silver_records(instrument_id, start_raw=None, end_raw=None):
         fields = split_fields(raw_line)
         if len(fields) != len(columns):
             continue
-        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields, timestamp_index))
+        moment = datetime_for_record(instrument_id, columns, fields, timestamp_index)
         if row_matches_time_range(moment, start_time, end_time):
             count += 1
     return count
@@ -1733,6 +1754,17 @@ SERIES_DEFAULT_MEASUREMENT = {
     "BC-MA200": "BC",
 }
 
+# Bound Gold to the primary measurements and the SMPS size metrics already
+# exposed by the dashboard. Other research measurements remain queryable.
+GOLD_MEASUREMENTS = {
+    "BC-MA200": ("IR BCc",),
+    "CO2-LICOR": ("CO2_(umol_mol-1)",),
+    "NEPH-PM25": ("PM2.5 (µg/m³)", "BScat (10^-4 m^-1)"),
+    "NO2-CAPS": ("Concentration",),
+    "SMPS": ("Total Concentration (#/cm³)", "Median (nm)", "Mean (nm)", "Geo. Mean (nm)", "Mode (nm)"),
+}
+GOLD_MAX_BODY_BYTES = 8 * 1024 * 1024
+
 
 def numeric_columns(columns, data_lines):
     # Sparse columns from rollover/schema unions may be empty in the first 25
@@ -1774,6 +1806,8 @@ def is_measurement_column(name):
 
 
 def pick_default_measurement(instrument_id, options):
+    if instrument_id == "BC-MA200" and "IR BCc" in options:
+        return "IR BCc"
     hint = SERIES_DEFAULT_MEASUREMENT.get(instrument_id, "")
     if hint:
         for column in options:
@@ -1782,7 +1816,7 @@ def pick_default_measurement(instrument_id, options):
     return options[0] if options else None
 
 
-def get_series(event, silver_text=None):
+def get_series(event, silver_text=None, materialized=None):
     """Bucketed mean of one measurement over time, computed on demand from silver."""
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
@@ -1816,7 +1850,6 @@ def get_series(event, silver_text=None):
     if measurement is None:
         return response(200, {"instrument_id": instrument_id, "measurement": None, "measurements": options, "series": []})
 
-    col_index = columns.index(measurement)
     start_time = datetime_for_compare(params.get("start"))
     end_time = datetime_for_compare(params.get("end"))
     try:
@@ -1830,23 +1863,35 @@ def get_series(event, silver_text=None):
     if bucket_minutes not in {1, 5, 15, 60}:
         return response(400, {"error": "bucket_minutes must be one of 1, 5, 15, or 60"})
 
-    buckets = {}
+    measurements = [measurement]
+    if materialized is not None:
+        measurements.extend(name for name in GOLD_MEASUREMENTS[instrument_id] if name in numeric and name != measurement)
+    indices = {name: columns.index(name) for name in measurements}
+    buckets = {name: {} for name in measurements}
+    bounds = {name: {} for name in measurements}
     skipped_schema_mismatch = 0
-    skipped_invalid_measurement = 0
-    skipped_no_timestamp = 0
+    skipped_invalid = dict.fromkeys(measurements, 0)
+    skipped_timestamp = dict.fromkeys(measurements, 0)
     expected_fields = len(columns)
     for raw_line in data_lines:
         fields = split_fields(raw_line)
         if len(fields) != expected_fields:
             skipped_schema_mismatch += 1
             continue
-        if col_index >= len(fields) or not is_float(fields[col_index]):
-            skipped_invalid_measurement += 1
+        values = {}
+        for name, index in indices.items():
+            if is_float(fields[index]):
+                values[name] = float(fields[index])
+            else:
+                skipped_invalid[name] += 1
+        if not values:
             continue
-        moment = datetime_for_instrument(instrument_id, record_timestamp(instrument_id, columns, fields, timestamp_index))
-        if moment is None or not row_matches_time_range(moment, start_time, end_time):
-            if moment is None:
-                skipped_no_timestamp += 1
+        moment = datetime_for_record(instrument_id, columns, fields, timestamp_index)
+        if moment is None:
+            for name in values:
+                skipped_timestamp[name] += 1
+            continue
+        if not row_matches_time_range(moment, start_time, end_time):
             continue
         bucket_minute = (moment.minute // bucket_minutes) * bucket_minutes
         bucket = moment.replace(
@@ -1855,26 +1900,89 @@ def get_series(event, silver_text=None):
             microsecond=0,
             tzinfo=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
-        buckets.setdefault(bucket, []).append(float(fields[col_index]))
+        for name, value in values.items():
+            buckets[name].setdefault(bucket, []).append(value)
+            if materialized is not None:
+                first, last = bounds[name].get(bucket, (moment, moment))
+                bounds[name][bucket] = (min(first, moment), max(last, moment))
 
     # Explicit sample mean; no fabricated zeroes or interpolation for empty
     # buckets. Scale before fsum to avoid overflow of otherwise finite means.
-    series = [{"t": hour, "v": round(math.fsum(value / len(values) for value in values), 3), "n": len(values)}
-              for hour, values in sorted(buckets.items())]
-    plotted_rows = sum(len(values) for values in buckets.values())
-    return response(200, {
-        "instrument_id": instrument_id,
-        "measurement": measurement,
-        "measurements": options,
-        "bucket_minutes": bucket_minutes,
-        "aggregation": "sample_mean",
-        "series": series,
-        "source_rows": len(data_lines),
-        "plotted_rows": plotted_rows,
-        "skipped_schema_mismatch": skipped_schema_mismatch,
-        "skipped_invalid_measurement": skipped_invalid_measurement,
-        "skipped_no_timestamp": skipped_no_timestamp,
-    })
+    results = {}
+    for name in measurements:
+        series = [{"t": hour, "v": round(math.fsum(value / len(values) for value in values), 3), "n": len(values)}
+                  for hour, values in sorted(buckets[name].items())]
+        results[name] = {
+            "instrument_id": instrument_id,
+            "measurement": name,
+            "measurements": options,
+            "bucket_minutes": bucket_minutes,
+            "aggregation": "sample_mean",
+            "series": series,
+            "source_rows": len(data_lines),
+            "plotted_rows": sum(point["n"] for point in series),
+            "skipped_schema_mismatch": skipped_schema_mismatch,
+            "skipped_invalid_measurement": skipped_invalid[name],
+            "skipped_no_timestamp": skipped_timestamp[name],
+        }
+        if materialized is not None and name in GOLD_MEASUREMENTS[instrument_id]:
+            materialized[name] = {
+                "payload": results[name],
+                "bounds": {hour: [first.isoformat(), last.isoformat()] for hour, (first, last) in bounds[name].items()},
+            }
+    return response(200, results[measurement])
+
+
+def hourly_gold_key(instrument):
+    return f"_gold/v1/{instrument}/hourly.json.gz"
+
+
+def get_hourly_gold(instrument, etag, params):
+    """Serve hourly aggregates only when the range includes whole sample buckets."""
+    requested = params.get("measurement")
+    if requested and requested not in GOLD_MEASUREMENTS[instrument]:
+        return None
+    try:
+        if int(params.get("bucket_minutes", 60)) != 60:
+            return None
+        start = datetime_for_compare(params.get("start"))
+        end = datetime_for_compare(params.get("end"))
+        validate_time_range(params.get("start"), params.get("end"), start, end)
+        body = s3_client.get_object(Bucket=BUCKET, Key=hourly_gold_key(instrument))["Body"]
+        try:
+            blob = body.read(GOLD_MAX_BODY_BYTES + 1)
+        finally:
+            body.close()
+        if len(blob) > GOLD_MAX_BODY_BYTES:
+            return None
+        with gzip.GzipFile(fileobj=io.BytesIO(blob)) as bundle:
+            raw = bundle.read(GOLD_MAX_BODY_BYTES + 1)
+        if len(raw) > GOLD_MAX_BODY_BYTES:
+            return None
+        view = json.loads(raw)
+        if (view["version"] != SILVER_VIEW_CODE_VERSION or view["silver_etag"] != etag
+                or view["instrument_id"] != instrument):
+            return None
+        measurement = requested or view["default"]
+        metric = view["metrics"][measurement]
+        payload = metric["payload"]
+        if (payload["instrument_id"] != instrument or payload["measurement"] != measurement
+                or payload["bucket_minutes"] != 60 or payload["aggregation"] != "sample_mean"):
+            return None
+        if start is None and end is None:
+            return response(200, payload)
+        series = []
+        for point in payload["series"]:
+            first, last = (datetime.fromisoformat(stamp) for stamp in metric["bounds"][point["t"]])
+            if (start is not None and last < start) or (end is not None and first > end):
+                continue
+            if (start is not None and first < start) or (end is not None and last > end):
+                return None
+            series.append(point)
+        return response(200, {**payload, "series": series, "plotted_rows": sum(p["n"] for p in series)})
+    except Exception:
+        # An absent or unusable Gold view leaves the exact Silver query available.
+        return None
 
 
 def get_cached_silver_view(event, kind):
@@ -1924,6 +2032,12 @@ def get_cached_silver_view(event, kind):
         if key in _silver_view_cache:
             _silver_view_cache.move_to_end(key)
             return _view_response(_silver_view_cache[key], "memory")
+        if kind == "series":
+            gold = get_hourly_gold(instrument, etag, params)
+            if gold is not None:
+                if len(gold["body"].encode()) <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+                    _remember_silver_view(key, gold)
+                return _view_response(gold, "gold")
         if shared_key:
             try:
                 cache_text = s3_client.get_object(Bucket=BUCKET, Key=shared_key)["Body"].read(SILVER_VIEW_CACHE_MAX_BODY_BYTES + 8192)
@@ -1989,8 +2103,9 @@ def publish_dashboard_views(instrument, silver_text, etag):
                   "next_cursor": 1 if len(payload["rows"]) > 1 else payload["next_cursor"]}
         views.append(("records", {**params, "limit": "1"}, "recent-1", version, response(200, latest)))
     params = {"instrument": instrument}
-    views.append(("series", params, "series-default", "",
-                  get_series({"queryStringParameters": params}, silver_text=silver_text)))
+    metrics = {}
+    default = get_series({"queryStringParameters": params}, silver_text=silver_text, materialized=metrics)
+    views.append(("series", params, "series-default", "", default))
     published = 0
     for kind, params, slot, review_version, result in views:
         if result["statusCode"] != 200 or len(result["body"].encode()) > SILVER_VIEW_CACHE_MAX_BODY_BYTES:
@@ -1999,7 +2114,18 @@ def publish_dashboard_views(instrument, silver_text, etag):
         s3_client.put_object(Bucket=BUCKET, Key=f"_dashboard_cache/v1/{instrument}/{slot}.json",
             Body=json.dumps({"key": key, "result": result}).encode(), ContentType="application/json", CacheControl="no-store")
         published += 1
+    publish_hourly_gold(instrument, etag, json.loads(default["body"]).get("measurement"), metrics)
     return published
+
+
+def publish_hourly_gold(instrument, etag, default_measurement, metrics):
+    raw = json.dumps({"version": SILVER_VIEW_CODE_VERSION, "instrument_id": instrument,
+                      "silver_etag": etag, "default": default_measurement, "metrics": metrics},
+                     separators=(",", ":")).encode()
+    if len(raw) > GOLD_MAX_BODY_BYTES:
+        raise ValueError(f"Hourly Gold exceeds the size limit for {instrument}")
+    s3_client.put_object(Bucket=BUCKET, Key=hourly_gold_key(instrument),
+                         Body=gzip.compress(raw, mtime=0), ContentType="application/gzip")
 
 
 def get_observations_export(event):
@@ -2038,10 +2164,7 @@ def get_observations_export(event):
             fields = split_fields(raw_line)
             if len(fields) != expected_fields:
                 continue
-            moment = datetime_for_instrument(
-                instrument_id,
-                record_timestamp(instrument_id, columns, fields),
-            )
+            moment = datetime_for_record(instrument_id, columns, fields)
             if moment is not None and (latest_time is None or moment > latest_time):
                 latest_time = moment
         if latest_time is None:
@@ -2068,10 +2191,7 @@ def get_observations_export(event):
         if len(fields) != expected_fields:
             skipped_schema_mismatch += 1
             continue
-        moment = datetime_for_instrument(
-            instrument_id,
-            record_timestamp(instrument_id, columns, fields),
-        )
+        moment = datetime_for_record(instrument_id, columns, fields)
         if moment is None:
             skipped_no_timestamp += 1
             continue

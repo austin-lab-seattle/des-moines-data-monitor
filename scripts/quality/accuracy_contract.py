@@ -15,7 +15,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 CASES = {
-    "BC-MA200": ("Date / time local,BC1", ["2026-10-07 00:00:00,0", "2026-10-07 00:00:05,120"], "BC1", "120", 60),
+    "BC-MA200": ("Date / time local,UV BC1,IR BCc", ["2026-10-07 00:00:00,900,-300", "2026-10-07 00:00:05,800,120"], "IR BCc", "120", -90),
     "CO2-LICOR": ("System_Date_(Y-M-D),System_Time_(h:m:s),CO2_(umol_mol-1)", ["2026-10-07,00:00:00,400", "2026-10-07,00:00:05,440"], "CO2_(umol_mol-1)", "440", 420),
     "NEPH-PM25": ("Date_Time,PM2.5 (µg/m³)", ["2026-10-07 00:00:00,2.6", "2026-10-07 00:00:05,5.46"], "PM2.5 (µg/m³)", "5.46", 4.03),
     "NO2-CAPS": ("HHMMSS,Concentration,Timestamp", ["000000,10.123456789,2026-10-07 00:00:00", "000005,11.876543211,2026-10-07 00:00:05"], "Concentration", "11.876543211", 11),
