@@ -217,6 +217,48 @@ class PipelineSnapshotsTests(unittest.TestCase):
         self.assertEqual('2026-11-01T09:15:00+00:00', row['timestamp_iso'])
         self.assertEqual('2026-11-01T01:15:00', row['timestamp'])
 
+    def test_primary_materialized_view_for_each_instrument_never_reads_silver(self):
+        cases = [
+            ('BC-MA200', 'Date / time local,Timezone offset (mins),IR BCc',
+             ['2026-10-28T00:00:00,-420,-20', '2026-10-28T00:00:30,-420,120'], 'IR BCc', 50),
+            ('CO2-LICOR', 'System_Date_(Y-M-D),System_Time_(h:m:s),CO2_(umol_mol-1)',
+             ['2026-10-28,00:00:00,400', '2026-10-28,00:00:30,440'], 'CO2_(umol_mol-1)', 420),
+            ('NEPH-PM25', 'Date_Time,PM2.5 (µg/m³)',
+             ['2026-10-28 00:00:00,2', '2026-10-28 00:00:30,6'], 'PM2.5 (µg/m³)', 4),
+            ('NO2-CAPS', 'Timestamp,Concentration',
+             ['2026-10-28 00:00:00,-1', '2026-10-28 00:00:30,11'], 'Concentration', 5),
+            ('SMPS', 'DateTime Sample Start,Total Concentration (#/cm³),Median (nm)',
+             ['28/10/2026 00:00:00,1000,10', '28/10/2026 00:00:30,3000,30'], 'Total Concentration (#/cm³)', 2000),
+        ]
+        for instrument, header, rows, measurement, mean in cases:
+            with self.subTest(instrument=instrument):
+                silver = '\n'.join([header, *rows]) + '\n'
+                key = f'{instrument}/silver/{instrument}_data.csv'
+                etag = self.s3.put_object(Bucket=api.BUCKET, Key=key, Body=silver)['ETag']
+                api.publish_dashboard_views(instrument, silver, etag)
+                api._silver_view_cache.clear()
+                with mock.patch.object(api, 'get_silver_text', side_effect=AssertionError('Gold must serve this request')):
+                    result = api.get_cached_silver_view({'queryStringParameters': {
+                        'instrument': instrument, 'measurement': measurement,
+                    }}, 'series')
+                self.assertEqual('gold', result['headers']['X-Data-Cache'])
+                self.assertEqual([{'t': '2026-10-28T07:00:00Z', 'v': mean, 'n': 2}],
+                                 json.loads(result['body'])['series'])
+                if instrument == 'SMPS':
+                    result = api.get_cached_silver_view({'queryStringParameters': {
+                        'instrument': instrument, 'measurement': 'Median (nm)',
+                    }}, 'series')
+                    self.assertEqual('gold', result['headers']['X-Data-Cache'])
+                    self.assertEqual(20, json.loads(result['body'])['series'][0]['v'])
+
+    def test_unreadable_gold_recovers_from_current_silver(self):
+        builder.build_instrument('NO2-CAPS')
+        self.s3.put_object(Bucket=api.BUCKET, Key=api.hourly_gold_key('NO2-CAPS'), Body=b'broken gzip')
+        event = {'queryStringParameters': {'instrument': 'NO2-CAPS', 'measurement': 'Concentration'}}
+        result = api.get_cached_silver_view(event, 'series')
+        self.assertEqual('computed', result['headers']['X-Data-Cache'])
+        self.assertEqual(4, json.loads(result['body'])['series'][0]['v'])
+
     def test_missing_silver_negative_cache_expires_and_does_not_mask_other_errors(self):
         event = {'queryStringParameters': {'instrument': 'BC-MA200'}}
         with mock.patch.object(api.time, 'time', return_value=100):
