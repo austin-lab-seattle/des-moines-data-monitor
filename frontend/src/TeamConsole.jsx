@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
-import { Activity, ArrowLeft, ArrowRight, Database, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, Wind, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Database, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, UsersRound, Wind, X } from 'lucide-react';
 import './AccessApproval.css';
 import './TeamLogin.css';
+import './TeamConsole.css';
 import TeamEmailVerification from './TeamEmailVerification.jsx';
 import ApiUsagePanel from './ApiUsagePanel.jsx';
 import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
@@ -176,8 +177,34 @@ export default function TeamConsole() {
   return <div className="team-shell">
     <header className="team-header"><a href="/" className="team-brand"><ShieldCheck /> <span>Des Moines Air<small>Team Console</small></span></a><div><span>{user.profile.email}</span><button onClick={() => manager.signoutRedirect()}><LogOut size={16}/> Sign out</button></div></header>
     <div className="team-layout">
-      <aside><p>Private workspace</p>{[['requests', KeyRound, 'Access requests'], ['users', KeyRound, 'API users'], ['review', Flag, 'Record review'], ['audit', Activity, 'Audit log']].filter(([id]) => id === 'requests' || id === 'users' && canManageKeys || id === 'review' && (canReview || roles.has('Viewer')) || id === 'audit' && (canManageKeys || canReview)).map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => { setTab(id); setData(null); }}><Icon size={17}/>{label}</button>)}</aside>
-      <main><div className="team-title"><div><span>UW research team</span><h1>{tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1></div><div className="team-title-actions">{tab === 'review' && <select value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}<button onClick={load} disabled={loading}><RefreshCw size={16}/> Refresh</button></div></div>
+      <nav className="team-nav" aria-label="Team Console">
+        <p>Workspace</p>
+        {[
+          ['requests', KeyRound, 'Access requests', true],
+          ['users', UsersRound, 'API users', canManageKeys],
+          ['review', Flag, 'Record review', canReview || roles.has('Viewer')],
+          ['audit', Activity, 'Audit log', canManageKeys || canReview],
+        ].filter(([, , , visible]) => visible).map(([id, Icon, label]) => (
+          <button key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined}
+            onClick={() => {
+              if (tab === id) return;
+              setTab(id);
+              setData(null);
+            }}>
+            <Icon size={16} aria-hidden="true"/>{label}
+          </button>
+        ))}
+      </nav>
+      <main>
+        <div className="team-title">
+          <div>
+            <h1>{tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1>
+          </div>
+          <div className="team-title-actions">
+            {tab === 'review' && <select aria-label="Instrument" value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}
+            <button onClick={load} disabled={loading}><RefreshCw size={15} aria-hidden="true"/> {loading ? 'Refreshing…' : 'Refresh'}</button>
+          </div>
+        </div>
         {error && <div role="alert" className="team-message team-error">{error}{authDenied && <div className="team-auth-retry"><p>If your roles were recently assigned, refresh your sign-in to obtain current permissions.</p><button onClick={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}>Refresh sign-in</button></div>}</div>}
         {notice && <div className="team-message team-success">{notice}</div>}
         {tab === 'requests' && !error && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
@@ -188,7 +215,7 @@ export default function TeamConsole() {
           </tr>)}{!requests.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No access requests found.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'users' && !error && <ApiUsagePanel data={data} loading={loading} apiRequest={apiRequest} revokeKey={revokeKey} canManageKeys={canManageKeys} />}
         {tab === 'review' && <section className="team-card"><div className="team-note"><Database size={17}/> Original measurements remain unchanged; reviews are stored as separate annotations.</div><div className="team-table-wrap"><table><thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead><tbody>{rows.map(row => <tr key={row.row_key}><td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td><td>{canReview ? <button className="team-row-button" disabled={row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td></tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{loading ? 'Loading…' : 'No records loaded.'}</td></tr>}</tbody></table></div></section>}
-        {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : '—'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
+        {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : 'Unavailable'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
       </main>
     </div>
     {flagRow && <FlagDialog row={flagRow} busy={loading} onClose={() => setFlagRow(null)} onSubmit={submitFlag}/>}
