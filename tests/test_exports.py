@@ -21,6 +21,7 @@ class ExportTests(unittest.TestCase):
         self.original_s3 = lambda_api.s3_client
         self.s3 = FakeExportS3()
         lambda_api.s3_client = self.s3
+        self.flags = self.enterContext(mock.patch.object(lambda_api, "read_review_objects", return_value=[]))
 
     def tearDown(self):
         lambda_api.s3_client = self.original_s3
@@ -89,6 +90,36 @@ class ExportTests(unittest.TestCase):
         local = lambda_api.datetime_for_compare("2026-09-18 12:00:00")
         utc = lambda_api.datetime_for_compare("2026-09-18T19:00:00Z")
         self.assertEqual(local, utc)
+
+    def test_public_and_keyed_exports_exclude_active_selected_and_range_flags(self):
+        silver = "\n".join(["Timestamp,Concentration",
+                           "2026-10-28 00:00:00,99", "2026-10-28 00:00:00,10.123456789",
+                           "2026-10-28 00:15:00,88", "2026-10-28 00:30:00,-1.25"])
+        _, parsed, _, _ = lambda_api.parse_silver_records("NO2-CAPS", silver_text=silver, review_items=([], []))
+        self.flags.return_value = [
+            {"row_key": parsed[0]["row_key"]},
+            {"scope": "time_range", "start_time": "2026-10-28T07:15:00Z", "end_time": "2026-10-28T07:15:00Z"},
+            {"status": "inactive", "row_keys": [parsed[3]["row_key"]]},
+        ]
+        expected = ("Timestamp,Concentration\n2026-10-28 00:00:00,10.123456789\n2026-10-28 00:30:00,-1.25\n").encode()
+        with (mock.patch.object(lambda_api, "get_silver_text", return_value=silver),
+              mock.patch.object(lambda_api, "require_public_api_access", return_value=None)):
+            for path in (lambda_api.API_ROUTES["observations_export"], lambda_api.KEYED_API_ROUTES["observations_export"]):
+                result = lambda_api._dispatch_request({"rawPath": path, "requestContext": {"http": {"method": "GET"}},
+                    "queryStringParameters": {"instrument": "NO2-CAPS"}}, None)
+                self.assertEqual(200, result["statusCode"])
+                self.assertEqual(expected, self.s3.puts[-1]["Body"])
+                self.assertEqual(2, json.loads(result["body"])["excluded_flagged"])
+        self.flags.assert_called_with("NO2-CAPS", "flags", strict=True)
+
+    def test_export_does_not_issue_a_link_when_flags_fail_or_change(self):
+        event = {"queryStringParameters": {"instrument": "SMPS"}}
+        with mock.patch.object(lambda_api, "get_silver_text", return_value=self.smps_silver()):
+            self.flags.side_effect = OSError("not available")
+            self.assertEqual(503, lambda_api.get_observations_export(event)["statusCode"])
+            self.flags.side_effect = [[], [{"row_key": "new"}]]
+            self.assertEqual(409, lambda_api.get_observations_export(event)["statusCode"])
+        self.assertFalse(self.s3.puts)
 
 
 if __name__ == "__main__":

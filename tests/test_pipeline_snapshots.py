@@ -173,7 +173,9 @@ class PipelineSnapshotsTests(unittest.TestCase):
         self.assertEqual(['Viewer'], data['viewer']['roles'])
         self.assertEqual(['flagged', 'corrected', 'normal'], [row['status'] for row in data['rows']])
         self.assertEqual([row['row_key'] for row in full], [row['row_key'] for row in data['rows']])
-        self.assertEqual({'row_key', 'timestamp', 'timestamp_iso', 'status'}, set(data['rows'][0]))
+        self.assertEqual({'row_key', 'timestamp', 'timestamp_iso', 'status', 'values', 'excluded_from_export'}, set(data['rows'][0]))
+        self.assertEqual({'Concentration': full[0]['values']['Concentration']}, data['rows'][0]['values'])
+        self.assertEqual([True, False, False], [row['excluded_from_export'] for row in data['rows']])
         self.assertNotIn(silver_key, self.s3.gets)
 
     def test_repeat_review_reads_skip_csv_after_a_new_silver_version(self):
@@ -206,6 +208,7 @@ class PipelineSnapshotsTests(unittest.TestCase):
 
     def test_gold_matches_silver_for_complete_buckets_and_partial_ranges_fall_back(self):
         silver = ('Concentration,Timestamp\n1,2026-10-28 00:00:00\n3,2026-10-28 00:00:05\n'
+                  '17,2026-10-28 00:15:30\n'
                   '9,2026-10-28 01:00:00\ninvalid,2026-10-28 02:00:00\n')
         key = 'NO2-CAPS/silver/NO2-CAPS_data.csv'
         etag = self.s3.put_object(Bucket=api.BUCKET, Key=key, Body=silver)['ETag']
@@ -213,6 +216,10 @@ class PipelineSnapshotsTests(unittest.TestCase):
         cases = [({}, 'gold'),
                  ({'start': '2026-10-28T08:00:00Z', 'end': '2026-10-28T08:00:00Z'}, 'gold'),
                  ({'end': '2026-10-28T07:00:00Z'}, 'computed'),
+                 ({'bucket_minutes': '15'}, 'gold'),
+                 ({'bucket_minutes': '15', 'start': '2026-10-28T07:00:00Z',
+                   'end': '2026-10-28T07:14:59.999999Z'}, 'gold'),
+                 ({'bucket_minutes': '15', 'end': '2026-10-28T07:00:00Z'}, 'computed'),
                  ({'bucket_minutes': '5'}, 'computed')]
         for filters, mode in cases:
             with self.subTest(filters=filters):
@@ -292,6 +299,13 @@ class PipelineSnapshotsTests(unittest.TestCase):
                 self.assertEqual('gold', result['headers']['X-Data-Cache'])
                 self.assertEqual([{'t': '2026-10-28T07:00:00Z', 'v': mean, 'n': 2}],
                                  json.loads(result['body'])['series'])
+                quarter = api.get_cached_silver_view({'queryStringParameters': {
+                    'instrument': instrument, 'measurement': measurement, 'bucket_minutes': '15',
+                    'start': '2026-10-28T07:00:00Z', 'end': '2026-10-28T07:14:59.999999Z',
+                }}, 'series')
+                self.assertEqual('gold', quarter['headers']['X-Data-Cache'])
+                self.assertEqual(15, json.loads(quarter['body'])['bucket_minutes'])
+                self.assertEqual(json.loads(result['body'])['series'], json.loads(quarter['body'])['series'])
                 if instrument == 'SMPS':
                     result = api.get_cached_silver_view({'queryStringParameters': {
                         'instrument': instrument, 'measurement': 'Median (nm)',

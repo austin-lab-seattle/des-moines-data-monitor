@@ -1444,13 +1444,15 @@ def review_snapshot_key(instrument):
     return f"_dashboard_cache/v1/{instrument}/review-latest.json"
 
 
-def review_row_summary(row):
-    return {key: row[key] for key in ("row_key", "timestamp", "timestamp_iso")}
+def review_row_summary(instrument, row):
+    column = GOLD_MEASUREMENTS[instrument][0]
+    return {**{key: row[key] for key in ("row_key", "timestamp", "timestamp_iso")},
+            "values": {column: row.get("values", {}).get(column)}}
 
 
 def publish_review_snapshot(instrument, etag, rows):
     snapshot = {"version": SILVER_VIEW_CODE_VERSION, "instrument_id": instrument, "silver_etag": etag,
-                "rows": [review_row_summary(row) for row in rows]}
+                "rows": [review_row_summary(instrument, row) for row in rows]}
     s3_client.put_object(Bucket=BUCKET, Key=review_snapshot_key(instrument),
                          Body=json.dumps(snapshot).encode(), ContentType="application/json", CacheControl="no-store")
 
@@ -1501,7 +1503,7 @@ def get_latest_review_records(event):
                 raise
             _, parsed, _, _ = parse_silver_records(instrument, limit=REVIEW_LATEST_LIMIT, order="desc",
                                                   silver_text=silver, review_items=([], []))
-            rows = [review_row_summary(row) for row in parsed]
+            rows = [review_row_summary(instrument, row) for row in parsed]
             source = "review-silver"
             try:
                 publish_review_snapshot(instrument, etag, rows)
@@ -1523,9 +1525,9 @@ def get_latest_review_records(event):
         result = []
         for row in rows:
             candidate = {**row, "timestamp_compare": datetime_for_compare(row["timestamp_iso"])}
-            status = review_status(any(review_item_applies_to_row(item, candidate) for item in flags),
-                                   any(review_item_applies_to_row(item, candidate) for item in corrections))
-            result.append({**review_row_summary(row), "status": status})
+            flagged = any(review_item_applies_to_row(item, candidate) for item in flags)
+            status = review_status(flagged, any(review_item_applies_to_row(item, candidate) for item in corrections))
+            result.append({**review_row_summary(instrument, row), "status": status, "excluded_from_export": flagged})
     except Exception as exc:
         print(f"Could not load review annotations for {instrument}: {exc}")
         return response(503, {"error": "Could not load current review flags. Try refreshing."}, headers)
@@ -1918,7 +1920,7 @@ def pick_default_measurement(instrument_id, options):
     return options[0] if options else None
 
 
-def get_series(event, silver_text=None, materialized=None):
+def get_series(event, silver_text=None, materialized=None, quarter_hour=None):
     """Bucketed mean of one measurement over time, computed on demand from silver."""
     params = query_params(event)
     instrument_id = params.get("instrument") or params.get("instrument_id")
@@ -1971,6 +1973,8 @@ def get_series(event, silver_text=None, materialized=None):
     indices = {name: columns.index(name) for name in measurements}
     buckets = {name: {} for name in measurements}
     bounds = {name: {} for name in measurements}
+    quarter_buckets = {name: {} for name in measurements} if quarter_hour is not None else None
+    quarter_bounds = {name: {} for name in measurements} if quarter_hour is not None else None
     skipped_schema_mismatch = 0
     skipped_invalid = dict.fromkeys(measurements, 0)
     skipped_timestamp = dict.fromkeys(measurements, 0)
@@ -2002,23 +2006,29 @@ def get_series(event, silver_text=None, materialized=None):
             microsecond=0,
             tzinfo=timezone.utc,
         ).isoformat().replace("+00:00", "Z")
+        if quarter_hour is not None:
+            quarter_bucket = moment.replace(minute=moment.minute // 15 * 15, second=0, microsecond=0,
+                                            tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
         for name, value in values.items():
             buckets[name].setdefault(bucket, []).append(value)
             if materialized is not None:
                 first, last = bounds[name].get(bucket, (moment, moment))
                 bounds[name][bucket] = (min(first, moment), max(last, moment))
+            if quarter_hour is not None:
+                quarter_buckets[name].setdefault(quarter_bucket, []).append(value)
+                first, last = quarter_bounds[name].get(quarter_bucket, (moment, moment))
+                quarter_bounds[name][quarter_bucket] = (min(first, moment), max(last, moment))
 
     # Explicit sample mean; no fabricated zeroes or interpolation for empty
     # buckets. Scale before fsum to avoid overflow of otherwise finite means.
-    results = {}
-    for name in measurements:
+    def series_result(name, width, grouped):
         series = [{"t": hour, "v": round(math.fsum(value / len(values) for value in values), 3), "n": len(values)}
-                  for hour, values in sorted(buckets[name].items())]
-        results[name] = {
+                  for hour, values in sorted(grouped.items())]
+        return {
             "instrument_id": instrument_id,
             "measurement": name,
             "measurements": options,
-            "bucket_minutes": bucket_minutes,
+            "bucket_minutes": width,
             "aggregation": "sample_mean",
             "series": series,
             "source_rows": len(data_lines),
@@ -2027,11 +2037,19 @@ def get_series(event, silver_text=None, materialized=None):
             "skipped_invalid_measurement": skipped_invalid[name],
             "skipped_no_timestamp": skipped_timestamp[name],
         }
-        if materialized is not None and name in GOLD_MEASUREMENTS[instrument_id]:
-            materialized[name] = {
-                "payload": results[name],
-                "bounds": {hour: [first.isoformat(), last.isoformat()] for hour, (first, last) in bounds[name].items()},
-            }
+
+    results = {name: series_result(name, bucket_minutes, buckets[name]) for name in measurements}
+    for target, width, target_bounds, grouped in (
+        (materialized, bucket_minutes, bounds, buckets), (quarter_hour, 15, quarter_bounds, quarter_buckets)
+    ):
+        if target is not None:
+            for name in measurements:
+                if name in GOLD_MEASUREMENTS[instrument_id]:
+                    target[name] = {
+                        "payload": results[name] if target is materialized else series_result(name, width, grouped[name]),
+                        "bounds": {hour: [first.isoformat(), last.isoformat()]
+                                   for hour, (first, last) in target_bounds[name].items()},
+                    }
     return response(200, results[measurement])
 
 
@@ -2039,18 +2057,24 @@ def hourly_gold_key(instrument):
     return f"_gold/v1/{instrument}/hourly.json.gz"
 
 
-def get_hourly_gold(instrument, etag, params):
-    """Serve hourly aggregates only when the range includes whole sample buckets."""
+def quarter_hour_gold_key(instrument):
+    return f"_gold/v1/{instrument}/quarter-hour.json.gz"
+
+
+def get_series_gold(instrument, etag, params):
+    """Use Gold when the date range doesn't cut through a bucket's samples."""
     requested = params.get("measurement")
     if requested and requested not in GOLD_MEASUREMENTS[instrument]:
         return None
     try:
-        if int(params.get("bucket_minutes", 60)) != 60:
+        width = int(params.get("bucket_minutes", 60))
+        if width not in {15, 60}:
             return None
         start = datetime_for_compare(params.get("start"))
         end = datetime_for_compare(params.get("end"))
         validate_time_range(params.get("start"), params.get("end"), start, end)
-        body = s3_client.get_object(Bucket=BUCKET, Key=hourly_gold_key(instrument))["Body"]
+        key = quarter_hour_gold_key(instrument) if width == 15 else hourly_gold_key(instrument)
+        body = s3_client.get_object(Bucket=BUCKET, Key=key)["Body"]
         try:
             blob = body.read(GOLD_MAX_BODY_BYTES + 1)
         finally:
@@ -2069,7 +2093,7 @@ def get_hourly_gold(instrument, etag, params):
         metric = view["metrics"][measurement]
         payload = metric["payload"]
         if (payload["instrument_id"] != instrument or payload["measurement"] != measurement
-                or payload["bucket_minutes"] != 60 or payload["aggregation"] != "sample_mean"):
+                or payload["bucket_minutes"] != width or payload["aggregation"] != "sample_mean"):
             return None
         if start is None and end is None:
             return response(200, payload)
@@ -2136,7 +2160,7 @@ def get_cached_silver_view(event, kind):
             _silver_view_cache.move_to_end(key)
             return _view_response(_silver_view_cache[key], "memory")
         if kind == "series":
-            gold = get_hourly_gold(instrument, etag, params)
+            gold = get_series_gold(instrument, etag, params)
             if gold is not None:
                 if len(gold["body"].encode()) <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
                     _remember_silver_view(key, gold)
@@ -2211,8 +2235,8 @@ def publish_dashboard_views(instrument, silver_text, etag):
                       "next_cursor": limit if len(rows) > limit else payload["next_cursor"]}
             views.append(("records", {**params, "limit": str(limit)}, f"recent-{limit}", version, response(200, subset)))
     params = {"instrument": instrument}
-    metrics = {}
-    default = get_series({"queryStringParameters": params}, silver_text=silver_text, materialized=metrics)
+    metrics, detail = {}, {}
+    default = get_series({"queryStringParameters": params}, silver_text=silver_text, materialized=metrics, quarter_hour=detail)
     views.append(("series", params, "series-default", "", default))
     published = 0
     for kind, params, slot, review_version, result in views:
@@ -2224,18 +2248,24 @@ def publish_dashboard_views(instrument, silver_text, etag):
             Body=json.dumps({"key": key, "result": result}).encode(), ContentType="application/json", CacheControl="no-store")
         published += 1
     publish_hourly_gold(instrument, etag, json.loads(default["body"]).get("measurement"), metrics)
+    publish_series_gold(quarter_hour_gold_key(instrument), instrument, etag,
+                        json.loads(default["body"]).get("measurement"), detail)
     if recent["statusCode"] == 200:
         publish_review_snapshot(instrument, etag, rows[:REVIEW_LATEST_LIMIT])
     return published
 
 
 def publish_hourly_gold(instrument, etag, default_measurement, metrics):
+    publish_series_gold(hourly_gold_key(instrument), instrument, etag, default_measurement, metrics)
+
+
+def publish_series_gold(key, instrument, etag, default_measurement, metrics):
     raw = json.dumps({"version": SILVER_VIEW_CODE_VERSION, "instrument_id": instrument,
                       "silver_etag": etag, "default": default_measurement, "metrics": metrics},
                      separators=(",", ":")).encode()
     if len(raw) > GOLD_MAX_BODY_BYTES:
-        raise ValueError(f"Hourly Gold exceeds the size limit for {instrument}")
-    s3_client.put_object(Bucket=BUCKET, Key=hourly_gold_key(instrument),
+        raise ValueError(f"Gold series exceeds the size limit for {instrument}")
+    s3_client.put_object(Bucket=BUCKET, Key=key,
                          Body=gzip.compress(raw, mtime=0), ContentType="application/gzip")
 
 
@@ -2259,6 +2289,7 @@ def get_observations_export(event):
         return response(404, {"error": "Silver data has no observations", "instrument_id": instrument_id})
 
     columns = split_fields(lines[0])
+    timestamp_index = column_index(columns)
     expected_fields = len(columns)
     start_raw = params.get("start")
     end_raw = params.get("end")
@@ -2275,7 +2306,7 @@ def get_observations_export(event):
             fields = split_fields(raw_line)
             if len(fields) != expected_fields:
                 continue
-            moment = datetime_for_record(instrument_id, columns, fields)
+            moment = datetime_for_record(instrument_id, columns, fields, timestamp_index)
             if moment is not None and (latest_time is None or moment > latest_time):
                 latest_time = moment
         if latest_time is None:
@@ -2294,19 +2325,32 @@ def get_observations_export(event):
             "max_days": EXPORT_MAX_DAYS,
         })
 
+    try:
+        exclusions = export_flag_exclusions(instrument_id)
+    except Exception as exc:
+        print(f"Could not verify export flags for {instrument_id}: {exc}")
+        return response(503, {"error": "Could not verify review flags for this export. Please try again."})
+    excluded_keys, excluded_ranges = exclusions
     export_lines = [lines[0]]
     skipped_schema_mismatch = 0
     skipped_no_timestamp = 0
+    excluded_flagged = 0
     for raw_line in lines[1:]:
         fields = split_fields(raw_line)
         if len(fields) != expected_fields:
             skipped_schema_mismatch += 1
             continue
-        moment = datetime_for_record(instrument_id, columns, fields)
+        moment = datetime_for_record(instrument_id, columns, fields, timestamp_index)
         if moment is None:
             skipped_no_timestamp += 1
             continue
         if row_matches_time_range(moment, start_time, end_time):
+            if (any(start <= moment <= end for start, end in excluded_ranges)
+                    or excluded_keys and make_row_key(
+                        instrument_id, record_timestamp(instrument_id, columns, fields, timestamp_index), raw_line
+                    ) in excluded_keys):
+                excluded_flagged += 1
+                continue
             export_lines.append(raw_line)
             if len(export_lines) - 1 > EXPORT_MAX_ROWS:
                 return response(413, {
@@ -2324,6 +2368,13 @@ def get_observations_export(event):
     export_body = ("\n".join(export_lines) + "\n").encode("utf-8")
     export_id = str(uuid.uuid4())
     key = f"{instrument_id}/exports/{export_id}.csv"
+    try:
+        current_exclusions = export_flag_exclusions(instrument_id)
+    except Exception as exc:
+        print(f"Could not recheck export flags for {instrument_id}: {exc}")
+        return response(503, {"error": "Could not verify review flags for this export. Please try again."})
+    if exclusions != current_exclusions:
+        return response(409, {"error": "Review flags changed while preparing this export. Please try again."})
     try:
         s3_client.put_object(
             Bucket=BUCKET,
@@ -2366,9 +2417,35 @@ def get_observations_export(event):
         "max_rows": EXPORT_MAX_ROWS,
         "skipped_schema_mismatch": skipped_schema_mismatch,
         "skipped_no_timestamp": skipped_no_timestamp,
+        "excluded_flagged": excluded_flagged,
         "expires_in_seconds": EXPORT_URL_TTL_SECONDS,
         "url": url,
     })
+
+
+def export_flag_exclusions(instrument_id):
+    keys = set()
+    ranges = set()
+    for flag in read_review_objects(instrument_id, "flags", strict=True):
+        if flag.get("status", "active") != "active":
+            continue
+        row_keys = flag.get("row_keys") or []
+        row_key = flag.get("row_key")
+        if (not isinstance(row_keys, list) or any(not isinstance(key, str) for key in row_keys)
+                or row_key is not None and not isinstance(row_key, str)):
+            raise ValueError("Review flag has invalid row keys")
+        keys.update(row_keys)
+        if row_key:
+            keys.add(row_key)
+        if flag.get("scope") == "time_range":
+            start = datetime_for_compare(flag.get("start_time") or flag.get("start"))
+            end = datetime_for_compare(flag.get("end_time") or flag.get("end"))
+            if start is None or end is None or start > end:
+                raise ValueError("Review flag has an invalid time range")
+            ranges.add((start, end))
+        elif not row_key and not row_keys:
+            raise ValueError("Review flag is missing a row key")
+    return keys, ranges
 
 
 def get_latest_upload():

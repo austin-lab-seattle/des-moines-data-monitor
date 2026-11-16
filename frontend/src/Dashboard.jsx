@@ -1,9 +1,10 @@
 import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
-import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Moon, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Minus, Moon, Plus, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
 import { fetchApiRead } from './apiFetch.js';
+import { chartBucketMinutes, chartWindowParams, changeChartZoom, defaultChartWindow } from './chartWindow.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -1283,65 +1284,102 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   const [exportMessage, setExportMessage] = useState('');
   const [exportPrepared, setExportPrepared] = useState(false);
   const [seriesError, setSeriesError] = useState('');
-  const seriesRequestId = useRef(0);
-  const appliedQuery = useRef({ inst: 'SMPS', meas: '', s: '', e: '' });
+  const [shownBucket, setShownBucket] = useState(60);
+  const [shownZoom, setShownZoom] = useState(null);
+  const [appliedQuery, setAppliedQuery] = useState({ inst: 'SMPS', meas: '', s: '', e: '' });
+  const [zoom, setZoom] = useState(null);
+  const zoomBase = useRef(null);
+  const plot = useRef(null);
 
-  const fetchSeries = useCallback(async ({ inst, meas = '', s = '', e = '' }) => {
-    if (JSON.stringify(appliedQuery.current) !== JSON.stringify({ inst, meas, s, e })) setSeries([]);
-    appliedQuery.current = { inst, meas, s, e };
-    const requestId = ++seriesRequestId.current;
+  const fetchSeries = useCallback(async ({ inst, meas, s, e }, zoomed, signal) => {
     setLoading(true);
     onBusy(true);
     setSeriesError('');
     try {
       const params = new URLSearchParams({ instrument: inst });
       if (meas) params.set('measurement', meas);
-      if (s) params.set('start', toIso(s));
-      if (e) params.set('end', toIso(e));
-      const res = await fetchApi(`${API_PATHS.timeseries}?${params.toString()}`);
+      const bucket = chartBucketMinutes(zoomed);
+      const chartWindow = zoomed || (!s && !e ? defaultChartWindow() : null);
+      const bounds = chartWindow ? chartWindowParams(chartWindow, bucket) : { start: toIso(s), end: toIso(e) };
+      if (zoomed && s && Date.parse(toIso(s)) > Date.parse(bounds.start)) bounds.start = toIso(s);
+      if (zoomed && e && Date.parse(toIso(e)) < Date.parse(bounds.end)) bounds.end = toIso(e);
+      if (bounds.start) params.set('start', bounds.start);
+      if (bounds.end) params.set('end', bounds.end);
+      if (bucket !== 60) params.set('bucket_minutes', String(bucket));
+      const res = await fetchApi(`${API_PATHS.timeseries}?${params.toString()}`, { signal });
       const payload = await res.json();
-      if (requestId !== seriesRequestId.current) return;
+      if (signal.aborted) return;
       if (!res.ok) throw new Error(payload.error || 'Measurements could not be loaded.');
       if (payload.instrument_id !== inst || (meas && payload.measurement !== meas)) {
         throw new Error('The response does not match the selected instrument and measurement.');
       }
+      if ((payload.bucket_minutes ?? 60) !== bucket) throw new Error('The response has a different time interval.');
       if ((payload.series || []).some(point => !Number.isFinite(point.v) || !/(Z|[+-]\d{2}:?\d{2})$/i.test(point.t) || !Number.isFinite(Date.parse(point.t)))) {
         throw new Error('Invalid chart values or timestamps were returned.');
       }
-      // A slower response for the previously selected measurement must never
-      // replace the data (and Y-axis scale) for the current selection.
-      if (requestId === seriesRequestId.current && res.ok) {
-        // The compact popup is curated separately. Preserve the API's science
-        // measurements here so secondary quantities remain available to chart.
-        const availableMeasurements = (payload.measurements || []).filter(isChartMeasurement);
-        const selectedMeasurement = isChartMeasurement(payload.measurement)
-          ? payload.measurement
-          : '';
-        setMeasurements(availableMeasurements);
-        setMeasurement(selectedMeasurement);
-        setSeries(selectedMeasurement ? (payload.series || []) : []);
+      // The compact popup is curated separately. Preserve the API's science
+      // measurements here so secondary quantities remain available to chart.
+      const availableMeasurements = (payload.measurements || []).filter(isChartMeasurement);
+      const selectedMeasurement = isChartMeasurement(payload.measurement)
+        ? payload.measurement
+        : '';
+      setMeasurements(availableMeasurements);
+      setMeasurement(selectedMeasurement);
+      const points = selectedMeasurement ? (payload.series || []) : [];
+      setSeries(points);
+      setShownBucket(bucket);
+      setShownZoom(zoomed);
+      if (!zoomed) {
+        const min = bounds.start ? Date.parse(bounds.start) : Date.parse(points[0]?.t);
+        const max = bounds.end ? Date.parse(bounds.end) + 1 : Date.parse(points.at(-1)?.t) + 3600000;
+        zoomBase.current = Number.isFinite(min) && Number.isFinite(max) && max > min ? { start: min, end: max } : null;
       }
     } catch (err) {
-      if (requestId === seriesRequestId.current) setSeriesError(err.message || 'Measurements could not be loaded.');
+      if (!signal.aborted) setSeriesError(err.message || 'Measurements could not be loaded.');
     } finally {
-      if (requestId === seriesRequestId.current) { setLoading(false); onBusy(false); }
+      if (!signal.aborted) { setLoading(false); onBusy(false); }
     }
   }, [onBusy]);
 
-  const cancelSeries = useCallback(() => {
-    ++seriesRequestId.current;
-    onBusy(false);
-  }, [onBusy]);
+  useEffect(() => {
+    const controller = new AbortController();
+    const task = setTimeout(() => fetchSeries(appliedQuery, zoom, controller.signal), zoom ? 160 : 0);
+    return () => {
+      clearTimeout(task);
+      controller.abort();
+      onBusy(false);
+    };
+  }, [appliedQuery, fetchSeries, onBusy, refreshKey, zoom]);
+
+  const applyChart = (inst, meas) => {
+    zoomBase.current = null;
+    setZoom(null);
+    setSeries([]);
+    setAppliedQuery({ inst, meas, s: start, e: end });
+  };
+
+  const zoomChart = useCallback((direction, anchor) => {
+    const base = zoomBase.current;
+    if (base) setZoom(current => changeChartZoom(base, current, direction, anchor));
+  }, []);
 
   useEffect(() => {
-    const task = setTimeout(() => {
-      fetchSeries(appliedQuery.current);
-    }, 0);
-    return () => { clearTimeout(task); cancelSeries(); };
-  }, [fetchSeries, refreshKey, cancelSeries]);
+    const element = plot.current;
+    if (!element) return;
+    const wheel = event => {
+      if ((!event.ctrlKey && !event.metaKey) || !event.deltaY) return;
+      event.preventDefault();
+      const rect = element.getBoundingClientRect();
+      const anchor = Math.min(1, Math.max(0, (event.clientX - rect.left - 68) / Math.max(1, rect.width - 84)));
+      zoomChart(event.deltaY < 0 ? 'in' : 'out', anchor);
+    };
+    element.addEventListener('wheel', wheel, { passive: false });
+    return () => element.removeEventListener('wheel', wheel);
+  }, [series.length, seriesError, zoomChart]);
 
   const clampBlackCarbonPlot = instrument === 'BC-MA200' && measurement === 'IR BCc';
   const chartValue = point => Math.max(0, point.v);
+  const chartPending = loading || (zoom !== shownZoom && !seriesError);
 
   const downloadCSV = () => {
     if (!series.length) return;
@@ -1376,7 +1414,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
         link.download = payload.filename || `${instrument}_observations.csv`;
         link.click();
         setExportPrepared(true);
-        setExportMessage(`Prepared ${Number(payload.rows).toLocaleString('en-US')} rows${Number.isInteger(payload.columns) ? ` × ${payload.columns} columns` : ''} (${formatUploadBytes(payload.bytes)}). Includes all instrument columns and individual observations. Chart CSV contains the hourly averages.`);
+        setExportMessage(`Prepared ${Number(payload.rows).toLocaleString('en-US')} rows${Number.isInteger(payload.columns) ? ` × ${payload.columns} columns` : ''} (${formatUploadBytes(payload.bytes)}). Includes all instrument columns and individual observations. Chart CSV contains the averages shown in the chart.`);
       } else if (res.status === 404) {
         setExportMessage('No measurements are available to download for this pollutant yet.');
       } else {
@@ -1389,8 +1427,8 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
     }
   };
 
-  const fmtTick = (value) => (value ? value.slice(5, 16).replace('T', ' ') : '');
-  const fmtLabel = (value) => (value ? value.slice(0, 16).replace('T', ' ') : '');
+  const chartPoints = series.map(point => ({ ...point, timeMs: Date.parse(point.t) }));
+  const fmtTime = (value, offset) => Number.isFinite(value) ? new Date(value).toISOString().slice(offset, 16).replace('T', ' ') : '';
   const fmtNumber = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return value;
@@ -1404,9 +1442,9 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   return (
     <section className="surface-card chart-card">
       <div className="section-heading chart-heading">
-        <div><span className="section-eyebrow">Hourly averages</span><h2>Explore readings over time</h2></div>
+        <div><span className="section-eyebrow">{shownBucket === 15 ? '15-minute averages' : 'Hourly averages'}</span><h2>Explore readings over time</h2></div>
         <div className="section-actions">
-          <button onClick={downloadCSV} disabled={!series.length} className="action-button action-secondary" title="Hourly-averaged values shown in the chart">
+          <button onClick={downloadCSV} disabled={!series.length || chartPending || Boolean(seriesError)} className="action-button action-secondary" title="Download the averages shown in the chart">
             <Download size={14} /> Chart CSV
           </button>
           <button onClick={downloadExport} disabled={exportLoading} className="action-button action-secondary" title="Download measurements for the selected dates; defaults to the latest 14 days">
@@ -1429,7 +1467,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
               setMeasurement(nextMeasurement);
               setMeasurements([]);
               setExportMessage('');
-              fetchSeries({ inst: nextInstrument, meas: nextMeasurement, s: start, e: end });
+              applyChart(nextInstrument, nextMeasurement);
             }} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} · {INSTRUMENT_NAMES[id]}</option>)}
             </select>
@@ -1437,7 +1475,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
           <Control label="Measurement">
             <select
               value={measurement}
-              onChange={event => { setMeasurement(event.target.value); fetchSeries({ inst: instrument, meas: event.target.value, s: start, e: end }); }}
+              onChange={event => { setMeasurement(event.target.value); applyChart(instrument, event.target.value); }}
               className="control-input measurement-input"
             >
               {measurements.map(name => <option key={name} value={name}>{RECENT_READING_LABELS[name] || formatScienceLabel(name)}</option>)}
@@ -1450,26 +1488,32 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
             <input type="datetime-local" value={end} onChange={event => setEnd(event.target.value)} className="control-input" />
           </Control>
           <div className="control-action">
-            <button onClick={() => fetchSeries({ inst: instrument, meas: measurement, s: start, e: end })} className="action-button">
+            <button onClick={() => applyChart(instrument, measurement)} className="action-button">
               <Search size={14} /> Apply
             </button>
           </div>
       </div>
 
-      {loading && <div className="chart-refresh-status" role="status"><RefreshCw size={15} className="refresh-spinner" /> Refreshing measurements…</div>}
+      {(series.length > 0 || zoom) && <div className="chart-zoom" role="group" aria-label="Chart zoom">
+        {!appliedQuery.s && !appliedQuery.e && !zoom && <span>Last 14 days</span>}
+        <button type="button" className="action-button action-secondary" aria-label="Zoom in" title="Zoom in (Ctrl or Command + scroll)" onClick={() => zoomChart('in')}><Plus size={15}/></button>
+        <button type="button" className="action-button action-secondary" aria-label="Zoom out" disabled={!zoom} onClick={() => zoomChart('out')}><Minus size={15}/></button>
+        {zoom && <button type="button" className="action-button action-secondary" onClick={() => setZoom(null)}>Reset zoom</button>}
+      </div>}
+      {chartPending && <div className="chart-refresh-status" role="status"><RefreshCw size={15} className="refresh-spinner" /> Refreshing measurements…</div>}
       {seriesError ? (
         <div className="chart-empty" role="alert">{seriesError}</div>
       ) : series.length ? (
-        <div className="chart-plot"><ResponsiveContainer width="100%" height={320}>
-          <LineChart key={`${instrument}:${measurement}`} data={series} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
+        <div className="chart-plot" ref={plot}><ResponsiveContainer width="100%" height={320}>
+          <LineChart key={`${instrument}:${measurement}`} data={chartPoints} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
             <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-            <XAxis dataKey="t" tickFormatter={fmtTick} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
+            <XAxis dataKey="timeMs" type="number" domain={['dataMin', 'dataMax']} scale="time" tickFormatter={value => fmtTime(value, 5)} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
             <YAxis tickFormatter={fmtNumber} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={false} width={64} />
             <Tooltip
               contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, fontSize: 12, boxShadow: '0 14px 30px rgba(15,35,55,.12)' }}
               labelStyle={{ color: 'var(--text-muted)' }}
               itemStyle={{ color: 'var(--brand)' }}
-              labelFormatter={fmtLabel}
+              labelFormatter={value => fmtTime(value, 0)}
               formatter={(value, _name, item) => [formatReadingValue(clampBlackCarbonPlot ? item.payload?.v ?? value : value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
             />
             <Line type="linear" dataKey={clampBlackCarbonPlot ? chartValue : 'v'} stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
@@ -1480,7 +1524,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
       )}
 
       <div className="chart-caption">
-        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>Hourly sample average · chart times in UTC</span>
+        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>{shownBucket === 15 ? '15-minute' : 'Hourly'} sample average · chart times in UTC</span>
         {clampBlackCarbonPlot && <span>Negative averages are plotted at zero. Hover and CSV show the signed averages.</span>}
       </div>
     </section>
