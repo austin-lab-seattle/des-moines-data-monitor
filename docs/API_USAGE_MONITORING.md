@@ -6,7 +6,7 @@ It combines active and revoked keys belonging to the same normalized email.
 The page also shows daily history for the last 7, 30 or 90 days and retains the
 existing key-revocation controls.
 
-## What the numbers mean
+## Meeting notes on reading the usage figures
 
 - Calls are requests authenticated with a personal API key and admitted by the
   existing quota checks. Both successful responses and endpoint errors count.
@@ -14,16 +14,19 @@ existing key-revocation controls.
 - Anonymous public dashboard requests cannot be attributed to a named person
   and do not create per-user usage records. Operational request counts remain
   available separately in CloudWatch.
-- Usage days and displayed last-used times use America/Los_Angeles. Existing
-  per-key quota counters still use UTC, and the interface labels that difference.
+- Usage days and displayed last-used times use Pacific time. Per-key quota
+  counters reset at midnight UTC.
 - Exports prepared count successful CSV-link preparations. Rows and bytes refer
   to those generated CSV files. They are not proof that someone completed a
   download, and repeated downloads of a presigned URL are not counted here.
+  The Team Console displays CSV size in MiB (1,048,576 bytes per MiB).
 - Recorded lifetime covers this tracker's observations. Previously, minute
   counters expired after two minutes and daily quota counters after roughly two
   days. Those expired counters cannot reconstruct true historical lifetime use.
-  Earlier history remains unknown. The interface displays tracking start times,
-  marks the first tracked day as partial and labels earlier days Not recorded.
+  Earlier history remains unknown. The first tracked Pacific calendar day can be
+  partial. The table shows the date tracking began and labels earlier days
+  “Not recorded.” Totals cover each user's recorded history, and the overview
+  shows how many users have started tracking.
 - Revoking or rotating a key does not reset the user's durable totals. Historical
   metadata follows the normalized email, without storing raw API keys in usage
   records. Legacy keys without an email remain separate key-based subjects.
