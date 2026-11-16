@@ -145,7 +145,7 @@
   background: var(--team-panel);
 }
 
-.team-card-intro, .team-note {
+.team-card-intro {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -154,7 +154,6 @@
   border-bottom: 1px solid var(--team-line);
 }
 .team-card-intro p { margin: 0; }
-.team-note { justify-content: flex-start; color: var(--team-muted); }
 
 .team-table-wrap { width: 100%; overflow-x: auto; }
 .team-card table { width: 100%; min-width: 680px; border-collapse: collapse; text-align: start; }

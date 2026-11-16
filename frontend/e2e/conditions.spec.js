@@ -345,6 +345,29 @@ test('changing the Observations instrument clears old rows before the next respo
   await expect(page.locator('.review-table tbody')).toContainText('420');
 });
 
+test('Observations refresh only checks the active query and keeps rows visible', async ({ page }) => {
+  const requests = [];
+  let finishRefresh;
+  const pendingRefresh = new Promise(resolve => { finishRefresh = resolve; });
+  await mockApi(page);
+  await page.route('**/air-quality/**', async route => {
+    requests.push(new URL(route.request().url()));
+    if (requests.length === 2) await pendingRefresh;
+    return route.fallback();
+  });
+  await page.goto('/observations');
+  const table = page.locator('.review-table tbody');
+  await expect(table).toContainText('10.255');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Refreshing', exact: true })).toBeDisabled();
+  await expect(table).toContainText('10.255');
+  finishRefresh();
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  expect(requests.map(url => [url.pathname, url.searchParams.get('limit')])).toEqual([
+    ['/air-quality/v1/observations', '100'], ['/air-quality/v1/observations', '100'],
+  ]);
+});
+
 test('decorative sky follows regional weather and respects reduced motion', async ({ page }) => {
   await mockApi(page, { siteWeather: { is_day: true, cloud_cover: 70 } });
   await page.goto('/');
