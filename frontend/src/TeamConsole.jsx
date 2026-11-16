@@ -6,6 +6,7 @@ import './TeamLogin.css';
 import './TeamConsole.css';
 import TeamEmailVerification from './TeamEmailVerification.jsx';
 import ApiUsagePanel from './ApiUsagePanel.jsx';
+import { formatReadingValue } from './dataPresentation.js';
 import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
 
 // Public OAuth client metadata, not credentials. Authentication and role checks
@@ -14,6 +15,13 @@ const AUTHORITY = import.meta.env.VITE_TEAM_AUTHORITY || 'https://cognito-idp.us
 const CLIENT_ID = import.meta.env.VITE_TEAM_CLIENT_ID || '5tno54tskp2tk6lhh6c8jh9ev4';
 const TEAM_API = import.meta.env.VITE_TEAM_API_URL || 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com';
 const INSTRUMENTS = ['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'];
+const REVIEW_MEASUREMENTS = {
+  'BC-MA200': ['IR BCc', 'Black carbon (ng/m³)'],
+  'CO2-LICOR': ['CO2_(umol_mol-1)', 'CO₂ (ppm)'],
+  'NEPH-PM25': ['PM2.5 (µg/m³)', 'PM₂.₅ (µg/m³)'],
+  'NO2-CAPS': ['Concentration', 'NO₂ (ppb)'],
+  SMPS: ['Total Concentration (#/cm³)', 'Particles/cm³'],
+};
 
 function configured() { return Boolean(AUTHORITY && CLIENT_ID); }
 
@@ -194,6 +202,7 @@ export default function TeamConsole() {
 
   const currentReviewRows = reviewRows[instrument];
   const rows = currentReviewRows || [];
+  const [measurement, measurementLabel] = REVIEW_MEASUREMENTS[instrument];
   const events = data?.events || [];
   const requests = data?.requests || [];
   const roles = new Set(viewer?.roles || []);
@@ -243,11 +252,15 @@ export default function TeamConsole() {
         {tab === 'users' && !error && <ApiUsagePanel data={data} loading={loading} apiRequest={apiRequest} revokeKey={revokeKey} canManageKeys={canManageKeys} />}
         {tab === 'review' && (!error || currentReviewRows) && <section className="team-card" aria-label="Latest 50 records" aria-busy={loading}>
           <div className="team-table-wrap"><table>
-            <thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead>
-            <tbody>{rows.map(row => <tr key={row.row_key}>
-              <td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td>
-              <td>{canReview ? <button className="team-row-button" disabled={loading || Boolean(error) || row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td>
-            </tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{!currentReviewRows ? 'Loading records…' : 'No records found.'}</td></tr>}</tbody>
+            <thead><tr><th>Status</th><th>Timestamp</th><th>{measurementLabel}</th><th>Record</th><th>Actions</th></tr></thead>
+            <tbody>{rows.map(row => {
+              const status = row.excluded_from_export ? 'flagged' : row.status;
+              return <tr key={row.row_key}>
+              <td><span className={`team-status team-status-${status}`}>{status}</span></td><td>{row.timestamp}</td>
+              <td>{formatReadingValue(row.values?.[measurement], measurement)}</td><td><code>{row.row_key}</code></td>
+              <td>{canReview ? <button className="team-row-button" disabled={loading || Boolean(error) || status === 'flagged'} onClick={() => setFlagRow(row)}>{status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td>
+              </tr>;
+            })}{!rows.length && <tr><td colSpan="5" className="team-empty">{!currentReviewRows ? 'Loading records…' : 'No records found.'}</td></tr>}</tbody>
           </table></div>
         </section>}
         {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : 'Unavailable'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
@@ -261,7 +274,7 @@ export default function TeamConsole() {
 function FlagDialog({ row, busy, onClose, onSubmit }) {
   const [reason, setReason] = useState('');
   const [notes, setNotes] = useState('');
-  return <div className="team-dialog-backdrop" role="presentation"><form className="team-dialog" onSubmit={(event) => { event.preventDefault(); onSubmit(reason.trim(), notes.trim()); }}><div className="team-dialog-heading"><div><span>Quality review</span><h2>Flag this record</h2></div><button type="button" onClick={onClose} aria-label="Close"><X size={18}/></button></div><p>The source measurement stays intact. The flag and reviewer identity are added as a separate annotation.</p><code>{row.row_key}</code><label>Reason <textarea required maxLength="500" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Describe the quality concern"/></label><label>Notes (optional) <textarea maxLength="1000" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add context for the research team"/></label><div className="team-dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={busy || !reason.trim()}>Save flag</button></div></form></div>;
+  return <div className="team-dialog-backdrop" role="presentation"><form className="team-dialog" onSubmit={(event) => { event.preventDefault(); onSubmit(reason.trim(), notes.trim()); }}><div className="team-dialog-heading"><div><span>Quality review</span><h2>Flag this record</h2></div><button type="button" onClick={onClose} aria-label="Close"><X size={18}/></button></div><p>New observation CSV exports exclude this record.</p><code>{row.row_key}</code><label>Reason <textarea required maxLength="500" value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Describe the quality concern"/></label><label>Notes (optional) <textarea maxLength="1000" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add context for the research team"/></label><div className="team-dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button type="submit" disabled={busy || !reason.trim()}>Save flag</button></div></form></div>;
 }
 
 function TeamLogin({ onLogin, error }) {

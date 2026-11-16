@@ -53,6 +53,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
       await route.fulfill({ json: {
         instrument_id: id,
         measurement: url.searchParams.get('measurement') || instrument.columns[0], measurements: instrument.columns,
+        bucket_minutes: Number(url.searchParams.get('bucket_minutes') || 60),
         series: [{ t: '2026-10-07T07:00:00Z', v: 9000 }],
       } });
       return;
@@ -82,6 +83,28 @@ test('Conditions shows pollutant readings and hides internal counters and aircra
     return url.pathname.endsWith('/summary') && !['latest-upload', 'weather'].includes(url.searchParams.get('view')) || url.pathname.endsWith('/flights');
   })).toBe(false);
   expect(errors).toEqual([]);
+});
+
+test('chart defaults to 14 days and zoom requests 15-minute aggregates before resetting', async ({ page }) => {
+  const requests = [];
+  await page.clock.install({ time: new Date('2026-11-15T21:35:00Z') });
+  await mockApi(page);
+  await page.route('**/air-quality/v1/timeseries?**', route => {
+    requests.push(new URL(route.request().url()).searchParams);
+    return route.fallback();
+  });
+  await page.goto('/');
+  await expect(page.getByText('Last 14 days', { exact: true })).toBeVisible();
+  expect(Date.parse(requests[0].get('end')) + 1 - Date.parse(requests[0].get('start'))).toBe(14 * 86400000);
+  await page.getByRole('button', { name: 'Zoom in' }).click();
+  await page.locator('.chart-plot').dispatchEvent('wheel', { ctrlKey: true, deltaY: -90, clientX: 450 });
+  await expect(page.getByText('15-minute averages', { exact: true })).toBeVisible();
+  const query = requests.at(-1);
+  expect(query.get('bucket_minutes')).toBe('15');
+  expect(Date.parse(query.get('end')) - Date.parse(query.get('start'))).toBeLessThan(4 * 86400000);
+  await page.getByRole('button', { name: 'Reset zoom' }).click();
+  await expect(page.getByText('Hourly averages', { exact: true })).toBeVisible();
+  expect(requests.at(-1).get('start')).toBe(requests[0].get('start'));
 });
 
 test('each pollutant opens eight labeled readings in Conditions', async ({ page }) => {

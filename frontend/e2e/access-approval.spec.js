@@ -154,12 +154,15 @@ test('Record review preserves selected rows on refresh and never displays anothe
     }
     return route.fulfill({ json: {
       instrument_id: instrument, viewer: { roles: ['Reviewer'] },
-      rows: [{ row_key: `${instrument}-row`, timestamp: '2026-10-07 00:00:00', status: 'normal' }],
+      rows: [{ row_key: `${instrument}-row`, timestamp: '2026-10-07 00:00:00', status: 'normal',
+        values: { Concentration: '12.3456789', 'Total Concentration (#/cm³)': '4321.125' } }],
     } });
   });
   await page.goto('/team');
   await page.getByRole('button', { name: 'Record review' }).click();
   await expect(page.getByText('NO2-CAPS-row', { exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'NO₂ (ppb)' })).toBeVisible();
+  await expect(page.getByText('12.3456789', { exact: true })).toBeVisible();
   failed = true;
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Showing previously loaded records.');

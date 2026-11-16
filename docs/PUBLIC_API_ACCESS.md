@@ -225,8 +225,11 @@ GET /air-quality/v1/keyed/observations/export
 Builds a bounded, date-filtered cleaned observation CSV and returns metadata
 plus a short-lived download URL. With no dates it exports the latest 14 days of
 available data. A request can span at most 31 days and contain at most 250,000
-rows; narrower ranges are required when a high-frequency instrument exceeds
-the row limit. The API never signs the full Silver object directly.
+rows. Narrower ranges are required when a high-frequency instrument exceeds
+the row limit. New CSVs exclude records covered by active review flags, whether
+the flag targets a specific record or a time range. The row count refers to
+rows included in the file. `excluded_flagged` reports how many records in the
+requested window were excluded.
 
 Parameters:
 
@@ -265,8 +268,8 @@ print(df.shape)
 ```
 
 Export URLs expire after five minutes. Generated export objects are tagged for
-automatic deletion after one day. Scripts should request a new URL each time
-they run.
+automatic deletion after one day. A flag applies when preparing a new export.
+Files already generated or downloaded retain their original content.
 
 ## Responsible Use
 

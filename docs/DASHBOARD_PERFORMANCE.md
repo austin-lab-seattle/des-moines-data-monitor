@@ -48,10 +48,18 @@ checks again on return. Observations refresh fetches only its active query.
 Previously loaded rows remain visible while that query refreshes. Date-filtered
 and subsequent pages still run the exact Silver query.
 
-Record review reads a versioned snapshot of 50 row IDs and timestamps, then
-applies current flags and corrections. A review annotation never changes the
-source data and does not require a Silver scan when the snapshot is current.
+Record review reads a versioned snapshot of 50 Silver row IDs, timestamps and
+primary measurements, then applies current flags and corrections. Tim can use
+it to flag anomalies in the latest samples. New observation CSVs exclude rows
+covered by active flags. Flagging leaves source data intact and the review
+screen can use the same snapshot after an annotation changes.
 The API reads Silver directly when the snapshot is missing or outdated.
+
+Conditions opens the chart on the last 14 days and uses hourly sample averages.
+Zooming to four days or less requests 15-minute sample averages. The builder
+prepares both resolutions from the same Silver samples in one pass for the
+materialized measurements. A custom date range cutting through a bucket uses
+the exact Silver query. Chart CSV reflects the displayed aggregates.
 
 See [Dashboard cost and refresh changes](DASHBOARD_COST_AND_REFRESH.md)
 for the processing manifest, raw source bundles and freshness limits.
