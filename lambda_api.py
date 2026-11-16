@@ -95,6 +95,10 @@ _missing_silver_cache = {}
 MISSING_SILVER_TTL_SECONDS = 60
 SILVER_VIEW_CACHE_ENTRIES = 16
 SILVER_VIEW_CACHE_MAX_BODY_BYTES = 512 * 1024
+REVIEW_LATEST_LIMIT = 50
+REVIEW_SNAPSHOT_MAX_BYTES = 64 * 1024
+EXPLORER_PAGE_SIZE = 100
+EXPLORER_CACHE_MAX_BYTES = 2 * 1024 * 1024
 SILVER_VIEW_CODE_VERSION = hashlib.sha256(Path(__file__).read_bytes()
     + os.environ.get("DATA_TIMEZONE", "America/Los_Angeles").encode()).hexdigest()
 
@@ -1226,7 +1230,7 @@ def get_silver_text(instrument_id, expected_etag=None):
     return s3_client.get_object(Bucket=BUCKET, Key=key, **condition)["Body"].read().decode("utf-8", errors="replace")
 
 
-def read_review_objects(instrument_id, review_type):
+def read_review_objects(instrument_id, review_type, *, strict=False):
     items = []
     prefix = f"{instrument_id}/{review_type}/"
     for object_summary in iter_s3_objects(prefix):
@@ -1236,6 +1240,8 @@ def read_review_objects(instrument_id, review_type):
             item["_s3_key"] = object_summary["Key"]
             items.append(item)
         except Exception as exc:
+            if strict:
+                raise
             print(f"Could not read review object {object_summary['Key']}: {exc}")
     return items
 
@@ -1275,6 +1281,10 @@ def review_item_applies_to_row(item, row):
         return row_matches_time_range(row["timestamp_compare"], start_time, end_time)
 
     return False
+
+
+def review_status(row_flags, row_corrections):
+    return "corrected" if row_corrections else "flagged" if row_flags else "normal"
 
 
 def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100, cursor=0, order="asc",
@@ -1340,7 +1350,7 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
         row_corrections = [item for item in corrections if review_item_applies_to_row(item, row)]
         row["flags"] = row_flags
         row["corrections"] = row_corrections
-        row["status"] = "corrected" if row_corrections else "flagged" if row_flags else "normal"
+        row["status"] = review_status(row_flags, row_corrections)
         del row["timestamp_compare"]
         rows.append(row)
 
@@ -1428,6 +1438,98 @@ def get_review_items(event, review_type):
         return response(400, {"error": "Invalid or missing instrument"})
     items = read_review_objects(instrument_id, review_type)
     return response(200, {"instrument_id": instrument_id, review_type: items})
+
+
+def review_snapshot_key(instrument):
+    return f"_dashboard_cache/v1/{instrument}/review-latest.json"
+
+
+def review_row_summary(row):
+    return {key: row[key] for key in ("row_key", "timestamp", "timestamp_iso")}
+
+
+def publish_review_snapshot(instrument, etag, rows):
+    snapshot = {"version": SILVER_VIEW_CODE_VERSION, "instrument_id": instrument, "silver_etag": etag,
+                "rows": [review_row_summary(row) for row in rows]}
+    s3_client.put_object(Bucket=BUCKET, Key=review_snapshot_key(instrument),
+                         Body=json.dumps(snapshot).encode(), ContentType="application/json", CacheControl="no-store")
+
+
+def read_review_snapshot(instrument, etag):
+    try:
+        body = s3_client.get_object(Bucket=BUCKET, Key=review_snapshot_key(instrument))["Body"]
+        raw = body.read(REVIEW_SNAPSHOT_MAX_BYTES + 1)
+        if len(raw) > REVIEW_SNAPSHOT_MAX_BYTES:
+            return None
+        snapshot = json.loads(raw)
+        rows = snapshot["rows"]
+        if (snapshot["version"] == SILVER_VIEW_CODE_VERSION and snapshot["instrument_id"] == instrument
+                and snapshot["silver_etag"] == etag and isinstance(rows, list)
+                and len(rows) <= REVIEW_LATEST_LIMIT
+                and all(isinstance(row["row_key"], str) and isinstance(row["timestamp"], str)
+                        and datetime_for_compare(row["timestamp_iso"]) is not None for row in rows)):
+            return rows
+    except Exception:
+        pass  # Older deployments and damaged optional snapshots can read Silver directly.
+    return None
+
+
+def get_latest_review_records(event):
+    headers = {"Cache-Control": "private, no-store"}
+    params = query_params(event)
+    instrument = params.get("instrument") or params.get("instrument_id")
+    if not is_valid_instrument(instrument):
+        return response(400, {"error": "Invalid or missing instrument"}, headers)
+    if (set(params) - {"instrument", "instrument_id", "view", "limit", "order"}
+            or str(params.get("limit", REVIEW_LATEST_LIMIT)) != str(REVIEW_LATEST_LIMIT)
+            or params.get("order", "desc") != "desc"):
+        return response(400, {"error": "Record review only supports the latest 50 rows"}, headers)
+
+    silver_key = f"{instrument}/silver/{instrument}_data.csv"
+    try:
+        for attempt in range(2):
+            etag = s3_client.head_object(Bucket=BUCKET, Key=silver_key)["ETag"]
+            rows = read_review_snapshot(instrument, etag)
+            source = "review-snapshot"
+            if rows is not None:
+                break
+            try:
+                silver = get_silver_text(instrument, expected_etag=etag)
+            except Exception as exc:
+                if attempt == 0 and getattr(exc, "response", {}).get("Error", {}).get("Code") == "PreconditionFailed":
+                    continue
+                raise
+            _, parsed, _, _ = parse_silver_records(instrument, limit=REVIEW_LATEST_LIMIT, order="desc",
+                                                  silver_text=silver, review_items=([], []))
+            rows = [review_row_summary(row) for row in parsed]
+            source = "review-silver"
+            try:
+                publish_review_snapshot(instrument, etag, rows)
+            except Exception as exc:
+                print(f"Could not publish record review snapshot for {instrument}: {exc}")
+            break
+    except Exception as exc:
+        if (isinstance(exc, s3_client.exceptions.NoSuchKey)
+                or getattr(exc, "response", {}).get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}):
+            return response(404, {"error": "Records not found", "instrument_id": instrument}, headers)
+        print(f"Could not load Silver records for review for {instrument}: {exc}")
+        return response(503, {"error": "Could not load review records. Try refreshing."}, headers)
+
+    # Annotations are deliberately read after Silver selection, including when
+    # the small snapshot is reused. A flag never invalidates the Silver rows.
+    try:
+        flags = read_review_objects(instrument, "flags", strict=True)
+        corrections = read_review_objects(instrument, "corrections", strict=True)
+        result = []
+        for row in rows:
+            candidate = {**row, "timestamp_compare": datetime_for_compare(row["timestamp_iso"])}
+            status = review_status(any(review_item_applies_to_row(item, candidate) for item in flags),
+                                   any(review_item_applies_to_row(item, candidate) for item in corrections))
+            result.append({**review_row_summary(row), "status": status})
+    except Exception as exc:
+        print(f"Could not load review annotations for {instrument}: {exc}")
+        return response(503, {"error": "Could not load current review flags. Try refreshing."}, headers)
+    return _view_response(response(200, {"instrument_id": instrument, "rows": result}, headers), source)
 
 
 def write_review_item(event, review_type, identity):
@@ -2002,23 +2104,24 @@ def get_cached_silver_view(event, kind):
         return _view_response(response(404, {"error": "Silver data not found", "instrument_id": instrument}), "missing-cached")
     if kind == "records":
         try:
+            limit = int(params.get("limit", EXPLORER_PAGE_SIZE))
             recent = (params.get("order") == "desc" and int(params.get("cursor", 0)) == 0
-                      and 1 <= int(params.get("limit", 100)) <= 8
+                      and (1 <= limit <= 8 or limit == EXPLORER_PAGE_SIZE)
                       and not any(params.get(k) for k in ("start", "end", "count_only")))
         except (TypeError, ValueError):
             recent = False
         if not recent:
             return handler(event)
-    # Fixed object names keep shared caching bounded to three small objects per
-    # instrument. Arbitrary researcher queries stay in the bounded memory cache.
+    # Fixed object names bound shared writes. Normalize an explicit cursor=0
+    # so the explorer and the scheduled builder address the same first page.
     slot = None
     if kind == "records" and set(params) <= {"instrument", "instrument_id", "order", "limit", "cursor"}:
-        slot = f"recent-{int(params['limit'])}"
+        if limit in {1, 8, EXPLORER_PAGE_SIZE}:
+            slot = f"recent-{limit}"
+            params = {"instrument": instrument, "order": "desc", "limit": str(limit)}
     elif kind == "series" and set(params) <= {"instrument", "instrument_id"}:
         slot = "series-default"
-    # Only the dashboard's one/eight-row views need shared cache objects.
-    if slot and slot not in {"recent-1", "recent-8", "series-default"}:
-        slot = None
+    max_shared_bytes = EXPLORER_CACHE_MAX_BYTES if slot == f"recent-{EXPLORER_PAGE_SIZE}" else SILVER_VIEW_CACHE_MAX_BODY_BYTES
     shared_key = f"_dashboard_cache/v1/{instrument}/{slot}.json" if slot else None
     try:
         etag = s3_client.head_object(Bucket=BUCKET, Key=f"{instrument}/silver/{instrument}_data.csv")["ETag"]
@@ -2040,13 +2143,14 @@ def get_cached_silver_view(event, kind):
                 return _view_response(gold, "gold")
         if shared_key:
             try:
-                cache_text = s3_client.get_object(Bucket=BUCKET, Key=shared_key)["Body"].read(SILVER_VIEW_CACHE_MAX_BODY_BYTES + 8192)
+                cache_text = s3_client.get_object(Bucket=BUCKET, Key=shared_key)["Body"].read(2 * max_shared_bytes + 8192)
                 saved = json.loads(cache_text)
                 cached = saved.get("result", {})
                 if saved.get("key") == list(key) and cached.get("statusCode") == 200:
                     payload = json.loads(cached["body"])
                     if payload.get("instrument_id") == instrument:
-                        _remember_silver_view(key, cached)
+                        if len(cached["body"].encode()) <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+                            _remember_silver_view(key, cached)
                         return _view_response(cached, "shared")
             except Exception:
                 pass  # An absent/invalid optional cache falls back to Silver.
@@ -2063,9 +2167,11 @@ def get_cached_silver_view(event, kind):
     if kind == "records":
         kwargs["review_items"] = reviews
     result = handler(event, **kwargs)
-    if result["statusCode"] == 200 and len(result["body"].encode()) <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
-        _remember_silver_view(key, result)
-        if shared_key:
+    if result["statusCode"] == 200:
+        size = len(result["body"].encode())
+        if size <= SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+            _remember_silver_view(key, result)
+        if shared_key and size <= max_shared_bytes:
             try:
                 s3_client.put_object(Bucket=BUCKET, Key=shared_key,
                     Body=json.dumps({"key": key, "result": result}).encode(),
@@ -2094,27 +2200,32 @@ def publish_dashboard_views(instrument, silver_text, etag):
     """
     reviews = (read_review_objects(instrument, "flags"), read_review_objects(instrument, "corrections"))
     version = hashlib.sha256(json.dumps(reviews, sort_keys=True).encode()).hexdigest()
-    params = {"instrument": instrument, "order": "desc", "limit": "8"}
+    params = {"instrument": instrument, "order": "desc", "limit": str(EXPLORER_PAGE_SIZE)}
     recent = get_silver_records({"queryStringParameters": params}, silver_text=silver_text, review_items=reviews)
-    views = [("records", params, "recent-8", version, recent)]
+    views = []
     if recent["statusCode"] == 200:
         payload = json.loads(recent["body"])
-        latest = {**payload, "rows": payload["rows"][:1],
-                  "next_cursor": 1 if len(payload["rows"]) > 1 else payload["next_cursor"]}
-        views.append(("records", {**params, "limit": "1"}, "recent-1", version, response(200, latest)))
+        rows = payload["rows"]
+        for limit in (EXPLORER_PAGE_SIZE, 8, 1):
+            subset = {**payload, "rows": rows[:limit],
+                      "next_cursor": limit if len(rows) > limit else payload["next_cursor"]}
+            views.append(("records", {**params, "limit": str(limit)}, f"recent-{limit}", version, response(200, subset)))
     params = {"instrument": instrument}
     metrics = {}
     default = get_series({"queryStringParameters": params}, silver_text=silver_text, materialized=metrics)
     views.append(("series", params, "series-default", "", default))
     published = 0
     for kind, params, slot, review_version, result in views:
-        if result["statusCode"] != 200 or len(result["body"].encode()) > SILVER_VIEW_CACHE_MAX_BODY_BYTES:
+        limit = EXPLORER_CACHE_MAX_BYTES if slot == f"recent-{EXPLORER_PAGE_SIZE}" else SILVER_VIEW_CACHE_MAX_BODY_BYTES
+        if result["statusCode"] != 200 or len(result["body"].encode()) > limit:
             continue
         key = (SILVER_VIEW_CODE_VERSION, kind, instrument, etag, review_version, json.dumps(params, sort_keys=True))
         s3_client.put_object(Bucket=BUCKET, Key=f"_dashboard_cache/v1/{instrument}/{slot}.json",
             Body=json.dumps({"key": key, "result": result}).encode(), ContentType="application/json", CacheControl="no-store")
         published += 1
     publish_hourly_gold(instrument, etag, json.loads(default["body"]).get("measurement"), metrics)
+    if recent["statusCode"] == 200:
+        publish_review_snapshot(instrument, etag, rows[:REVIEW_LATEST_LIMIT])
     return published
 
 
@@ -2658,7 +2769,8 @@ def _dispatch_request(event, context):
         identity, auth_response = require_team_role(event, {"Admin", "Reviewer", "Viewer"})
         if auth_response:
             return auth_response
-        result = get_silver_records(event)
+        result = (get_latest_review_records(event) if query_params(event).get("view") == "latest-review"
+                  else get_silver_records(event))
         if result.get("statusCode") == 200:
             payload = json.loads(result["body"])
             payload["viewer"] = {"email": identity["email"], "roles": sorted(identity["roles"])}

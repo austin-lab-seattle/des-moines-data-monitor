@@ -96,6 +96,8 @@ export default function Dashboard() {
   const [uploadRefreshKey, setUploadRefreshKey] = useState(0);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [chartBusy, setChartBusy] = useState(false);
+  const [reviewRefreshKey, setReviewRefreshKey] = useState(0);
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [checkedAt, setCheckedAt] = useState(() => Date.now());
   const readingsRequestId = useRef(0);
   const readingsController = useRef(null);
@@ -160,15 +162,20 @@ export default function Dashboard() {
   }, [loadReadings]);
 
   useEffect(() => {
+    if (activeView !== 'overview') return;
     const initial = setTimeout(loadReadings, 0);
     const stopPolling = startVisiblePolling(handleRefresh, DASHBOARD_REFRESH_MS);
     return () => {
       clearTimeout(initial); stopPolling();
       cancelReadings();
     };
-  }, [loadReadings, cancelReadings, handleRefresh]);
+  }, [activeView, loadReadings, cancelReadings, handleRefresh]);
 
-  const refreshBusy = refreshing || (activeView === 'overview' && (uploadBusy || chartBusy));
+  const refreshBusy = activeView === 'review' ? reviewBusy : refreshing || uploadBusy || chartBusy;
+  const refreshActiveView = () => {
+    if (activeView === 'review') setReviewRefreshKey(key => key + 1);
+    else if (activeView === 'overview') handleRefresh();
+  };
 
   const instruments = data?.instruments || INSTRUMENT_IDS.map(id => ({ id, ...PUBLIC_INSTRUMENTS[id] }));
 
@@ -210,20 +217,20 @@ export default function Dashboard() {
             <button className="icon-action" type="button" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')} aria-label={`Use ${theme === 'light' ? 'dark' : 'light'} theme`} title={`Use ${theme === 'light' ? 'dark' : 'light'} theme`}>
               {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
             </button>
-            <button className="refresh-action" type="button" onClick={handleRefresh} disabled={refreshBusy} aria-busy={refreshBusy}>
+            {['overview', 'review'].includes(activeView) && <button className="refresh-action" type="button" onClick={refreshActiveView} disabled={refreshBusy} aria-busy={refreshBusy}>
               <RefreshCw size={17} className={refreshBusy ? 'refresh-spinner' : ''} aria-hidden="true" />
               <span>{refreshBusy ? 'Refreshing' : 'Refresh'}</span>
-            </button>
+            </button>}
           </div>
         </header>}
 
-        {loading && activeView !== 'api' && (
+        {loading && activeView === 'overview' && (
           <div className="dashboard-api-notice dashboard-loading-notice" role="status">
             Loading the latest air-quality readings…
           </div>
         )}
 
-        {!loading && error && activeView !== 'api' && (
+        {!loading && error && activeView === 'overview' && (
           <div className="dashboard-api-notice" role="status">
             Some readings could not be refreshed. Check the time shown beside each reading.
           </div>
@@ -240,7 +247,7 @@ export default function Dashboard() {
             checkedAt={checkedAt}
           />
         )}
-        {activeView === 'review' && <DataReview />}
+        {activeView === 'review' && <DataReview refreshKey={reviewRefreshKey} onBusy={setReviewBusy} />}
         {activeView === 'aircraft' && FlightsLive && (
           <Suspense fallback={<div className="loading-screen">Loading aircraft workspace…</div>}>
             <FlightsLive />
@@ -523,19 +530,19 @@ function LatestReadingsDialog({ instrument, formatSeattleTime, onClose }) {
   );
 }
 
-function DataReview() {
+function DataReview({ refreshKey, onBusy }) {
   const [instrument, setInstrument] = useState('NO2-CAPS');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [columns, setColumns] = useState([]);
   const [rows, setRows] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
-  const appliedFilters = useRef({ selectedStart: '', selectedEnd: '' });
+  const appliedQuery = useRef(null);
+  const visibleQuery = useRef(null);
+  const activeRequest = useRef(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const recordsRequestId = useRef(0);
-
   const displayColumns = recentColumnsFor(instrument, columns);
 
   const loadRecordsFor = useCallback(async ({
@@ -543,12 +550,22 @@ function DataReview() {
     selectedInstrument,
     selectedStart = '',
     selectedEnd = '',
-    auto = false,
   }) => {
-    const requestId = ++recordsRequestId.current;
+    activeRequest.current?.abort();
+    const request = new AbortController();
+    activeRequest.current = request;
+    const query = { cursor, selectedInstrument, selectedStart, selectedEnd };
+    const sameQuery = visibleQuery.current
+      && Object.keys(query).every(key => query[key] === visibleQuery.current[key]);
+    appliedQuery.current = query;
     setLoading(true);
-    setRows([]);
-    setNextCursor(null);
+    onBusy(true);
+    if (!sameQuery) {
+      visibleQuery.current = null;
+      setColumns([]);
+      setRows([]);
+      setNextCursor(null);
+    }
     setError('');
     setMessage('');
     try {
@@ -561,27 +578,31 @@ function DataReview() {
       if (selectedStart) params.set('start', toIso(selectedStart));
       if (selectedEnd) params.set('end', toIso(selectedEnd));
 
-      const response = await fetchApi(`${API_PATHS.observations}?${params.toString()}`);
+      const response = await fetchApi(`${API_PATHS.observations}?${params.toString()}`, { signal: request.signal });
       const result = await response.json();
       if (!response.ok) {
         throw new Error(result.error || `API returned ${response.status}`);
       }
       if (result.instrument_id !== selectedInstrument) throw new Error('The readings do not match the selected instrument.');
-      if (requestId === recordsRequestId.current) {
+      if (activeRequest.current === request) {
         setColumns(result.columns || []);
         setRows(result.rows || []);
         setNextCursor(result.next_cursor ?? null);
-        appliedFilters.current = { selectedStart, selectedEnd };
-        setMessage(auto ? 'Showing recent readings, newest first.' : 'Readings loaded.');
+        visibleQuery.current = query;
+        setMessage(selectedStart || selectedEnd ? '' : 'Newest first');
       }
     } catch (err) {
-      if (requestId === recordsRequestId.current) {
-        setError(err.message || 'Could not load cleaned records');
+      if (activeRequest.current === request) {
+        const detail = err.name === 'AbortError' ? 'The request timed out. Try refreshing.' : err.message;
+        setError(sameQuery ? `Refresh failed. Showing the previous readings. ${detail}` : detail || 'Could not load readings.');
       }
     } finally {
-      if (requestId === recordsRequestId.current) setLoading(false);
+      if (activeRequest.current === request) {
+        setLoading(false);
+        onBusy(false);
+      }
     }
-  }, []);
+  }, [onBusy]);
 
   const loadRecords = (cursor = 0) => loadRecordsFor({
     cursor,
@@ -592,13 +613,16 @@ function DataReview() {
 
   useEffect(() => {
     const task = setTimeout(() => {
-      loadRecordsFor({
-        selectedInstrument: instrument,
-        auto: true,
-      });
+      loadRecordsFor({ ...appliedQuery.current, selectedInstrument: instrument });
     }, 0);
-    return () => clearTimeout(task);
-  }, [instrument, loadRecordsFor]);
+    return () => {
+      clearTimeout(task);
+      const request = activeRequest.current;
+      activeRequest.current = null;
+      request?.abort();
+      onBusy(false);
+    };
+  }, [instrument, loadRecordsFor, onBusy, refreshKey]);
 
   return (
     <main className="dashboard-page review-page">
@@ -615,9 +639,15 @@ function DataReview() {
         <div className="filter-grid">
           <Control label="Instrument">
             <select value={instrument} onChange={event => {
-              recordsRequestId.current += 1;
+              const request = activeRequest.current;
+              activeRequest.current = null;
+              request?.abort();
+              appliedQuery.current = null;
+              setColumns([]);
               setRows([]);
               setNextCursor(null);
+              setStartTime('');
+              setEndTime('');
               setInstrument(event.target.value);
             }} className="control-input">
               {INSTRUMENT_IDS.map(id => <option key={id} value={id}>{PUBLIC_INSTRUMENTS[id].name} · {INSTRUMENT_NAMES[id]}</option>)}
@@ -653,7 +683,7 @@ function DataReview() {
           </div>
           <div className="section-actions">
             {nextCursor !== null && (
-              <button disabled={loading} onClick={() => loadRecordsFor({ cursor: nextCursor, selectedInstrument: instrument, ...appliedFilters.current })} className="action-button"><ArrowRight size={14} /> Next Page</button>
+              <button disabled={loading} onClick={() => loadRecordsFor({ ...appliedQuery.current, cursor: nextCursor, selectedInstrument: instrument })} className="action-button"><ArrowRight size={14} /> Next Page</button>
             )}
           </div>
         </div>

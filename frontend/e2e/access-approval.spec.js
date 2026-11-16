@@ -8,7 +8,7 @@ const requester = { request_id: requestId, name: 'CI-only Researcher', email: 'c
   use_case: 'Offline CI-only environmental analysis <script>not code</script>', status: 'PENDING_APPROVAL', actionable: true,
   expires_at: '2099-01-01T00:00:00Z' };
 
-async function setup(page, { loggedIn = true, canApprove = true, failure = false } = {}) {
+async function setup(page, { loggedIn = true, canApprove = true, failure = false, roles = ['ApiApprover'] } = {}) {
   if (loggedIn) await page.addInitScript(({ authority, client }) => {
     sessionStorage.setItem(`oidc.user:${authority}:${client}`, JSON.stringify({
       id_token: 'CI-only-not-a-real-token', access_token: 'CI-only-not-a-real-token', token_type: 'Bearer',
@@ -27,7 +27,7 @@ async function setup(page, { loggedIn = true, canApprove = true, failure = false
     }
     expect(route.request().headers().authorization).toBe('Bearer CI-only-not-a-real-token');
     return route.fulfill({ json: { requests: completed ? [{ ...requester, status: 'ACTIVE', actionable: false }] : [requester],
-      viewer: { email: 'ci-approver@example.org', roles: ['ApiApprover'], can_approve: canApprove } } });
+      viewer: { email: 'ci-approver@example.org', roles, can_approve: canApprove } } });
   });
   return decisions;
 }
@@ -139,4 +139,33 @@ test('a failed access-request load is never shown as an empty queue and can be r
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await expect(page.getByText('No access requests found.', { exact: true })).toBeVisible();
   await expect(page.getByRole('alert')).toHaveCount(0);
+});
+
+test('Record review preserves selected rows on refresh and never displays another instrument’s rows', async ({ page }) => {
+  await setup(page, { roles: ['Reviewer'] });
+  let failed = false;
+  await page.route('**/air-quality/internal/v1/observations?**', async route => {
+    const params = new URL(route.request().url()).searchParams;
+    expect(params.get('view')).toBe('latest-review');
+    expect(params.get('limit')).toBe('50');
+    const instrument = params.get('instrument');
+    if (failed && instrument === 'NO2-CAPS') {
+      return route.fulfill({ status: 503, json: { error: 'Review unavailable' } });
+    }
+    return route.fulfill({ json: {
+      instrument_id: instrument, viewer: { roles: ['Reviewer'] },
+      rows: [{ row_key: `${instrument}-row`, timestamp: '2026-10-07 00:00:00', status: 'normal' }],
+    } });
+  });
+  await page.goto('/team');
+  await page.getByRole('button', { name: 'Record review' }).click();
+  await expect(page.getByText('NO2-CAPS-row', { exact: true })).toBeVisible();
+  failed = true;
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Showing previously loaded records.');
+  await expect(page.getByText('NO2-CAPS-row', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Flag record' })).toBeDisabled();
+  await page.getByRole('combobox', { name: 'Instrument' }).selectOption('SMPS');
+  await expect(page.getByText('SMPS-row', { exact: true })).toBeVisible();
+  await expect(page.getByText('NO2-CAPS-row', { exact: true })).toHaveCount(0);
 });

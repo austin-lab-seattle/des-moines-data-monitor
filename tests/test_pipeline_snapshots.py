@@ -137,13 +137,61 @@ class PipelineSnapshotsTests(unittest.TestCase):
         silver = self.s3.objects['NO2-CAPS/silver/NO2-CAPS_data.csv']['Body'].decode()
         for kind, params in [('series', {'instrument': 'NO2-CAPS'}),
                              ('records', {'instrument': 'NO2-CAPS', 'order': 'desc', 'limit': '1'}),
-                             ('records', {'instrument': 'NO2-CAPS', 'order': 'desc', 'limit': '8'})]:
+                             ('records', {'instrument': 'NO2-CAPS', 'order': 'desc', 'limit': '8'}),
+                             ('records', {'instrument': 'NO2-CAPS', 'order': 'desc', 'limit': '100', 'cursor': '0'})]:
             event = {'queryStringParameters': params}
             expected = api.get_series(event, silver_text=silver) if kind == 'series' else api.get_silver_records(event, silver_text=silver, review_items=([], []))
             self.s3.gets.clear(); api._silver_view_cache.clear()
             actual = api.get_cached_silver_view(event, kind)
             self.assertEqual(json.loads(expected['body']), json.loads(actual['body']))
             self.assertNotIn('NO2-CAPS/silver/NO2-CAPS_data.csv', self.s3.gets)
+
+    def test_review_snapshot_preserves_keys_and_applies_new_flags_and_corrections(self):
+        builder.build_instrument('NO2-CAPS')
+        silver_key = 'NO2-CAPS/silver/NO2-CAPS_data.csv'
+        silver = self.s3.objects[silver_key]['Body'].decode()
+        _, full, _, _ = api.parse_silver_records('NO2-CAPS', order='desc', limit=50,
+                                                 silver_text=silver, review_items=([], []))
+        event = {'rawPath': '/air-quality/internal/v1/observations',
+                 'requestContext': {'http': {'method': 'GET'}},
+                 'queryStringParameters': {'instrument': 'NO2-CAPS', 'view': 'latest-review'}}
+        row_key = full[0]['row_key']
+        self.s3.put_object(Bucket=api.BUCKET, Key='NO2-CAPS/flags/a.json', Body=json.dumps({'row_key': row_key}))
+        self.s3.put_object(Bucket=api.BUCKET, Key='NO2-CAPS/corrections/a.json',
+                           Body=json.dumps({'scope': 'time_range', 'start_time': full[1]['timestamp_iso'],
+                                            'end_time': full[1]['timestamp_iso']}))
+        self.s3.gets.clear()
+        with mock.patch.object(api, 'require_team_role', return_value=(None, api.response(403))):
+            self.assertEqual(403, api._dispatch_request(event, None)['statusCode'])
+        self.assertEqual([], self.s3.gets)
+        with mock.patch.object(api, 'require_team_role',
+                               return_value=({'email': 'viewer@example.org', 'roles': {'Viewer'}}, None)):
+            result = api._dispatch_request(event, None)
+        self.assertEqual('review-snapshot', result['headers']['X-Data-Cache'])
+        self.assertEqual('private, no-store', result['headers']['Cache-Control'])
+        data = json.loads(result['body'])
+        self.assertEqual(['Viewer'], data['viewer']['roles'])
+        self.assertEqual(['flagged', 'corrected', 'normal'], [row['status'] for row in data['rows']])
+        self.assertEqual([row['row_key'] for row in full], [row['row_key'] for row in data['rows']])
+        self.assertEqual({'row_key', 'timestamp', 'timestamp_iso', 'status'}, set(data['rows'][0]))
+        self.assertNotIn(silver_key, self.s3.gets)
+
+    def test_repeat_review_reads_skip_csv_after_a_new_silver_version(self):
+        builder.build_instrument('NO2-CAPS')
+        silver_key = 'NO2-CAPS/silver/NO2-CAPS_data.csv'
+        self.s3.put_object(Bucket=api.BUCKET, Key=silver_key,
+                           Body='Concentration,Timestamp\n40,2026-10-29 00:00:00\n')
+        event = {'queryStringParameters': {'instrument': 'NO2-CAPS', 'view': 'latest-review'}}
+        self.s3.gets.clear()
+        first = api.get_latest_review_records(event)
+        second = api.get_latest_review_records(event)
+        self.assertEqual('review-silver', first['headers']['X-Data-Cache'])
+        self.assertEqual('review-snapshot', second['headers']['X-Data-Cache'])
+        self.assertEqual(first['body'], second['body'])
+        self.assertEqual('2026-10-29 00:00:00', json.loads(second['body'])['rows'][0]['timestamp'])
+        self.assertEqual(1, self.s3.gets.count(silver_key))
+        with mock.patch.object(api, 'read_review_objects', side_effect=RuntimeError('annotations unavailable')):
+            self.assertEqual(503, api.get_latest_review_records(event)['statusCode'])
 
     def test_summary_never_downloads_bronze_even_when_a_snapshot_is_missing(self):
         builder.build_instrument('NO2-CAPS')

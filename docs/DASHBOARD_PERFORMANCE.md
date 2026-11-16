@@ -29,10 +29,10 @@ The API caches small response bodies, with these boundaries:
 - Query parameters and an automatic hash of the API implementation form part of
   the identity. New code or source/review changes invalidate earlier results.
 - The warm-runtime cache holds at most 16 bodies, each at most 512 KiB.
-- The one/eight-row recent views and default chart can also reuse private S3
-  objects across Lambda runtimes. Fixed names under
-  `_dashboard_cache/v1/{instrument}/` bound this shared cache to three objects
-  per instrument. No additional IAM grants or retention rules are required.
+- The one/eight-row recent views, the first 100 Observations rows, and the
+  default chart reuse private S3 objects across Lambda runtimes. The
+  Observations page can use up to 2 MiB of shared storage per instrument,
+  without increasing the warm-runtime memory limit.
 - Cache errors fall back to the source handler. Failed source reads never turn
   an older cached response into a fresh successful reading. Failed responses and
   oversized results are not cached. Authentication and quotas run before reuse.
@@ -43,9 +43,17 @@ review changes or non-default queries can still require an accurate source
 scan. Scientific transforms and aggregation arithmetic remain unchanged.
 
 Refresh indicators cover the readings, upload widget and applied chart query.
-Polling runs every five minutes while visible, pauses in hidden tabs and runs
-once on return. Previous values and the same-query chart stay visible during
-refresh. See [Dashboard cost and refresh changes](DASHBOARD_COST_AND_REFRESH.md)
+Conditions polls every five minutes while visible, pauses in hidden tabs, and
+checks again on return. Observations refresh fetches only its active query.
+Previously loaded rows remain visible while that query refreshes. Date-filtered
+and subsequent pages still run the exact Silver query.
+
+Record review reads a versioned snapshot of 50 row IDs and timestamps, then
+applies current flags and corrections. A review annotation never changes the
+source data and does not require a Silver scan when the snapshot is current.
+The API reads Silver directly when the snapshot is missing or outdated.
+
+See [Dashboard cost and refresh changes](DASHBOARD_COST_AND_REFRESH.md)
 for the processing manifest, raw source bundles and freshness limits.
 
 ## Display precision

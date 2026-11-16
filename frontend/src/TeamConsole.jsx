@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
-import { Activity, ArrowLeft, ArrowRight, Database, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, UsersRound, Wind, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, UsersRound, Wind, X } from 'lucide-react';
 import './AccessApproval.css';
 import './TeamLogin.css';
 import './TeamConsole.css';
@@ -36,13 +36,14 @@ export default function TeamConsole() {
   const [decision, setDecision] = useState(null);
   const [instrument, setInstrument] = useState('NO2-CAPS');
   const [data, setData] = useState(null);
+  const [reviewRows, setReviewRows] = useState({});
   const [viewer, setViewer] = useState(null);
   const [error, setError] = useState('');
   const [authDenied, setAuthDenied] = useState(false);
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [flagRow, setFlagRow] = useState(null);
-  const loadRequestId = useRef(0);
+  const activeLoad = useRef(null);
 
   useEffect(() => {
     if (!manager) return;
@@ -83,7 +84,10 @@ export default function TeamConsole() {
 
   const load = useCallback(async () => {
     if (!user || !teamEmailVerified(user)) return;
-    const requestId = ++loadRequestId.current;
+    activeLoad.current?.abort();
+    const request = new AbortController();
+    activeLoad.current = request;
+    const timeout = window.setTimeout(() => request.abort(), 25000);
     setLoading(true); setError(''); setAuthDenied(false); setNotice('');
     const path = tab === 'requests'
       ? `/air-quality/internal/v1/access-requests${targetRequest ? `?request_id=${encodeURIComponent(targetRequest)}` : ''}`
@@ -91,23 +95,45 @@ export default function TeamConsole() {
       ? '/air-quality/internal/v1/api-users'
       : tab === 'audit'
         ? '/air-quality/internal/v1/audit'
-        : `/air-quality/internal/v1/observations?instrument=${encodeURIComponent(instrument)}&limit=50&order=desc`;
+        : `/air-quality/internal/v1/observations?instrument=${encodeURIComponent(instrument)}&limit=50&order=desc&view=latest-review`;
     try {
-      const payload = await apiRequest(path);
-      if (requestId === loadRequestId.current) {
-        setData(payload);
+      const payload = await apiRequest(path, { signal: request.signal });
+      if (activeLoad.current === request) {
+        if (tab === 'review') {
+          if (payload.instrument_id !== instrument || !Array.isArray(payload.rows)) {
+            throw new Error('The records do not match the selected instrument.');
+          }
+          setReviewRows(current => ({ ...current, [instrument]: payload.rows }));
+        } else {
+          setData(payload);
+        }
         setViewer(payload.viewer || null);
       }
     } catch (e) {
-      if (requestId === loadRequestId.current) { setError(e.message); setAuthDenied(e.status === 401 || e.status === 403); setData(null); setViewer(null); }
+      if (activeLoad.current === request) {
+        const denied = e.status === 401 || e.status === 403;
+        setError(e.name === 'AbortError' ? 'The request timed out. Try refreshing.' : e.message);
+        setAuthDenied(denied);
+        if (tab !== 'review' || denied) setData(null);
+        if (denied) {
+          setViewer(null);
+          setReviewRows({});
+        }
+      }
     } finally {
-      if (requestId === loadRequestId.current) setLoading(false);
+      window.clearTimeout(timeout);
+      if (activeLoad.current === request) setLoading(false);
     }
   }, [apiRequest, instrument, tab, user, targetRequest]);
 
   useEffect(() => {
     const timer = window.setTimeout(load, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      const request = activeLoad.current;
+      activeLoad.current = null;
+      request?.abort();
+    };
   }, [load]);
 
   const revokeKey = async (key) => {
@@ -166,7 +192,8 @@ export default function TeamConsole() {
     onSignInAgain={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}
     onSignOut={() => manager.signoutRedirect()}/>;
 
-  const rows = data?.rows || [];
+  const currentReviewRows = reviewRows[instrument];
+  const rows = currentReviewRows || [];
   const events = data?.events || [];
   const requests = data?.requests || [];
   const roles = new Set(viewer?.roles || []);
@@ -202,10 +229,10 @@ export default function TeamConsole() {
           </div>
           <div className="team-title-actions">
             {tab === 'review' && <select aria-label="Instrument" value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}
-            <button onClick={load} disabled={loading}><RefreshCw size={15} aria-hidden="true"/> {loading ? 'Refreshing…' : 'Refresh'}</button>
+            <button onClick={load} disabled={loading} aria-busy={loading}><RefreshCw size={15} className={loading ? 'refresh-spinner' : ''} aria-hidden="true"/> {loading ? 'Refreshing…' : 'Refresh'}</button>
           </div>
         </div>
-        {error && <div role="alert" className="team-message team-error">{error}{authDenied && <div className="team-auth-retry"><p>If your roles were recently assigned, refresh your sign-in to obtain current permissions.</p><button onClick={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}>Refresh sign-in</button></div>}</div>}
+        {error && <div role="alert" className="team-message team-error">{error}{tab === 'review' && rows.length > 0 && ' Showing previously loaded records.'}{authDenied && <div className="team-auth-retry"><p>If your roles were recently assigned, refresh your sign-in to obtain current permissions.</p><button onClick={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}>Refresh sign-in</button></div>}</div>}
         {notice && <div className="team-message team-success">{notice}</div>}
         {tab === 'requests' && !error && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
           <div className="team-table-wrap"><table><thead><tr><th>Requester</th><th>Intended use</th><th>Status</th><th>Expires</th><th>Decision</th></tr></thead><tbody>{requests.map(request => <tr key={request.request_id}>
@@ -214,7 +241,15 @@ export default function TeamConsole() {
             <td>{request.actionable && canApprove ? <div className="team-request-actions"><button disabled={loading} onClick={() => setDecision({ request, action: 'approve' })}>Approve</button><button disabled={loading} onClick={() => setDecision({ request, action: 'reject' })}>Reject</button></div> : request.approved_by ? `Approved by ${request.approved_by}` : request.rejected_by ? `Rejected by ${request.rejected_by}` : 'Not actionable'}</td>
           </tr>)}{!requests.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No access requests found.'}</td></tr>}</tbody></table></div></section>}
         {tab === 'users' && !error && <ApiUsagePanel data={data} loading={loading} apiRequest={apiRequest} revokeKey={revokeKey} canManageKeys={canManageKeys} />}
-        {tab === 'review' && <section className="team-card"><div className="team-note"><Database size={17}/> Original measurements remain unchanged; reviews are stored as separate annotations.</div><div className="team-table-wrap"><table><thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead><tbody>{rows.map(row => <tr key={row.row_key}><td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td><td>{canReview ? <button className="team-row-button" disabled={row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td></tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{loading ? 'Loading…' : 'No records loaded.'}</td></tr>}</tbody></table></div></section>}
+        {tab === 'review' && (!error || currentReviewRows) && <section className="team-card" aria-label="Latest 50 records" aria-busy={loading}>
+          <div className="team-table-wrap"><table>
+            <thead><tr><th>Status</th><th>Timestamp</th><th>Record</th><th>Actions</th></tr></thead>
+            <tbody>{rows.map(row => <tr key={row.row_key}>
+              <td><span className={`team-status team-status-${row.status}`}>{row.status}</span></td><td>{row.timestamp}</td><td><code>{row.row_key}</code></td>
+              <td>{canReview ? <button className="team-row-button" disabled={loading || Boolean(error) || row.status === 'flagged'} onClick={() => setFlagRow(row)}>{row.status === 'flagged' ? 'Flagged' : 'Flag record'}</button> : 'View only'}</td>
+            </tr>)}{!rows.length && <tr><td colSpan="4" className="team-empty">{!currentReviewRows ? 'Loading records…' : 'No records found.'}</td></tr>}</tbody>
+          </table></div>
+        </section>}
         {tab === 'audit' && <section className="team-card"><div className="team-table-wrap"><table><thead><tr><th>Time</th><th>Team member</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>{events.map(event => <tr key={event.audit_id}><td>{event.created_at ? new Date(event.created_at).toLocaleString() : 'Unavailable'}</td><td>{event.actor_email}</td><td>{event.action}</td><td><code>{event.target_id}</code></td><td><span className={`team-status team-status-${event.result?.toLowerCase()}`}>{event.result}</span></td></tr>)}{!events.length && <tr><td colSpan="5" className="team-empty">{loading ? 'Loading…' : 'No audit events.'}</td></tr>}</tbody></table></div></section>}
       </main>
     </div>
