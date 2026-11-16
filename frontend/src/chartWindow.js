@@ -17,18 +17,44 @@ export function chartWindowParams(window, bucketMinutes) {
   };
 }
 
-export function changeChartZoom(base, current, direction, anchor = 0.5) {
+export function changeChartZoom(base, current, direction, anchor = 0.5, visible = current || base) {
   const range = current || base;
   const width = (range.end - range.start) * (direction === 'in' ? 0.5 : 2);
   if (width >= base.end - base.start) return null;
   const span = Math.max(width, hour);
   if (span >= base.end - base.start) return null;
   if (span === range.end - range.start) return current;
-  const target = range.start + (range.end - range.start - span) * anchor;
+  const target = visible.start + (visible.end - visible.start - span) * anchor;
   const start = Math.min(Math.max(target, base.start), base.end - span);
   return { start, end: start + span };
 }
 
 export function chartBucketMinutes(zoom) {
   return zoom && zoom.end - zoom.start <= 4 * day ? 15 : 60;
+}
+
+// Space time labels across the entire viewport, including unobserved periods.
+export function chartWindowTicks(window) {
+  if (!window) return undefined;
+  const target = (window.end - window.start) / 7;
+  const steps = [15 * minute, 30 * minute, hour, 2 * hour, 3 * hour, 6 * hour,
+    12 * hour, day, 2 * day, 3 * day, 7 * day];
+  const step = steps.find(width => width >= target) ?? Math.ceil(target / (7 * day)) * 7 * day;
+  const first = Math.ceil(window.start / step) * step;
+  return Array.from({ length: Math.max(0, Math.floor((window.end - first) / step) + 1) }, (_, index) => first + index * step);
+}
+
+// A null breaks the line across empty buckets. Keep these display-only points
+// out of downloads, and draw a marker where an isolated average has no line.
+export function chartPlotPoints(series, bucketMinutes) {
+  const width = bucketMinutes * minute;
+  const points = series.map(point => ({ ...point, timeMs: Date.parse(point.t) }));
+  return points.flatMap((point, i) => {
+    const previous = points[i - 1]?.timeMs;
+    const next = points[i + 1]?.timeMs;
+    const hasPrevious = point.timeMs - previous === width;
+    const hasNext = next - point.timeMs === width;
+    const sample = { ...point, isolated: !hasPrevious && !hasNext };
+    return i && !hasPrevious ? [{ timeMs: previous + width, v: null }, sample] : [sample];
+  });
 }
