@@ -4,7 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
 import { fetchApiRead } from './apiFetch.js';
-import { chartBucketMinutes, chartPlotPoints, chartWindowParams, chartWindowTicks, changeChartZoom, defaultChartWindow } from './chartWindow.js';
+import { chartBucketMinutes, chartPlotPoints, chartUsesClockLabels, chartWindowParams, chartWindowTicks, changeChartZoom, defaultChartWindow } from './chartWindow.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -1272,6 +1272,30 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
   );
 }
 
+const chartDate = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric',
+});
+
+function chartTimeIso(value) {
+  const ms = value instanceof Date ? value.getTime() : value;
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
+}
+
+function ChartTimeAxis({ domain, bucketMinutes }) {
+  const width = usePlotArea()?.width;
+  const ticks = useMemo(() => chartWindowTicks(domain, bucketMinutes, width), [domain, bucketMinutes, width]);
+  const clock = chartUsesClockLabels(domain);
+  return (
+    <XAxis dataKey="timeMs" type="number" domain={domain ? [domain.start, domain.end] : ['dataMin', 'dataMax']}
+      allowDataOverflow scale="utc" ticks={ticks} tickFormatter={value => {
+        const iso = chartTimeIso(value);
+        return clock ? iso.slice(11, 16) : iso.slice(5, 16).replace('T', ' ');
+      }}
+      tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={10}
+    />
+  );
+}
+
 function ChartPlotBounds() {
   const area = usePlotArea();
   return area && <rect data-chart-plot-bounds="" {...area} fill="none" pointerEvents="none" aria-hidden="true" />;
@@ -1456,11 +1480,6 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   };
 
   const chartPoints = useMemo(() => chartPlotPoints(series, shownBucket), [series, shownBucket]);
-  const chartTicks = useMemo(() => chartWindowTicks(shownDomain), [shownDomain]);
-  const fmtTime = (value, offset) => {
-    const ms = value instanceof Date ? value.getTime() : value;
-    return Number.isFinite(ms) ? new Date(ms).toISOString().slice(offset, 16).replace('T', ' ') : '';
-  };
   const fmtNumber = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return value;
@@ -1539,13 +1558,13 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
         <div className="chart-plot" ref={plot}><ResponsiveContainer width="100%" height={320}>
           <LineChart key={`${instrument}:${measurement}`} data={chartPoints} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
             <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-            <XAxis dataKey="timeMs" type="number" domain={shownDomain ? [shownDomain.start, shownDomain.end] : ['dataMin', 'dataMax']} allowDataOverflow scale="utc" ticks={chartTicks} tickFormatter={value => fmtTime(value, 5)} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
+            <ChartTimeAxis domain={shownDomain} bucketMinutes={shownBucket} />
             <YAxis tickFormatter={fmtNumber} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={false} width={64} />
             <Tooltip
               contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, fontSize: 12, boxShadow: '0 14px 30px rgba(15,35,55,.12)' }}
               labelStyle={{ color: 'var(--text-muted)' }}
               itemStyle={{ color: 'var(--brand)' }}
-              labelFormatter={value => `${fmtTime(value, 0)} UTC`}
+              labelFormatter={value => `${chartTimeIso(value).slice(0, 16).replace('T', ' ')} UTC`}
               formatter={(value, _name, item) => [formatReadingValue(clampBlackCarbonPlot ? item.payload?.v ?? value : value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
             />
             <Line type="linear" dataKey={clampBlackCarbonPlot ? chartValue : 'v'} stroke="var(--brand)" strokeWidth={2.5} dot={<IsolatedChartPoint />} connectNulls={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
@@ -1557,7 +1576,10 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
       )}
 
       <div className="chart-caption">
-        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>{shownBucket === 15 ? '15-minute' : 'Hourly'} sample average · chart times in UTC</span>
+        <span>{RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement) || 'No measurement selected'}</span><span>{shownBucket === 15 ? '15-minute' : 'Hourly'} sample average</span>
+        <span>{chartUsesClockLabels(shownDomain)
+          ? `${chartDate.formatRange(shownDomain.start, shownDomain.end)} (UTC)`
+          : 'Chart times in UTC'}</span>
         {clampBlackCarbonPlot && <span>Negative averages are plotted at zero. Hover and CSV show the signed averages.</span>}
       </div>
     </section>

@@ -194,6 +194,67 @@ test('chart zoom stays under the pointer, keeps gaps, and exports only real aver
   expect(errors).toEqual([]);
 });
 
+test('time labels change from 30 to 15 minutes and back without changing average resolution', async ({ page }) => {
+  const instant = Date.parse('2026-11-08T12:00:00Z');
+  const requests = [];
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.clock.install({ time: new Date('2026-11-15T21:35:00Z') });
+  await mockApi(page, {
+    chartSeries: query => {
+      const interval = Number(query.get('bucket_minutes') || 60);
+      return Array.from({ length: 24 * 60 / interval }, (_, i) => ({
+        t: new Date(instant + i * interval * 60000).toISOString(), v: 4000 + i / 100,
+      })).filter(p => Date.parse(p.t) >= Date.parse(query.get('start')) && Date.parse(p.t) <= Date.parse(query.get('end')));
+    },
+  });
+  await page.route('**/air-quality/v1/timeseries?**', route => {
+    requests.push(new URL(route.request().url()).searchParams);
+    return route.fallback();
+  });
+
+  await page.goto('/');
+  const plot = page.locator('.chart-plot');
+  const axis = plot.locator('.recharts-cartesian-axis-tick-value').filter({ hasText: /^\d{2}:\d{2}$/ });
+  const plus = page.getByRole('button', { name: 'Zoom in', exact: true });
+  const minus = page.getByRole('button', { name: 'Zoom out', exact: true });
+  const csv = page.getByRole('button', { name: 'Chart CSV', exact: true });
+  const zoom = async control => {
+    await control.click();
+    await expect(csv).toBeEnabled();
+  };
+  const clockSteps = async () => {
+    const minutes = (await axis.allTextContents()).map(label => {
+      const [hours, mins] = label.split(':').map(Number);
+      return hours * 60 + mins;
+    });
+    return [...new Set(minutes.slice(1).map((m, i) => (m - minutes[i] + 1440) % 1440))];
+  };
+
+  for (let i = 0; i < 5; i++) await zoom(plus);
+  await expect.poll(clockSteps).toEqual([30]);
+  await expect(plot.getByText('00:00', { exact: true })).toBeVisible();
+  await expect(page.locator('.chart-caption')).toContainText(/Nov 8.*9, 2026 \(UTC\)/);
+  expect(requests.at(-1).get('bucket_minutes')).toBe('15');
+
+  await zoom(plus);
+  await expect.poll(clockSteps).toEqual([15]);
+  await expect(page.getByText('15-minute averages', { exact: true })).toBeVisible();
+  expect(requests.at(-1).get('bucket_minutes')).toBe('15');
+
+  await zoom(minus);
+  await expect.poll(clockSteps).toEqual([30]);
+  expect(requests.at(-1).get('bucket_minutes')).toBe('15');
+
+  const requestCount = requests.length;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(async () => Math.min(...await clockSteps()) >= 60 && (await axis.count()) > 1).toBe(true);
+  expect(requests).toHaveLength(requestCount);
+  for (let i = 0; i < 4; i++) await zoom(plus);
+  await expect(plus).toBeDisabled();
+  await expect.poll(clockSteps).toEqual([15]);
+  expect(requests.slice(2).every(query => query.get('bucket_minutes') === '15')).toBe(true);
+});
+
 test('each pollutant opens eight labeled readings in Conditions', async ({ page }) => {
   const errors = await mockApi(page);
   await page.goto('/');
