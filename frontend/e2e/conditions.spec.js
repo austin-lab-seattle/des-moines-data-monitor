@@ -10,7 +10,7 @@ const instruments = {
   SMPS: { name: 'Particle number', columns: ['Total Concentration (#/cm³)', 'Geo. Std. Dev'], value: '5497.34' },
 };
 
-async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {}, readingWait = {}, seriesWait } = {}) {
+async function mockApi(page, { missingBlackCarbon = false, no2Error = false, uploadError = false, siteWeather = null, readingValues = {}, readingWait = {}, seriesWait, chartSeries } = {}) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/air-quality/**', async route => {
@@ -54,7 +54,7 @@ async function mockApi(page, { missingBlackCarbon = false, no2Error = false, upl
         instrument_id: id,
         measurement: url.searchParams.get('measurement') || instrument.columns[0], measurements: instrument.columns,
         bucket_minutes: Number(url.searchParams.get('bucket_minutes') || 60),
-        series: [{ t: '2026-10-07T07:00:00Z', v: 9000 }],
+        series: chartSeries?.(url.searchParams) ?? [{ t: '2026-10-07T07:00:00Z', v: 9000 }],
       } });
       return;
     }
@@ -105,6 +105,93 @@ test('chart defaults to 14 days and zoom requests 15-minute aggregates before re
   await page.getByRole('button', { name: 'Reset zoom' }).click();
   await expect(page.getByText('Hourly averages', { exact: true })).toBeVisible();
   expect(requests.at(-1).get('start')).toBe(requests[0].get('start'));
+});
+
+test('chart zoom stays under the pointer, keeps gaps, and exports only real averages', async ({ page }) => {
+  const hour = 3600000;
+  const week = 7 * 24 * hour;
+  const start = Date.parse('2026-11-01T22:00:00Z');
+  const sample = (offset, v) => ({ t: new Date(start + offset * hour).toISOString(), v });
+  const hourly = [sample(72, 2001.2345), sample(73, 2002), sample(150, 2010), sample(151, 2020), sample(192, 12)];
+  const quarterHourly = [sample(150, 2010.123456), sample(150.25, 2011.654321), sample(151.25, 2020.987654)];
+  const queries = [];
+  let releaseZoom;
+  const pendingZoom = new Promise(resolve => { releaseZoom = resolve; });
+  await page.clock.install({ time: new Date('2026-11-15T21:35:00Z') });
+  const errors = await mockApi(page, {
+    seriesWait: () => queries.length === 2 ? pendingZoom : undefined,
+    chartSeries: query => (query.get('bucket_minutes') === '15' ? quarterHourly : hourly)
+      .filter(({ t }) => Date.parse(t) >= Date.parse(query.get('start')) && Date.parse(t) <= Date.parse(query.get('end'))),
+  });
+  await page.route('**/air-quality/v1/timeseries?**', route => {
+    queries.push(new URL(route.request().url()).searchParams);
+    return route.fallback();
+  });
+
+  await page.goto('/');
+  const zoomOut = page.getByRole('button', { name: 'Zoom out' });
+  const zoomIn = page.getByRole('button', { name: 'Zoom in' });
+  const chartCsv = page.getByRole('button', { name: 'Chart CSV', exact: true });
+  const plot = page.locator('.chart-plot');
+  const bounds = plot.locator('[data-chart-plot-bounds]');
+  await expect(bounds).toBeAttached();
+  await expect(plot.getByText('11-13 00:00', { exact: true })).toBeVisible();
+  await plot.scrollIntoViewIfNeeded();
+  await expect(zoomOut).toBeDisabled();
+  expect((await zoomOut.boundingBox()).x).toBeLessThan((await zoomIn.boundingBox()).x);
+  await expect(plot.locator('.chart-isolated-point')).toHaveCount(1);
+  const renderedPath = await plot.locator('.recharts-line-curve').getAttribute('d');
+  expect(renderedPath.match(/M/g)).toHaveLength(3);
+  const before = await plot.boundingBox();
+  const area = await bounds.boundingBox();
+  const marker = await plot.locator('.chart-isolated-point').boundingBox();
+  // Even though the final observation is on day eight, the axis spans 14 days.
+  expect((marker.x + marker.width / 2 - area.x) / area.width).toBeCloseTo(192 / 336, 2);
+
+  const wheel = (box, fraction, deltaY) => plot.dispatchEvent('wheel', {
+    ctrlKey: true, deltaY, clientX: box.x + box.width * fraction, clientY: box.y + box.height / 2,
+  });
+  await wheel(area, 0.75, -90);
+  await expect.poll(() => queries.length).toBe(2);
+  await expect(page.getByRole('status').filter({ hasText: 'Refreshing measurements' })).toBeVisible();
+  await expect(chartCsv).toBeDisabled();
+  expect(await plot.boundingBox()).toEqual(before);
+  expect(Math.abs(Date.parse(queries[1].get('start')) - (start + 0.75 * week))).toBeLessThanOrEqual(hour);
+  releaseZoom();
+  await expect(chartCsv).toBeEnabled();
+
+  const zoomedArea = await bounds.boundingBox();
+  await plot.dispatchEvent('wheel', { deltaY: -100, clientX: zoomedArea.x, clientY: zoomedArea.y });
+  for (let i = 0; i < 8; i++) await wheel(zoomedArea, 0.25, -10);
+  await expect(page.getByText('15-minute averages', { exact: true })).toBeVisible();
+  expect(queries).toHaveLength(3);
+  const quarterSpan = Date.parse(queries[2].get('end')) + 1 - Date.parse(queries[2].get('start'));
+  expect(quarterSpan).toBeGreaterThanOrEqual(week / 2);
+  expect(quarterSpan).toBeLessThanOrEqual(week / 2 + hour / 4);
+  await expect(chartCsv).toBeEnabled();
+  const dot = await plot.locator('.chart-isolated-point').boundingBox();
+  await page.mouse.move(dot.x + dot.width / 2, dot.y + dot.height / 2);
+  await expect(plot.getByText('2026-11-08 05:15 UTC', { exact: true })).toBeVisible();
+  await expect(plot.getByText('2,020.987654', { exact: true })).toBeVisible();
+  const download = page.waitForEvent('download');
+  await chartCsv.click();
+  expect(await readFile(await (await download).path(), 'utf8'))
+    .toBe(['time,' + instruments.SMPS.columns[0], ...quarterHourly.map(({ t, v }) => t + ',' + v), ''].join('\n'));
+
+  await zoomOut.click();
+  await expect(page.getByText('Hourly averages', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Reset zoom' }).click();
+  await expect(page.getByText('Last 14 days', { exact: true })).toBeVisible();
+  for (const param of ['instrument', 'start', 'end', 'bucket_minutes']) {
+    expect(queries.at(-1).get(param)).toBe(queries[0].get(param));
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  const toolbar = page.getByRole('group', { name: 'Chart zoom' });
+  expect(await toolbar.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await zoomIn.click();
+  await expect(zoomOut).toBeEnabled();
+  await expect(chartCsv).toBeEnabled();
+  expect(errors).toEqual([]);
 });
 
 test('each pollutant opens eight labeled readings in Conditions', async ({ page }) => {

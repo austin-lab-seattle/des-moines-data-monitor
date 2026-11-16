@@ -1,10 +1,10 @@
-import { lazy, Suspense, useCallback, useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { AlertTriangle, ArrowRight, Check, Clock, Copy, Database, Download, KeyRound, Lock, MapPin, Menu, Minus, Moon, Plus, RefreshCw, Search, Send, Sun, Table2, Wind, X } from 'lucide-react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, usePlotArea } from 'recharts';
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
 import { fetchApiRead } from './apiFetch.js';
-import { chartBucketMinutes, chartWindowParams, changeChartZoom, defaultChartWindow } from './chartWindow.js';
+import { chartBucketMinutes, chartPlotPoints, chartWindowParams, chartWindowTicks, changeChartZoom, defaultChartWindow } from './chartWindow.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
@@ -1272,6 +1272,16 @@ function ApiSnippets({ theme, onThemeChange, onOpenDashboard }) {
   );
 }
 
+function ChartPlotBounds() {
+  const area = usePlotArea();
+  return area && <rect data-chart-plot-bounds="" {...area} fill="none" pointerEvents="none" aria-hidden="true" />;
+}
+
+function IsolatedChartPoint({ cx, cy, payload }) {
+  return payload?.isolated && Number.isFinite(cx) && Number.isFinite(cy)
+    ? <circle cx={cx} cy={cy} r={3} fill="var(--brand)" className="chart-isolated-point" /> : null;
+}
+
 function TimeSeriesChart({ refreshKey, onBusy }) {
   const [instrument, setInstrument] = useState('SMPS');
   const [measurement, setMeasurement] = useState('');
@@ -1286,6 +1296,7 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
   const [seriesError, setSeriesError] = useState('');
   const [shownBucket, setShownBucket] = useState(60);
   const [shownZoom, setShownZoom] = useState(null);
+  const [shownDomain, setShownDomain] = useState(null);
   const [appliedQuery, setAppliedQuery] = useState({ inst: 'SMPS', meas: '', s: '', e: '' });
   const [zoom, setZoom] = useState(null);
   const zoomBase = useRef(null);
@@ -1329,11 +1340,15 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
       setSeries(points);
       setShownBucket(bucket);
       setShownZoom(zoomed);
-      if (!zoomed) {
-        const min = bounds.start ? Date.parse(bounds.start) : Date.parse(points[0]?.t);
-        const max = bounds.end ? Date.parse(bounds.end) + 1 : Date.parse(points.at(-1)?.t) + 3600000;
-        zoomBase.current = Number.isFinite(min) && Number.isFinite(max) && max > min ? { start: min, end: max } : null;
-      }
+      const first = Date.parse(points[0]?.t);
+      const last = Date.parse(points.at(-1)?.t);
+      const min = bounds.start ? Date.parse(bounds.start) : first;
+      const max = bounds.end ? Date.parse(bounds.end) + 1 : last + bucket * 60000;
+      const range = Number.isFinite(min) && Number.isFinite(max) && max > min ? { start: min, end: max } : null;
+      // Partial date filters can include a bucket whose timestamp starts
+      // before the filter. Keep that real average visible at its source time.
+      setShownDomain(range && { ...range, start: Number.isFinite(first) ? Math.min(min, first) : min });
+      if (!zoomed) zoomBase.current = range;
     } catch (err) {
       if (!signal.aborted) setSeriesError(err.message || 'Measurements could not be loaded.');
     } finally {
@@ -1355,30 +1370,43 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
     zoomBase.current = null;
     setZoom(null);
     setSeries([]);
+    setShownDomain(null);
     setAppliedQuery({ inst, meas, s: start, e: end });
   };
 
   const zoomChart = useCallback((direction, anchor) => {
     const base = zoomBase.current;
-    if (base) setZoom(current => changeChartZoom(base, current, direction, anchor));
-  }, []);
+    if (base) setZoom(current => changeChartZoom(base, current, direction, anchor,
+      current === shownZoom && shownDomain ? shownDomain : current || base));
+  }, [shownDomain, shownZoom]);
 
   useEffect(() => {
     const element = plot.current;
     if (!element) return;
+    const zoomStep = 80;
+    let wheelTravel = 0;
+    let lastWheelAt = -Infinity;
     const wheel = event => {
       if ((!event.ctrlKey && !event.metaKey) || !event.deltaY) return;
+      const rect = element.querySelector('[data-chart-plot-bounds]')?.getBoundingClientRect();
+      if (!rect?.width) return;
       event.preventDefault();
-      const rect = element.getBoundingClientRect();
-      const anchor = Math.min(1, Math.max(0, (event.clientX - rect.left - 68) / Math.max(1, rect.width - 84)));
-      zoomChart(event.deltaY < 0 ? 'in' : 'out', anchor);
+      const delta = event.deltaY * (event.deltaMode === 1 ? 32 : event.deltaMode === 2 ? rect.height : 1);
+      if (event.timeStamp - lastWheelAt > 200 || (wheelTravel && Math.sign(wheelTravel) !== Math.sign(delta))) wheelTravel = 0;
+      lastWheelAt = event.timeStamp;
+      // One notch is one zoom step; small trackpad events accumulate.
+      wheelTravel += Math.sign(delta) * Math.min(zoomStep, Math.abs(delta));
+      if (Math.abs(wheelTravel) < zoomStep) return;
+      wheelTravel -= Math.sign(delta) * zoomStep;
+      const anchor = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      zoomChart(delta < 0 ? 'in' : 'out', anchor);
     };
     element.addEventListener('wheel', wheel, { passive: false });
     return () => element.removeEventListener('wheel', wheel);
   }, [series.length, seriesError, zoomChart]);
 
   const clampBlackCarbonPlot = instrument === 'BC-MA200' && measurement === 'IR BCc';
-  const chartValue = point => Math.max(0, point.v);
+  const chartValue = point => point.v === null ? null : Math.max(0, point.v);
   const chartPending = loading || (zoom !== shownZoom && !seriesError);
 
   const downloadCSV = () => {
@@ -1427,8 +1455,12 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
     }
   };
 
-  const chartPoints = series.map(point => ({ ...point, timeMs: Date.parse(point.t) }));
-  const fmtTime = (value, offset) => Number.isFinite(value) ? new Date(value).toISOString().slice(offset, 16).replace('T', ' ') : '';
+  const chartPoints = useMemo(() => chartPlotPoints(series, shownBucket), [series, shownBucket]);
+  const chartTicks = useMemo(() => chartWindowTicks(shownDomain), [shownDomain]);
+  const fmtTime = (value, offset) => {
+    const ms = value instanceof Date ? value.getTime() : value;
+    return Number.isFinite(ms) ? new Date(ms).toISOString().slice(offset, 16).replace('T', ' ') : '';
+  };
   const fmtNumber = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return value;
@@ -1494,29 +1526,30 @@ function TimeSeriesChart({ refreshKey, onBusy }) {
           </div>
       </div>
 
-      {(series.length > 0 || zoom) && <div className="chart-zoom" role="group" aria-label="Chart zoom">
-        {!appliedQuery.s && !appliedQuery.e && !zoom && <span>Last 14 days</span>}
-        <button type="button" className="action-button action-secondary" aria-label="Zoom in" title="Zoom in (Ctrl or Command + scroll)" onClick={() => zoomChart('in')}><Plus size={15}/></button>
+      <div className="chart-zoom" role="group" aria-label="Chart zoom">
         <button type="button" className="action-button action-secondary" aria-label="Zoom out" disabled={!zoom} onClick={() => zoomChart('out')}><Minus size={15}/></button>
-        {zoom && <button type="button" className="action-button action-secondary" onClick={() => setZoom(null)}>Reset zoom</button>}
-      </div>}
-      {chartPending && <div className="chart-refresh-status" role="status"><RefreshCw size={15} className="refresh-spinner" /> Refreshing measurements…</div>}
+        <button type="button" className="action-button action-secondary" aria-label="Zoom in" title="Zoom in (Ctrl or Command + scroll)" disabled={!series.length || Boolean(seriesError) || (zoom && zoom.end - zoom.start <= 3600000)} onClick={() => zoomChart('in')}><Plus size={15}/></button>
+        <button type="button" className="action-button action-secondary" disabled={!zoom} onClick={() => setZoom(null)}>Reset zoom</button>
+        {chartPending ? <span className="chart-refresh-status" role="status"><RefreshCw size={15} aria-hidden="true" className="refresh-spinner" /> <span>Refreshing measurements…</span></span>
+          : shownDomain && !appliedQuery.s && !appliedQuery.e && !zoom && <span>Last 14 days</span>}
+      </div>
       {seriesError ? (
         <div className="chart-empty" role="alert">{seriesError}</div>
       ) : series.length ? (
         <div className="chart-plot" ref={plot}><ResponsiveContainer width="100%" height={320}>
           <LineChart key={`${instrument}:${measurement}`} data={chartPoints} margin={{ top: 8, right: 16, left: 4, bottom: 4 }}>
             <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
-            <XAxis dataKey="timeMs" type="number" domain={['dataMin', 'dataMax']} scale="time" tickFormatter={value => fmtTime(value, 5)} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
+            <XAxis dataKey="timeMs" type="number" domain={shownDomain ? [shownDomain.start, shownDomain.end] : ['dataMin', 'dataMax']} allowDataOverflow scale="utc" ticks={chartTicks} tickFormatter={value => fmtTime(value, 5)} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={{ stroke: 'var(--chart-grid)' }} minTickGap={48} />
             <YAxis tickFormatter={fmtNumber} tick={{ fill: 'var(--text-muted)', fontSize: 11 }} tickLine={false} axisLine={false} width={64} />
             <Tooltip
               contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, fontSize: 12, boxShadow: '0 14px 30px rgba(15,35,55,.12)' }}
               labelStyle={{ color: 'var(--text-muted)' }}
               itemStyle={{ color: 'var(--brand)' }}
-              labelFormatter={value => fmtTime(value, 0)}
+              labelFormatter={value => `${fmtTime(value, 0)} UTC`}
               formatter={(value, _name, item) => [formatReadingValue(clampBlackCarbonPlot ? item.payload?.v ?? value : value, measurement), RECENT_READING_LABELS[measurement] || formatScienceLabel(measurement)]}
             />
-            <Line type="linear" dataKey={clampBlackCarbonPlot ? chartValue : 'v'} stroke="var(--brand)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
+            <Line type="linear" dataKey={clampBlackCarbonPlot ? chartValue : 'v'} stroke="var(--brand)" strokeWidth={2.5} dot={<IsolatedChartPoint />} connectNulls={false} activeDot={{ r: 5, fill: 'var(--brand)' }} isAnimationActive={false} />
+            <ChartPlotBounds />
           </LineChart>
         </ResponsiveContainer></div>
       ) : (

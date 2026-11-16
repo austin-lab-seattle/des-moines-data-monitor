@@ -3,7 +3,6 @@
 .refresh-spinner { animation: dashboard-spin .9s linear infinite; flex-shrink:0; }
 .reading-refresh { display:inline-block; margin-left:.5rem; vertical-align:middle; color:var(--brand); }
 .pollutant-refresh-error { margin-top:.4rem; color:var(--warning); font-size:.7rem; line-height:1.45; }
-.chart-refresh-status { display:flex; align-items:center; gap:.45rem; padding:.7rem 1.2rem; color:var(--text-muted); font-size:.8rem; }
 @keyframes dashboard-spin { to { transform:rotate(360deg); } }
 @media (prefers-reduced-motion:reduce) { .refresh-spinner { animation:none; } }
 
@@ -220,11 +219,13 @@ button { cursor: pointer; }
 .chart-zoom {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: .5rem;
   padding: .75rem 1.25rem 0;
   color: var(--text-muted);
   font-size: .75rem;
 }
 .chart-zoom .action-button { min-height: 32px; padding: .35rem .55rem; }
-.chart-zoom > span { margin-right: auto; }
+.chart-zoom > span { min-width: 0; }
+.chart-refresh-status { display:flex; align-items:center; gap:.35rem; }
+.chart-refresh-status svg { flex-shrink:0; }
+.chart-refresh-status span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
