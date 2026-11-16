@@ -33,10 +33,17 @@ export function chartBucketMinutes(zoom) {
   return zoom && zoom.end - zoom.start <= 4 * day ? 15 : 60;
 }
 
-// Space time labels across the entire viewport, including unobserved periods.
-export function chartWindowTicks(window) {
-  if (!window) return undefined;
-  const target = (window.end - window.start) / 7;
+export function chartUsesClockLabels(window) {
+  return Boolean(window && window.end - window.start < day);
+}
+
+// Use the space available for the labels. Tick spacing can be coarser than
+// the underlying averages, but never finer than their sampling interval.
+export function chartWindowTicks(window, bucketMinutes, plotWidth) {
+  if (!window || !(plotWidth > 0)) return undefined;
+  const labelSpace = chartUsesClockLabels(window) ? 46 : 80;
+  const intervals = Math.max(1, Math.floor(plotWidth / labelSpace));
+  const target = Math.max(bucketMinutes * minute, (window.end - window.start) / intervals);
   const steps = [15 * minute, 30 * minute, hour, 2 * hour, 3 * hour, 6 * hour,
     12 * hour, day, 2 * day, 3 * day, 7 * day];
   const step = steps.find(width => width >= target) ?? Math.ceil(target / (7 * day)) * 7 * day;
