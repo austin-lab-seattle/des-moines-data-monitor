@@ -1,15 +1,15 @@
 .logo-customizable {
-  max-width: 76%;
-  max-height: 72px;
+  max-width: 88%;
+  max-height: 64px;
 }
 
 .banner-customizable {
-  padding: 22px 0 18px 0;
-  background-color: #123f52;
+  padding: 16px 0;
+  background-color: #182b3d;
 }
 
 .label-customizable {
-  color: #173243;
+  color: #172936;
   font-size: 14px;
   font-weight: 600;
 }
@@ -17,59 +17,60 @@
 .textDescription-customizable,
 .idpDescription-customizable {
   display: block;
-  padding-top: 10px;
-  padding-bottom: 14px;
-  color: #425f70;
+  padding-top: 12px;
+  padding-bottom: 16px;
+  color: #4c6170;
   font-size: 16px;
   line-height: 1.45;
 }
 
 .legalText-customizable {
-  color: #6d808b;
-  font-size: 11px;
+  color: #4c6170;
+  font-size: 12px;
 }
 
 .submitButton-customizable {
   width: 100%;
-  height: 46px;
-  margin: 20px 0 10px 0;
+  height: 48px;
+  margin: 20px 0 8px 0;
   color: #ffffff;
-  background-color: #1685a6;
-  border-color: #1685a6;
-  border-radius: 7px;
-  font-size: 14px;
-  font-weight: 700;
+  background-color: #10677a;
+  border-color: #10677a;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
   text-align: center;
 }
 
 .submitButton-customizable:hover {
   color: #ffffff;
-  background-color: #0f6f8c;
-  border-color: #0f6f8c;
+  background-color: #0b5363;
+  border-color: #0b5363;
 }
 
 .errorMessage-customizable {
   width: 100%;
-  padding: 10px 12px;
-  color: #9b341c;
-  background-color: #fff1eb;
-  border: 1px solid #efb49f;
-  border-radius: 6px;
-  font-size: 13px;
+  padding: 12px;
+  color: #842d29;
+  background-color: #fff3f2;
+  border: 1px solid #edc8c6;
+  border-radius: 8px;
+  font-size: 14px;
 }
 
 .inputField-customizable {
   width: 100%;
   height: 44px;
-  color: #173243;
+  color: #172936;
   background-color: #ffffff;
-  border: 1px solid #c8d8df;
-  border-radius: 7px;
+  border: 1px solid #8798a5;
+  border-radius: 8px;
+  font-size: 16px;
 }
 
 .inputField-customizable:focus {
-  border-color: #1685a6;
-  outline: 0;
+  border-color: #10677a;
+  outline: 2px solid #10677a;
 }
 
 .redirect-customizable {

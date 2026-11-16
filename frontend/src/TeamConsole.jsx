@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
-import { Activity, Database, Flag, KeyRound, LogIn, LogOut, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Database, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, Wind, X } from 'lucide-react';
 import './AccessApproval.css';
+import './TeamLogin.css';
 import TeamEmailVerification from './TeamEmailVerification.jsx';
 import ApiUsagePanel from './ApiUsagePanel.jsx';
 import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
@@ -202,35 +203,74 @@ function FlagDialog({ row, busy, onClose, onSubmit }) {
 }
 
 function TeamLogin({ onLogin, error }) {
-  return <div className="team-auth-page">
-    <div className="team-auth-glow team-auth-glow-one" />
-    <div className="team-auth-glow team-auth-glow-two" />
-    <main className="team-auth-shell">
-      <section className="team-auth-intro">
-        <a className="team-auth-brand" href="/"><span><ShieldCheck size={21}/></span><strong>Des Moines Air</strong></a>
-        <div className="team-auth-intro-copy">
-          <span className="team-auth-eyebrow">UW research operations</span>
-          <h1>One secure place to review data and manage access.</h1>
-          <p>Built for the research team to handle quality review and API access without exposing administrative controls on the public dashboard.</p>
+  const [redirecting, setRedirecting] = useState(false);
+  const [redirectError, setRedirectError] = useState('');
+  useEffect(() => {
+    const restore = event => {
+      if (event.persisted) setRedirecting(false);
+    };
+    window.addEventListener('pageshow', restore);
+    return () => window.removeEventListener('pageshow', restore);
+  }, []);
+
+  const startSignIn = async () => {
+    setRedirecting(true);
+    setRedirectError('');
+    try {
+      await onLogin();
+    } catch {
+      setRedirectError('Could not open the sign-in page. Please try again.');
+      setRedirecting(false);
+    }
+  };
+
+  return <div className="team-login">
+    <header className="team-login-header">
+      <a className="team-login-brand" href="/"><Wind size={24} strokeWidth={1.5} aria-hidden="true" />Des Moines Air</a>
+      <a className="team-login-back" href="/"><ArrowLeft size={16} strokeWidth={1.5} aria-hidden="true" />Public dashboard</a>
+    </header>
+    <main className="team-login-main">
+      <section className="team-login-entry" aria-labelledby="team-sign-in-title">
+        <p className="team-login-kicker"><LockKeyhole size={16} strokeWidth={1.5} aria-hidden="true" />Private research workspace</p>
+        <h1 id="team-sign-in-title">Team Console</h1>
+        <p className="team-login-intro">Review air quality records, manage researcher API access, and see the team’s audit history.</p>
+        <div className="team-login-action">
+          {(redirectError || (!redirecting && error)) && <p className="team-login-error" role="alert">{redirectError || error}</p>}
+          <button type="button" className="team-login-submit" onClick={startSignIn} disabled={redirecting}>
+            {redirecting ? 'Opening sign-in…' : 'Sign in to Team Console'}
+            <ArrowRight size={18} strokeWidth={1.5} aria-hidden="true" />
+          </button>
+          <p className="team-login-note">Use your invited account. Amazon Cognito handles sign-in and requires multi-factor authentication.</p>
         </div>
-        <div className="team-auth-capabilities">
-          <div><span><KeyRound size={18}/></span><p><strong>API access</strong><small>Track keys, usage and limits</small></p></div>
-          <div><span><Flag size={18}/></span><p><strong>Quality review</strong><small>Flag records without changing source data</small></p></div>
-          <div><span><Activity size={18}/></span><p><strong>Audit history</strong><small>See who performed each action</small></p></div>
+      </section>
+      <figure className="team-login-station">
+        <div className="team-login-station-label">
+          <span>Field site</span>
+          <strong>Des Moines, WA</strong>
         </div>
-        <small className="team-auth-owner">University of Washington · DEOHS</small>
-      </section>
-      <section className="team-auth-card" aria-labelledby="team-sign-in-title">
-        <div className="team-auth-mark"><ShieldCheck size={30}/></div>
-        <span className="team-auth-eyebrow">Private workspace</span>
-        <h2 id="team-sign-in-title">Team Console</h2>
-        <p>Sign in with your invited research-team account. Multi-factor authentication is required.</p>
-        {error && <div className="team-message team-error">{error}</div>}
-        <button className="team-auth-submit" onClick={onLogin}><LogIn size={18}/> Continue securely</button>
-        <div className="team-auth-security"><ShieldCheck size={15}/><span>Invite-only access · MFA protected</span></div>
-        <a className="team-auth-back" href="/">Return to public dashboard</a>
-      </section>
+        <svg viewBox="0 0 480 360" fill="none" aria-hidden="true" focusable="false">
+          <defs>
+            <pattern id="team-station-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+              <path d="M24 0H0V24" stroke="#334960" strokeWidth="1" />
+            </pattern>
+            <path id="team-station-stream" d="M-100 122C60 106 76 229 218 229S343 100 580 119" />
+          </defs>
+          <rect width="480" height="360" fill="url(#team-station-grid)" opacity=".7" />
+          <g stroke="#87a0b4" opacity=".42">
+            <use href="#team-station-stream" y="-88" /><use href="#team-station-stream" y="-64" />
+            <use href="#team-station-stream" y="-40" /><use href="#team-station-stream" y="-16" />
+            <use href="#team-station-stream" y="32" /><use href="#team-station-stream" y="56" />
+            <use href="#team-station-stream" y="80" /><use href="#team-station-stream" y="104" />
+          </g>
+          <use href="#team-station-stream" y="8" stroke="#7ad8db" strokeWidth="2" />
+          <path d="M218 166v142M148 237h140" stroke="#7ad8db" opacity=".45" strokeDasharray="3 5" />
+          <circle cx="218" cy="237" r="16" stroke="#7ad8db" />
+          <circle cx="218" cy="237" r="5" fill="#7ad8db" />
+        </svg>
+        <figcaption>Air quality monitoring near Sea-Tac Airport</figcaption>
+      </figure>
     </main>
+    <footer className="team-login-footer">University of Washington <span aria-hidden="true">/</span> DEOHS <span aria-hidden="true">/</span> Austin Lab</footer>
   </div>;
 }
 

@@ -35,9 +35,41 @@ async function setup(page, { loggedIn = true, canApprove = true, failure = false
 test('Team Console fallback requires sign-in and cannot auto-approve on page load', async ({ page }) => {
   const decisions = await setup(page, { loggedIn: false });
   await page.goto(`/team?request_id=${requestId}`);
-  await expect(page.getByRole('button', { name: 'Continue securely' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sign in to Team Console' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Confirm approval', exact: true })).toHaveCount(0);
   expect(decisions).toEqual([]);
+});
+
+test('team sign-in recovers after a failed redirect and preserves an approval deep link', async ({ page }) => {
+  const authorize = 'https://signin.example.test/oauth2/authorize';
+  let attempts = 0;
+  await page.route(`${authority}/.well-known/openid-configuration`, route => {
+    attempts += 1;
+    return attempts === 1 ? route.fulfill({ status: 503, body: 'Unavailable' }) : route.fulfill({ json: {
+      issuer: authority,
+      authorization_endpoint: authorize,
+    } });
+  });
+  await page.route(`${authorize}?*`, route => route.fulfill({ body: 'CI sign-in provider' }));
+  await page.setViewportSize({ width: 360, height: 720 });
+  await page.goto(`/team?request_id=${requestId}`);
+  const callback = new URL('/team', page.url()).href;
+  const button = page.getByRole('button', { name: 'Sign in to Team Console' });
+  await expect(button).toBeInViewport();
+  await button.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('alert')).toContainText('Could not open the sign-in page');
+  await expect(button).toBeEnabled();
+  const request = page.waitForRequest(request => request.url().startsWith(authorize));
+  await button.click();
+  const params = new URL((await request).url()).searchParams;
+  expect(params.get('client_id')).toBe(client);
+  expect(params.get('redirect_uri')).toBe(callback);
+  expect(params.get('code_challenge_method')).toBe('S256');
+  await expect(page).toHaveURL(/^https:\/\/signin\.example\.test\//);
+  await page.goBack();
+  const state = await page.evaluate(id => JSON.parse(localStorage.getItem(`oidc.${id}`)), params.get('state'));
+  expect(state.data.request_id).toBe(requestId);
 });
 
 test('request details are escaped and approval requires an explicit second confirmation', async ({ page }) => {
