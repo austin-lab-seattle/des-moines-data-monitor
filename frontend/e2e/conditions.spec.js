@@ -255,6 +255,49 @@ test('time labels change from 30 to 15 minutes and back without changing average
   expect(requests.slice(2).every(query => query.get('bucket_minutes') === '15')).toBe(true);
 });
 
+test('v2 preview keeps instruments and recent values usable in both themes and on a phone', async ({ page }) => {
+  const errors = await mockApi(page);
+  await page.goto('/?design=v2');
+  await expect(page.locator('.dashboard-v2')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Chart CSV', exact: true })).toBeEnabled();
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Use dark theme' }).click();
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      for (const [id, instrument] of Object.entries(instruments)) {
+        const card = page.getByRole('button', { name: `View latest readings from ${instrument.name}` });
+        await expect(card).toContainText(id);
+        await expect(card.locator('.pollutant-value')).not.toHaveText('…');
+        expect(await card.locator('.pollutant-value').evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+        expect(await card.locator('.pollutant-instrument').evaluate(el => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(13);
+      }
+      if (width === 390) {
+        expect(await page.locator('.chart-card').evaluate(el => el.offsetTop)).toBeLessThan(1550);
+        const dateBoxes = await page.locator('.chart-controls input[type="datetime-local"]').evaluateAll(inputs =>
+          inputs.map(input => {
+            const rect = input.getBoundingClientRect();
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+          }));
+        expect(dateBoxes[0].right).toBeLessThanOrEqual(390);
+        expect(dateBoxes[1].right).toBeLessThanOrEqual(390);
+        expect(dateBoxes[0].bottom).toBeLessThanOrEqual(dateBoxes[1].top);
+        await page.getByRole('button', { name: 'View latest readings from Carbon dioxide' }).click();
+        await expect(page.getByRole('dialog').locator('tbody tr')).toHaveCount(8);
+        expect(await page.getByRole('dialog').evaluate(el => el.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
+        await page.keyboard.press('Escape');
+      }
+    }
+  }
+  await page.getByRole('button', { name: 'Observations', exact: true }).click();
+  await expect(page).toHaveURL(/\/observations\?design=v2$/);
+  await expect(page.getByRole('heading', { name: 'Observation explorer' })).toBeVisible();
+  await page.getByRole('button', { name: 'Conditions', exact: true }).click();
+  await expect(page).toHaveURL(/\/\?design=v2$/);
+  await expect(page.getByRole('heading', { name: 'Air monitoring conditions' })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test('each pollutant opens eight labeled readings in Conditions', async ({ page }) => {
   const errors = await mockApi(page);
   await page.goto('/');

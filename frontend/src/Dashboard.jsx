@@ -4,9 +4,11 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { formatReadingValue, formatSummaryReadingValue, observationTime } from './dataPresentation.js';
 import { DASHBOARD_REFRESH_MS, startVisiblePolling } from './visiblePolling.js';
 import { fetchApiRead } from './apiFetch.js';
+import './DashboardV2.css';
 import { chartBucketMinutes, chartPlotPoints, chartUsesClockLabels, chartWindowParams, chartWindowTicks, changeChartZoom, defaultChartWindow } from './chartWindow.js';
 // Aircraft work has a separate local workspace and is not part of public navigation.
 const FlightsLive = import.meta.env.DEV ? lazy(() => import('./FlightsLive.jsx')) : null;
+const isDashboardV2 = new URLSearchParams(window.location.search).get('design') === 'v2';
 const isAircraftWorkspace = import.meta.env.DEV && window.location.pathname === '/lab/aircraft';
 
 const API_BASE_URL = window.location.origin;
@@ -111,7 +113,7 @@ export default function Dashboard() {
   const selectView = (view) => {
     setActiveView(view);
     const path = view === 'aircraft' ? '/lab/aircraft' : view === 'api' ? '/developers' : view === 'review' ? '/observations' : '/';
-    if (window.location.pathname !== path || window.location.hash) window.history.replaceState({}, '', path);
+    if (window.location.pathname !== path || window.location.hash) window.history.replaceState({}, '', isDashboardV2 ? `${path}?design=v2` : path);
   };
 
   const loadReadings = useCallback(async () => {
@@ -194,7 +196,7 @@ export default function Dashboard() {
   };
 
   return (
-    <div className={`app-shell ${theme === 'light' ? 'theme-light' : 'theme-dark'} ${activeView === 'api' ? 'api-shell' : ''}`}>
+    <div className={`app-shell ${isDashboardV2 ? 'dashboard-v2' : ''} ${theme === 'light' ? 'theme-light' : 'theme-dark'} ${activeView === 'api' ? 'api-shell' : ''}`}>
       <div className={activeView === 'api' ? 'api-portal-root' : 'site-frame'}>
         {activeView !== 'api' && <header className="site-header">
           <button className="site-brand" type="button" onClick={() => selectView('overview')} aria-label="Open overview">
@@ -363,7 +365,7 @@ function Overview({ instruments, formatSeattleTime, loading, uploadRefreshKey, o
         <div>
           <div className="location-label"><MapPin size={15} /> Des Moines, Washington</div>
           <h1>Air monitoring conditions</h1>
-          <p>Explore recent pollutant measurements near Sea-Tac Airport.</p>
+          <p>{isDashboardV2 ? 'Steven J. Underwood Memorial Park · Near Sea-Tac Airport' : 'Explore recent pollutant measurements near Sea-Tac Airport.'}</p>
         </div>
         <LatestUploadWidget formatSeattleTime={formatSeattleTime} refreshKey={uploadRefreshKey} onBusy={onUploadBusy} />
       </section>
