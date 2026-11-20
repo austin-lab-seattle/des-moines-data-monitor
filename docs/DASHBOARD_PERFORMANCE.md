@@ -32,6 +32,12 @@ Authorization and quotas still run before any index access. Old unreferenced
 content-addressed chunks are not read; cache storage cleanup can reclaim those
 objects separately, preserving all chunks referenced by the current manifest.
 
+Publication lists chunk metadata once and reuses blobs whose size and S3
+checksum match. Only new or changed chunks are uploaded. Manifest paths include
+the reader version, so preparing a code deployment cannot replace the manifest
+used by the running API. Gzip headers are normalized across Python runtimes to
+keep unchanged chunk identities stable between local preparation and Lambda.
+
 The chart API also caches small response bodies, with these boundaries:
 
 - Every reuse requires the current Silver object's S3 ETag. Conditional reads

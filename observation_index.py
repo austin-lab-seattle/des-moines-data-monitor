@@ -9,8 +9,8 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 
 
-def manifest_key(instrument):
-    return f"_observations/v1/{instrument}/index.json"
+def manifest_key(instrument, version):
+    return f"_observations/v1/{instrument}/{version}/index.json"
 
 
 def read_json(api, key, limit, digest=None):
@@ -30,6 +30,10 @@ def read_json(api, key, limit, digest=None):
 
 
 def publish(api, instrument, text, etag, *, defer_manifest=False):
+    # One paginated metadata listing replaces hundreds of redundant PUTs.
+    # Only reuse complete, single-upload blobs with the expected S3 checksum.
+    existing = {item['Key']: item for item in api.iter_s3_objects(
+        f"_observations/v1/{instrument}/chunks/")}
     lines = (line for line in text.splitlines() if line.strip())
     header = next(lines, "")
     columns = api.split_fields(header) if header else []
@@ -50,10 +54,16 @@ def publish(api, instrument, text, etag, *, defer_manifest=False):
         if len(raw) > MAX_BODY_BYTES:
             raise ValueError("Observation chunk exceeds the reader limit")
         blob = gzip.compress(raw, mtime=0)
+        # Python 3.11 and newer runtimes differ in gzip's OS header byte.
+        # Normalize it so identical chunks retain their identity across hosts.
+        blob = blob[:9] + b'\xff' + blob[10:]
         digest = hashlib.sha256(blob).hexdigest()
         key = f"_observations/v1/{instrument}/chunks/{digest}.json.gz"
-        api.s3_client.put_object(Bucket=api.BUCKET, Key=key, Body=blob,
-                                 ContentType="application/gzip")
+        previous = existing.get(key, {})
+        checksum = '"' + hashlib.md5(blob, usedforsecurity=False).hexdigest() + '"'
+        if previous.get('Size') != len(blob) or previous.get('ETag') != checksum:
+            api.s3_client.put_object(Bucket=api.BUCKET, Key=key, Body=blob,
+                                     ContentType="application/gzip")
         chunks.append({"key": key, "digest": digest, "count": len(current),
                        "first": current[0][0], "last": current[-1][0]})
 
@@ -78,7 +88,7 @@ def commit(api, instrument, manifest, etag):
     if len(raw) > MAX_MANIFEST_BYTES:
         raise ValueError("Observation manifest exceeds the reader limit")
     # Publish only after every immutable chunk has been uploaded successfully.
-    api.s3_client.put_object(Bucket=api.BUCKET, Key=manifest_key(instrument), Body=raw,
+    api.s3_client.put_object(Bucket=api.BUCKET, Key=manifest_key(instrument, api.SILVER_VIEW_CODE_VERSION), Body=raw,
                              ContentType="application/json", CacheControl="no-store")
 
 
@@ -105,7 +115,7 @@ def read(api, event):
             return api.response(404, {"error": "Records not found", "instrument_id": instrument})
         return unavailable(api)
     try:
-        manifest = read_json(api, manifest_key(instrument), MAX_MANIFEST_BYTES)
+        manifest = read_json(api, manifest_key(instrument, api.SILVER_VIEW_CODE_VERSION), MAX_MANIFEST_BYTES)
         if (manifest["version"] != api.SILVER_VIEW_CODE_VERSION or manifest["silver_etag"] != etag
                 or manifest["instrument_id"] != instrument):
             return unavailable(api)

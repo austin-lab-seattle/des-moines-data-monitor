@@ -539,6 +539,32 @@ test('Observations refresh only checks the active query and keeps rows visible',
   ]);
 });
 
+test('Observation date filters persist and reach the API with exact UTC boundaries', async ({ page }) => {
+  const requests = [];
+  await mockApi(page);
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith('/observations')) requests.push(url);
+  });
+  await page.goto('/observations');
+  await expect(page.locator('.review-table tbody')).toContainText('10.255');
+  const start = page.getByLabel('Start Time (filter)', { exact: true });
+  const end = page.getByLabel('End Time (filter)', { exact: true });
+  await start.fill('2026-11-19T22:00');
+  await end.fill('2026-11-19T22:10');
+  const loaded = page.waitForResponse(response => new URL(response.url()).searchParams.has('start'));
+  await page.getByRole('button', { name: 'Load Records', exact: true }).click();
+  await loaded;
+  await expect(page.getByRole('button', { name: 'Load Records', exact: true })).toBeEnabled();
+  await expect(start).toHaveValue('2026-11-19T22:00');
+  await expect(end).toHaveValue('2026-11-19T22:10');
+  const query = requests.at(-1).searchParams;
+  expect(query.get('start')).toBe('2026-11-20T06:00:00.000Z');
+  expect(query.get('end')).toBe('2026-11-20T06:10:00.000Z');
+  expect(query.get('order')).toBe('asc');
+  expect(query.get('cursor')).toBe('0');
+});
+
 test('decorative sky follows regional weather and respects reduced motion', async ({ page }) => {
   await mockApi(page, { siteWeather: { is_day: true, cloud_cover: 70 } });
   await page.goto('/');
