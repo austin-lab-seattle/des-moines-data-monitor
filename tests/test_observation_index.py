@@ -111,6 +111,31 @@ class ObservationIndexTests(unittest.TestCase):
         self.assertEqual(1, sum('/chunks/' in key for key in self.s3.gets))
         self.assertNotIn(self.silver, self.s3.gets)
 
+    def test_publication_reuses_verified_chunks_and_repairs_missing_or_changed_blobs(self):
+        self.publish()
+        self.s3.puts.clear()
+        self.publish()
+        self.assertFalse(any('/chunks/' in key for key in self.s3.puts))
+        chunk = next(key for key in self.s3.objects if '/chunks/' in key)
+        del self.s3.objects[chunk]
+        self.s3.puts.clear()
+        self.publish()
+        self.assertIn(chunk, self.s3.puts)
+        self.s3.objects[chunk]['ETag'] = '"changed-blob"'
+        self.s3.puts.clear()
+        self.publish()
+        self.assertIn(chunk, self.s3.puts)
+
+    def test_preparing_a_new_reader_version_does_not_replace_the_running_manifest(self):
+        self.publish()
+        old_key = index.manifest_key('NO2-CAPS', api.SILVER_VIEW_CODE_VERSION)
+        old = self.s3.objects[old_key]['Body']
+        with mock.patch.object(api, 'SILVER_VIEW_CODE_VERSION', 'candidate-reader'):
+            self.publish()
+            self.assertEqual(200, self.query()['statusCode'])
+        self.assertEqual(old, self.s3.objects[old_key]['Body'])
+        self.assertEqual(200, self.query()['statusCode'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -94,7 +94,8 @@ class PipelineSnapshotsTests(unittest.TestCase):
         writes = self.s3.puts
         silver_position = writes.index('NO2-CAPS/silver/NO2-CAPS_data.csv')
         self.assertTrue(any('/chunks/' in key for key in writes[:silver_position]))
-        self.assertEqual('_observations/v1/NO2-CAPS/index.json', writes[silver_position + 1])
+        self.assertEqual(api.observation_index.manifest_key('NO2-CAPS', api.SILVER_VIEW_CODE_VERSION),
+                         writes[silver_position + 1])
         old_silver = self.s3.objects['NO2-CAPS/silver/NO2-CAPS_data.csv']['Body']
         self.source('c', [7])
         with mock.patch.object(api.observation_index, 'publish', side_effect=RuntimeError('chunk upload failed')):
