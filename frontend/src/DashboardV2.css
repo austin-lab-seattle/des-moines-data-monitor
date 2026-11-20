@@ -1,0 +1,318 @@
+/*
+ * Dashboard v2 preview. Enable with ?design=v2.
+ * Design review informed by unslop, Damir Sokolovsky, CC BY 4.0.
+ * https://github.com/heydamir/unslop
+ */
+@font-face {
+  font-family: "Source Sans 3";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("./fonts/SourceSans3-Latin.woff2") format("woff2");
+}
+.dashboard-v2 {
+  --page: #f5f6f7;
+  --surface: #ffffff;
+  --surface-soft: #f5f7f8;
+  --surface-tint: #eef4f7;
+  --text: #202b34;
+  --text-soft: #475865;
+  --text-muted: #62707c;
+  --border: #dde2e6;
+  --border-strong: #bbc6ce;
+  --brand: #146b91;
+  --brand-dark: #105e80;
+  --brand-soft: #e8f2f7;
+  --success: #28744f;
+  --warning: #9b5916;
+  --danger: #b13a40;
+  --shadow: none;
+  --chart-grid: #e6eaed;
+  font-family: "Source Sans 3", "Segoe UI", ui-sans-serif, sans-serif;
+  font-variant-numeric: tabular-nums;
+  transition: none;
+}
+.dashboard-v2.theme-dark {
+  --page: #14191d;
+  --surface: #1b2126;
+  --surface-soft: #20282e;
+  --surface-tint: #253139;
+  --text: #e9eef1;
+  --text-soft: #bdc8cf;
+  --text-muted: #a0aeb8;
+  --border: #323d45;
+  --border-strong: #52616d;
+  --brand: #6ebedc;
+  --brand-dark: #8fd0e8;
+  --brand-soft: #233b46;
+  --success: #83c6a1;
+  --warning: #e9b476;
+  --danger: #f09a9e;
+  --chart-grid: #323d45;
+}
+.dashboard-v2 .site-header {
+  min-height: 64px;
+  padding: 0 max(24px, calc((100vw - 1360px) / 2));
+  gap: 32px;
+  background: #123e53;
+  box-shadow: none;
+  border-bottom: 1px solid #27536a;
+}
+.dashboard-v2 .site-brand { gap: 12px; }
+.dashboard-v2 .brand-mark {
+  width: 32px;
+  height: 32px;
+  flex-basis: 32px;
+  border-radius: 0;
+  color: #a6dcef;
+  background: transparent;
+  box-shadow: none;
+}
+.dashboard-v2 .site-brand strong { font-size: 18px; font-weight: 600; letter-spacing: 0; }
+.dashboard-v2 .site-brand small { margin-top: 4px; color: #c0d1db; font-size: 12px; }
+.dashboard-v2 .site-nav { height: 64px; gap: 8px; }
+.dashboard-v2 .site-nav button { padding: 0 16px; font-size: 15px; font-weight: 500; color: #c0d1db; }
+.dashboard-v2 .site-nav .site-nav-active { color: #fff; }
+.dashboard-v2 .site-nav button::after { right: 16px; left: 16px; height: 2px; border-radius: 0; }
+.dashboard-v2 .site-nav .site-nav-active::after { background: #a6dcef; }
+.dashboard-v2 :is(.icon-action, .refresh-action) {
+  height: 36px;
+  min-height: 36px;
+  border-radius: 8px;
+  border-color: #608195;
+  color: #f2f7fa;
+  background: transparent;
+}
+.dashboard-v2 .icon-action { width: 36px; }
+.dashboard-v2 .refresh-action { min-width: 100px; font-size: 14px; font-weight: 500; }
+.dashboard-v2 .dashboard-page { width: min(1360px, calc(100% - 48px)); padding: 32px 0 48px; }
+.dashboard-v2 .conditions-hero {
+  min-height: 152px;
+  align-items: center;
+  gap: 32px;
+  margin-bottom: 32px;
+  padding: 24px 28px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--brand);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: none;
+}
+.dashboard-v2 .conditions-hero .location-label {
+  margin-bottom: 8px;
+  gap: 8px;
+  color: var(--brand-dark);
+  font-size: 14px;
+  font-weight: 500;
+}
+.dashboard-v2 .conditions-hero h1 {
+  font-size: clamp(28px, 2.5vw, 36px);
+  line-height: 1.2;
+  letter-spacing: -.02em;
+  font-weight: 500;
+}
+.dashboard-v2 .conditions-hero p { margin-top: 8px; color: var(--text-soft); font-size: 15px; }
+.dashboard-v2 .conditions-hero .sky-decoration { inset: 0 0 0 70%; opacity: .25; }
+.dashboard-v2 .sky-cloud { filter: blur(4px); background: var(--brand-soft); box-shadow: none; animation: none; left: 12%; }
+.dashboard-v2 .sky-star { background: var(--brand-dark); box-shadow: none; animation: none; opacity: .4; }
+.dashboard-v2 .sky-attribution { left: 28px; bottom: 8px; color: var(--text-muted); font-size: 11px; }
+.dashboard-v2 .latest-upload-widget {
+  display: flex;
+  flex: 0 0 272px;
+  padding: 0 0 0 24px;
+  gap: 12px;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+.dashboard-v2 .latest-upload-widget > svg { width: 18px; height: 18px; color: var(--text-muted); }
+.dashboard-v2 .upload-widget-label { text-transform: none; letter-spacing: 0; color: var(--text-soft); font-size: 13px; font-weight: 400; }
+.dashboard-v2 .latest-upload-widget :is(time, strong) { margin-top: 4px; font-size: 18px; font-weight: 500; }
+.dashboard-v2 .upload-widget-instrument { margin-top: 4px; color: var(--text-soft); font-size: 14px; }
+.dashboard-v2 .latest-upload-widget small { color: var(--text-muted); font-size: 12px; }
+.dashboard-v2 .upload-batch-stats { margin-top: 4px; gap: 8px; }
+.dashboard-v2 .upload-batch-stats > span { padding: 0; background: transparent; color: var(--text-soft); font-size: 12px; font-weight: 400; }
+.dashboard-v2 .upload-batch-stats small { flex-basis: auto; margin: 0; }
+.dashboard-v2 .latest-conditions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 32px;
+}
+.dashboard-v2 .latest-conditions h2 { color: var(--text); font-size: 20px; font-weight: 500; letter-spacing: 0; }
+.dashboard-v2 .latest-conditions-copy { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 20px; }
+.dashboard-v2 .pollutant-grid {
+  grid-column: 1 / -1;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.dashboard-v2 .pollutant-card {
+  position: relative;
+  padding: 20px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  transition: background-color 160ms ease;
+}
+.dashboard-v2 .pollutant-card:last-child { border-right: 0; }
+.dashboard-v2 .pollutant-card:hover { background: var(--surface-soft); transform: none; }
+.dashboard-v2 .pollutant-card:focus-visible { outline: 2px solid var(--brand); outline-offset: -3px; }
+.dashboard-v2 .pollutant-name { color: var(--text); font-size: 16px; font-weight: 600; line-height: 24px; }
+.dashboard-v2 .pollutant-detail { margin-top: 0; font-size: 13px; line-height: 20px; }
+.dashboard-v2 .pollutant-instrument { margin-top: 12px; font-size: 14px; font-weight: 500; line-height: 20px; }
+.dashboard-v2 .pollutant-instrument-id { margin-top: 4px; font-size: 12px; font-weight: 400; line-height: 16px; }
+.dashboard-v2 .pollutant-value { margin-top: 16px; font-size: 36px; font-weight: 500; letter-spacing: -.02em; line-height: 40px; }
+.dashboard-v2 .pollutant-unit { margin-top: 4px; font-size: 13px; line-height: 20px; }
+.dashboard-v2 .pollutant-time { margin-top: 16px; font-size: 12px; line-height: 20px; }
+.dashboard-v2 .pollutant-open {
+  width: 100%;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 16px;
+  color: var(--brand-dark);
+  font-size: 13px;
+  font-weight: 500;
+}
+.dashboard-v2 .pollutant-open::after { content: "↗"; margin-left: auto; font-size: 16px; }
+.dashboard-v2 .surface-card { border-radius: 12px; box-shadow: none; }
+.dashboard-v2 .section-heading { min-height: 76px; gap: 16px; padding: 20px 24px; }
+.dashboard-v2 .section-eyebrow { margin-bottom: 4px; text-transform: none; letter-spacing: 0; color: var(--text-muted); font-size: 13px; font-weight: 400; }
+.dashboard-v2 .section-heading h2 { font-size: 22px; letter-spacing: -.01em; font-weight: 500; }
+.dashboard-v2 .section-actions { gap: 8px; }
+.dashboard-v2 :is(.action-button, .api-primary-button) {
+  min-height: 40px;
+  padding: 8px 16px;
+  gap: 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+.dashboard-v2 .action-button:not(.action-secondary) { color: #fff; }
+.dashboard-v2.theme-dark .action-button:not(.action-secondary) { background: #b9dcec; border-color: #b9dcec; color: #132f3d; }
+.dashboard-v2 .action-secondary { background: transparent; color: var(--text-soft); border-color: var(--border-strong); }
+.dashboard-v2 :is(.action-button, .api-primary-button):hover { filter: none; }
+.dashboard-v2 .action-secondary:hover { background: var(--surface-soft); border-color: var(--brand); color: var(--text); }
+.dashboard-v2 :is(.chart-controls, .filter-grid) {
+  gap: 12px;
+  padding: 20px 24px;
+  background: var(--surface);
+}
+.dashboard-v2 .chart-controls { grid-template-columns: 1fr minmax(200px, 1.5fr) 1fr 1fr auto; }
+.dashboard-v2 .control-field { gap: 8px; }
+.dashboard-v2 .control-field > span { color: var(--text-soft); font-size: 13px; font-weight: 400; }
+.dashboard-v2 .control-input {
+  min-height: 40px;
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 22px;
+  background: var(--surface-soft);
+  border-color: var(--border);
+  border-radius: 8px;
+}
+.dashboard-v2 .chart-zoom { gap: 8px; padding: 16px 24px 0; font-size: 13px; }
+.dashboard-v2 .chart-zoom .action-button { min-height: 32px; padding: 4px 8px; font-size: 13px; }
+.dashboard-v2 .chart-plot { padding: 24px 16px 4px 4px; }
+.dashboard-v2 .chart-caption { gap: 8px; padding: 16px 24px 20px; font-size: 12px; }
+.dashboard-v2 .chart-caption span + span::before { margin-right: 8px; }
+.dashboard-v2 .dashboard-api-notice { width: min(1360px, calc(100% - 48px)); margin: 24px auto -8px; padding: 12px 16px; border-radius: 8px; }
+.dashboard-v2 .location-heading:not(.conditions-hero) h1 { font-size: 32px; font-weight: 500; letter-spacing: -.02em; }
+.dashboard-v2 .location-heading:not(.conditions-hero) p { font-size: 15px; }
+.dashboard-v2 .location-heading:not(.conditions-hero) .location-label { font-size: 13px; font-weight: 400; }
+.dashboard-v2 .auth-banner { border-radius: 8px; font-size: 13px; font-weight: 400; }
+.dashboard-v2 .data-table th { padding: 12px 24px; font-size: 13px; font-weight: 500; }
+.dashboard-v2 .data-table td { padding: 16px 24px; font-size: 14px; }
+.dashboard-v2 .readings-dialog { border-radius: 12px; box-shadow: 0 16px 48px #0003; }
+.dashboard-v2 .readings-dialog-header { padding: 20px 24px; }
+.dashboard-v2 .readings-dialog-header h2 { font-size: 28px; font-weight: 500; }
+.dashboard-v2 .readings-dialog-header p { font-size: 13px; }
+.dashboard-v2 .readings-dialog-header > button { border-radius: 8px; }
+.dashboard-v2 .readings-table th { padding: 12px 20px; font-size: 13px; font-weight: 500; }
+.dashboard-v2 .readings-table td { padding: 16px 20px; font-size: 13px; }
+.dashboard-v2 .readings-dialog-footer { padding: 12px 24px; font-size: 13px; }
+.dashboard-v2 :is(.action-button, .site-nav button, .control-input):focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+
+/* The existing science and API components also render this opt-in preview. */
+@media (min-width: 721px) and (max-width: 1120px) {
+  .dashboard-v2 .site-header { grid-template-columns: 1fr auto auto; gap: 16px; }
+  .dashboard-v2 .site-nav button { padding: 0 12px; }
+  .dashboard-v2 .conditions-hero { gap: 20px; }
+  .dashboard-v2 .pollutant-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .dashboard-v2 .pollutant-card { padding: 16px 12px; }
+  .dashboard-v2 .pollutant-value { font-size: 30px; }
+  .dashboard-v2 .latest-conditions { grid-template-columns: 1fr; gap: 8px; }
+  .dashboard-v2 .pollutant-grid { margin-top: 8px; }
+  .dashboard-v2 .chart-controls { grid-template-columns: 1fr 1.5fr; }
+  .dashboard-v2 .chart-controls .control-action { grid-column: 2; grid-row: 2; justify-self: end; }
+  .dashboard-v2 .chart-controls .control-field:last-of-type { grid-column: 1; }
+}
+@media (max-width: 720px) {
+  .dashboard-v2 .site-header { grid-template-columns: 1fr auto; padding: 12px 20px 0; gap: 8px; }
+  .dashboard-v2 .site-actions { gap: 8px; }
+  .dashboard-v2 .site-actions .refresh-action { min-width: 36px; width: 36px; padding: 0; }
+  .dashboard-v2 .refresh-action span { display: none; }
+  .dashboard-v2 .site-brand small { display: none; }
+  .dashboard-v2 .site-brand { gap: 8px; }
+  .dashboard-v2 .site-brand strong { font-size: 16px; }
+  .dashboard-v2 .site-nav { grid-row: 2; grid-column: 1 / -1; height: 44px; gap: 0; }
+  .dashboard-v2 .site-nav button { padding: 0 12px; font-size: 14px; }
+  .dashboard-v2 .site-nav button::after { left: 12px; right: 12px; }
+  .dashboard-v2 .dashboard-page { width: calc(100% - 32px); padding: 20px 0 32px; }
+  .dashboard-v2 .conditions-hero { flex-direction: column; align-items: stretch; gap: 16px; padding: 20px 20px 28px; margin-bottom: 24px; }
+  .dashboard-v2 .conditions-hero h1 { font-size: 28px; }
+  .dashboard-v2 .conditions-hero p { font-size: 14px; }
+  .dashboard-v2 .sky-attribution { left: 20px; bottom: 8px; font-size: 10px; }
+  .dashboard-v2 .conditions-hero .latest-upload-widget { flex-basis: auto; padding: 16px 0 0; border-left: 0; border-top: 1px solid var(--border); }
+  .dashboard-v2 .latest-upload-widget > svg { display: none; }
+  .dashboard-v2 .latest-upload-widget > div { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: baseline; }
+  .dashboard-v2 .upload-widget-label { grid-column: 1; font-size: 12px; }
+  .dashboard-v2 .latest-upload-widget :is(time, strong) { grid-column: 1; font-size: 16px; margin: 0; }
+  .dashboard-v2 .upload-widget-instrument { grid-column: 2; grid-row: 2; margin: 0; font-size: 13px; }
+  .dashboard-v2 .upload-batch-stats { grid-column: 1 / -1; }
+  .dashboard-v2 .latest-upload-widget small { margin: 0; font-size: 11px; }
+  .dashboard-v2 .latest-conditions { grid-template-columns: 1fr; gap: 8px; margin-bottom: 24px; }
+  .dashboard-v2 .latest-conditions h2 { font-size: 20px; }
+  .dashboard-v2 .latest-conditions-copy { font-size: 13px; }
+  .dashboard-v2 .pollutant-grid { grid-template-columns: 1fr; margin-top: 8px; }
+  .dashboard-v2 .pollutant-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: repeat(4, auto);
+    column-gap: 16px;
+    row-gap: 4px;
+    padding: 16px 20px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .dashboard-v2 .pollutant-card:last-child { border-bottom: 0; }
+  .dashboard-v2 .pollutant-name { grid-column: 1; grid-row: 1; font-size: 15px; }
+  .dashboard-v2 .pollutant-detail { grid-column: 1; grid-row: 2; font-size: 12px; }
+  .dashboard-v2 .pollutant-instrument { grid-column: 1; grid-row: 3; margin: 0; font-size: 13px; }
+  .dashboard-v2 .pollutant-instrument-id { grid-column: 1; grid-row: 4; margin: 0; font-size: 11px; }
+  .dashboard-v2 .pollutant-value { grid-column: 2; grid-row: 1 / 3; margin: 0; font-size: 28px; line-height: 36px; justify-self: end; }
+  .dashboard-v2 .pollutant-unit { grid-column: 2; grid-row: 3; margin: 0; text-align: right; font-size: 12px; }
+  .dashboard-v2 .pollutant-time { grid-column: 1 / -1; grid-row: 5; margin-top: 4px; font-size: 12px; }
+  .dashboard-v2 .pollutant-open { grid-column: 1 / -1; grid-row: 6; padding-top: 4px; font-size: 12px; }
+  .dashboard-v2 .pollutant-refresh-error { grid-column: 1 / -1; }
+  .dashboard-v2 .section-heading { padding: 20px; gap: 16px; flex-wrap: wrap; }
+  .dashboard-v2 .section-heading h2 { font-size: 21px; }
+  .dashboard-v2 .chart-controls { grid-template-columns: minmax(0, 1fr); padding: 16px 20px; gap: 12px; }
+  .dashboard-v2 .chart-controls .control-field { grid-column: 1 / -1; }
+  .dashboard-v2 .control-input { padding: 8px; font-size: 13px; }
+  .dashboard-v2 .chart-controls .control-action { grid-column: 1 / -1; }
+  .dashboard-v2 .chart-controls .control-action button { width: 100%; }
+  .dashboard-v2 .chart-zoom { padding: 16px 20px 0; font-size: 12px; flex-wrap: wrap; }
+  .dashboard-v2 .chart-plot { padding: 20px 8px 4px 0; }
+  .dashboard-v2 .chart-caption { padding: 12px 20px 20px; }
+  .dashboard-v2 .dashboard-api-notice { width: calc(100% - 32px); margin: 20px auto 0; font-size: 13px; }
+  .dashboard-v2 .readings-dialog-header { padding: 20px; }
+  .dashboard-v2 .readings-dialog-footer { padding: 12px 20px; flex-wrap: wrap; }
+}
