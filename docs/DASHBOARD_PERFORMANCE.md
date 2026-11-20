@@ -2,7 +2,8 @@
 
 The Conditions cards read individual Silver observations. The builder prepares
 recent rows and default hourly sample means using the API's own readers.
-Non-default queries and cache misses can still compute results on request.
+Custom chart queries and chart-cache misses can still compute results on request.
+Observation pages use a chronological chunk index prepared by the builder.
 Loading a page does not trigger a Silver rebuild or change instrument readings.
 
 ## Loading behavior
@@ -15,13 +16,23 @@ cancellation prevent an older refresh replacing a newer one.
 
 ## API work and response reuse
 
-Previously, even a `limit=1` request downloaded the full consolidated CSV, parsed
-every timestamp and sorted all valid records. The reader now resolves column
-indexes once and keeps a bounded chronological selection for small pages. It
-still examines every timestamp, including out-of-order records and ties. SMPS
-slash dates keep their established day-first parsing and legacy fallback.
+Observation requests check the Silver ETag and read a compact chronological index.
+The index identifies immutable, compressed chunks of at most 1,024 rows and about
+512 KiB before compression. Page reads skip complete chunks using counts; date
+filters skip chunks outside the requested interval. Only boundary chunks need
+row-level filtering. Row identities, source offsets, timestamp rules and original
+numeric strings match the direct Silver reader. Counting a complete chunk uses
+metadata alone. Flags and corrections are joined from their current objects.
 
-The API caches small response bodies, with these boundaries:
+The builder publishes the index manifest after all chunks succeed. A missing,
+outdated or damaged index returns a retryable 503; a page request never downloads
+Silver to rebuild it. The next scheduled build repairs failed publications. This
+avoids the former 9–18 second pagination/filter scans observed in live logs.
+Authorization and quotas still run before any index access. Old unreferenced
+content-addressed chunks are not read; cache storage cleanup can reclaim those
+objects separately, preserving all chunks referenced by the current manifest.
+
+The chart API also caches small response bodies, with these boundaries:
 
 - Every reuse requires the current Silver object's S3 ETag. Conditional reads
   associate newly computed results with the version that was checked.
@@ -39,14 +50,14 @@ The API caches small response bodies, with these boundaries:
 
 The scheduled Silver build now publishes these versioned views, moving normal
 default-view computation off the visitor's request path. Publication failures,
-review changes or non-default queries can still require an accurate source
-scan. Scientific transforms and aggregation arithmetic remain unchanged.
+custom chart queries can still require an accurate source scan. Scientific
+transforms and aggregation arithmetic remain unchanged.
 
 Refresh indicators cover the readings, upload widget and applied chart query.
 Conditions polls every five minutes while visible, pauses in hidden tabs, and
 checks again on return. Observations refresh fetches only its active query.
 Previously loaded rows remain visible while that query refreshes. Date-filtered
-and subsequent pages still run the exact Silver query.
+and subsequent observation pages read the index rather than the Silver CSV.
 
 Record review reads a versioned snapshot of 50 Silver row IDs, timestamps and
 primary measurements, then applies current flags and corrections. Tim can use

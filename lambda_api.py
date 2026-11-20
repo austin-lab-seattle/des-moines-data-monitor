@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 
 import boto3
 import api_usage
+import observation_index
+import sys
 
 s3_client = boto3.client("s3")
 dynamodb_client = boto3.client("dynamodb")
@@ -100,6 +102,7 @@ REVIEW_SNAPSHOT_MAX_BYTES = 64 * 1024
 EXPLORER_PAGE_SIZE = 100
 EXPLORER_CACHE_MAX_BYTES = 2 * 1024 * 1024
 SILVER_VIEW_CODE_VERSION = hashlib.sha256(Path(__file__).read_bytes()
+    + Path(observation_index.__file__).read_bytes()
     + os.environ.get("DATA_TIMEZONE", "America/Los_Angeles").encode()).hexdigest()
 
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("DATA_TIMEZONE", "America/Los_Angeles"))
@@ -1333,32 +1336,33 @@ def parse_silver_records(instrument_id, start_raw=None, end_raw=None, limit=100,
 
     for timestamp_compare, source_index, raw_line, fields, timestamp_raw in source_rows[cursor:]:
 
-        values = {
-            columns[index] if index < len(columns) else f"column_{index + 1}": value
-            for index, value in enumerate(fields)
-        }
-        row = {
-            "row_key": make_row_key(instrument_id, timestamp_raw, raw_line),
-            "source_index": source_index,
-            "timestamp": timestamp_raw,
-            "timestamp_iso": timestamp_compare.replace(tzinfo=timezone.utc).isoformat(),
-            "timestamp_compare": timestamp_compare,
-            "values": values,
-            "raw": raw_line,
-        }
-        row_flags = [item for item in flags if review_item_applies_to_row(item, row)]
-        row_corrections = [item for item in corrections if review_item_applies_to_row(item, row)]
-        row["flags"] = row_flags
-        row["corrections"] = row_corrections
-        row["status"] = review_status(row_flags, row_corrections)
-        del row["timestamp_compare"]
-        rows.append(row)
+        rows.append(annotated_silver_record(instrument_id, columns, fields, source_index,
+                                            raw_line, timestamp_raw, timestamp_compare, flags, corrections))
 
         if len(rows) >= limit:
             break
 
     next_cursor = cursor + len(rows) if cursor + len(rows) < valid_count else None
     return columns, rows, next_cursor, len(flags) + len(corrections)
+
+
+def annotated_silver_record(instrument, columns, fields, source_index, raw, timestamp, moment, flags, corrections):
+    row = {"row_key": make_row_key(instrument, timestamp, raw), "source_index": source_index,
+           "timestamp": timestamp, "timestamp_iso": moment.replace(tzinfo=timezone.utc).isoformat(),
+           "timestamp_compare": moment, "values": dict(zip(columns, fields)), "raw": raw}
+    row["flags"] = [item for item in flags if review_item_applies_to_row(item, row)]
+    row["corrections"] = [item for item in corrections if review_item_applies_to_row(item, row)]
+    row["status"] = review_status(row["flags"], row["corrections"])
+    del row["timestamp_compare"]
+    return row
+
+
+def publish_observation_index(instrument, silver_text, etag):
+    observation_index.publish(sys.modules[__name__], instrument, silver_text, etag)
+
+
+def get_observation_page(event):
+    return observation_index.read(sys.modules[__name__], event)
 
 
 def count_silver_records(instrument_id, start_raw=None, end_raw=None):
@@ -2216,7 +2220,7 @@ def _remember_silver_view(key, result):
         _silver_view_cache.popitem(last=False)
 
 
-def publish_dashboard_views(instrument, silver_text, etag):
+def publish_dashboard_views(instrument, silver_text, etag, *, publish_index=True):
     """Prepare the exact API responses in the builder, using the same readers.
 
     Review fingerprints and source/code versions retain normal invalidation.
@@ -2252,6 +2256,8 @@ def publish_dashboard_views(instrument, silver_text, etag):
                         json.loads(default["body"]).get("measurement"), detail)
     if recent["statusCode"] == 200:
         publish_review_snapshot(instrument, etag, rows[:REVIEW_LATEST_LIMIT])
+    if publish_index:
+        publish_observation_index(instrument, silver_text, etag)
     return published
 
 
@@ -2847,7 +2853,7 @@ def _dispatch_request(event, context):
         if auth_response:
             return auth_response
         result = (get_latest_review_records(event) if query_params(event).get("view") == "latest-review"
-                  else get_silver_records(event))
+                  else get_observation_page(event))
         if result.get("statusCode") == 200:
             payload = json.loads(result["body"])
             payload["viewer"] = {"email": identity["email"], "roles": sorted(identity["roles"])}
@@ -2894,7 +2900,7 @@ def _dispatch_request(event, context):
 
     if route_matches(path, KEYED_API_ROUTES["observations"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations"], force=True)
-        return auth_response or get_cached_silver_view(event, "records")
+        return auth_response or get_observation_page(event)
 
     if route_matches(path, KEYED_API_ROUTES["summary"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["summary"], force=True)
@@ -2927,7 +2933,7 @@ def _dispatch_request(event, context):
         auth_response = require_public_api_access(event, READ_SCOPES["observations"])
         if auth_response:
             return auth_response
-        return get_cached_silver_view(event, "records")
+        return get_observation_page(event)
 
     if route_matches(path, API_ROUTES["flights"]) and method == "GET":
         return get_flights(event)

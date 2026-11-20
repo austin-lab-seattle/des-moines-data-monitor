@@ -89,6 +89,19 @@ class PipelineSnapshotsTests(unittest.TestCase):
         self.assertFalse(any('/bronze/' in key for key in self.s3.gets))
         self.assertFalse(any('/silver/' in key for key in self.s3.puts))
 
+    def test_chunks_are_prepared_before_silver_changes_and_manifest_commits_next(self):
+        builder.build_instrument('NO2-CAPS')
+        writes = self.s3.puts
+        silver_position = writes.index('NO2-CAPS/silver/NO2-CAPS_data.csv')
+        self.assertTrue(any('/chunks/' in key for key in writes[:silver_position]))
+        self.assertEqual('_observations/v1/NO2-CAPS/index.json', writes[silver_position + 1])
+        old_silver = self.s3.objects['NO2-CAPS/silver/NO2-CAPS_data.csv']['Body']
+        self.source('c', [7])
+        with mock.patch.object(api.observation_index, 'publish', side_effect=RuntimeError('chunk upload failed')):
+            with self.assertRaises(RuntimeError):
+                builder.build_instrument('NO2-CAPS')
+        self.assertEqual(old_silver, self.s3.objects['NO2-CAPS/silver/NO2-CAPS_data.csv']['Body'])
+
     def test_new_changed_deleted_and_late_rows_match_original_full_consolidation(self):
         builder.build_instrument('NO2-CAPS')
         self.source('c', [0, 9])
@@ -291,6 +304,14 @@ class PipelineSnapshotsTests(unittest.TestCase):
                 key = f'{instrument}/silver/{instrument}_data.csv'
                 etag = self.s3.put_object(Bucket=api.BUCKET, Key=key, Body=silver)['ETag']
                 api.publish_dashboard_views(instrument, silver, etag)
+                for order in ('asc', 'desc'):
+                    params = {'instrument': instrument, 'order': order, 'limit': '1', 'cursor': '1'}
+                    expected = api.get_silver_records({'queryStringParameters': params}, silver_text=silver,
+                                                      review_items=([], []))
+                    self.s3.gets.clear()
+                    actual = api.get_observation_page({'queryStringParameters': params})
+                    self.assertEqual(json.loads(expected['body']), json.loads(actual['body']))
+                    self.assertNotIn(key, self.s3.gets)
                 api._silver_view_cache.clear()
                 with mock.patch.object(api, 'get_silver_text', side_effect=AssertionError('Gold must serve this request')):
                     result = api.get_cached_silver_view({'queryStringParameters': {
