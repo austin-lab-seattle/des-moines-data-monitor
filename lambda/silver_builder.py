@@ -726,6 +726,7 @@ def consolidate(instrument_id, ordered_texts):
 
 
 def write_silver(instrument_id, header, data_rows, metadata, stats):
+    import lambda_api as api
     data_body = ""
     if header:
         data_body += header + "\n"
@@ -746,12 +747,17 @@ def write_silver(instrument_id, header, data_rows, metadata, stats):
     ] + metadata
     meta_body = "\n".join(meta_lines) + "\n"
 
+    # Finish expensive sorting/chunk uploads while the previous Silver and
+    # index still match. The new manifest commits immediately after Silver,
+    # rather than leaving page requests waiting for all Gold computations.
+    prepared_index = api.observation_index.publish(api, instrument_id, data_body, None, defer_manifest=True)
     uploaded = s3_client.put_object(
         Bucket=BUCKET,
         Key=f"{instrument_id}/silver/{instrument_id}_data.csv",
         Body=data_body.encode("utf-8"),
         ContentType="text/csv; charset=utf-8",
     )
+    api.observation_index.commit(api, instrument_id, prepared_index, uploaded["ETag"])
     s3_client.put_object(
         Bucket=BUCKET,
         Key=f"{instrument_id}/silver/{instrument_id}_metadata.txt",
@@ -812,7 +818,7 @@ def build_instrument(instrument_id):
         silver_text, silver_etag = write_silver(instrument_id, header, rows, metadata, stats)
         result.update(rows=total, unique=len(rows), duplicates=duplicates, schema_mismatches=mismatches, written=True)
         try:
-            api.publish_dashboard_views(instrument_id, silver_text, silver_etag)
+            api.publish_dashboard_views(instrument_id, silver_text, silver_etag, publish_index=False)
             views_version = api.SILVER_VIEW_CODE_VERSION
         except Exception as exc:
             print(f"Dashboard view publication failed for {instrument_id}: {exc}")
