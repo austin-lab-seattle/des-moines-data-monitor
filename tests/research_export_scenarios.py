@@ -7,6 +7,7 @@ import os
 import sys
 import base64
 import contextlib
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -193,6 +194,17 @@ class ResearchExportsTests(unittest.TestCase):
             self.assertEqual(429, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
         self.groups.admin_get_user.side_effect = ClientError({'Error': {'Code': 'UserNotFoundException'}}, 'AdminGetUser')
         self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+
+    def test_signed_storage_urls_use_the_regional_host_without_redirect(self):
+        client = research.create_s3_client()
+        url = client.generate_presigned_url('get_object', Params={
+            'Bucket': 'research-test-private', 'Key': 'exports/snapshot.csv.gz'}, ExpiresIn=300)
+        parsed = urllib.parse.urlsplit(url)
+        self.assertEqual('research-test-private.s3.us-west-2.amazonaws.com', parsed.hostname)
+        params = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(['300'], params['X-Amz-Expires'])
+        self.assertEqual(['AWS4-HMAC-SHA256'], params['X-Amz-Algorithm'])
+        self.assertIn('/us-west-2/s3/', params['X-Amz-Credential'][0])
 
     def test_private_state_access_denial_is_not_treated_as_a_missing_record(self):
         self.key_setup()

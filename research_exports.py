@@ -38,7 +38,14 @@ ANNOTATIONS = ['_research_row_key', '_research_timestamp_utc', '_research_status
                '_research_flags', '_research_corrections']
 cognito = boto3.client('cognito-idp')
 lambda_client = boto3.client('lambda')
-api.s3_client = boto3.client('s3', config=Config(signature_version='s3v4'))
+def create_s3_client():
+    region = os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
+    # Signed URLs cannot be re-signed after a global-to-regional S3 redirect.
+    return boto3.client('s3', region_name=region, endpoint_url=f'https://s3.{region}.amazonaws.com',
+                        config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}))
+
+
+api.s3_client = create_s3_client()
 store = ResearchState(lambda: api.s3_client, lambda: EXPORT_BUCKET)
 
 

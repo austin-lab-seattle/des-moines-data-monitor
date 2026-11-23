@@ -20,7 +20,7 @@ from scripts.aws.deploy_research_exports import session
 from scripts.research.download_data import request, save_download
 
 
-def run(aws, email, actor_email, instrument, include_flagged=False):
+def run(aws, email, actor_email, instrument, include_flagged=False, job_id=None):
     caller = aws.client('sts').get_caller_identity()
     lam = aws.client('lambda')
     def admin(operation, **options):
@@ -55,9 +55,10 @@ def run(aws, email, actor_email, instrument, include_flagged=False):
         assert access.get('enabled') is True
         print('Gateway accepted the scoped key and current research approval.', flush=True)
         body = {'instrument': instrument, 'include_flagged': include_flagged}
-        job = request(raw, '/exports', body, api_key=True)
+        job = request(raw, f'/exports/{job_id}', api_key=True) if job_id else request(raw, '/exports', body, api_key=True)
+        assert job['spec']['instrument'] == instrument and job['spec']['include_flagged'] is include_flagged
         assert job['spec']['start'] is None and job['spec']['end'] is None
-        print(f'Full-history {instrument} job accepted; CSV preparation runs in AWS.', flush=True)
+        print(f'Full-history {instrument} job {"resumed" if job_id else "accepted"}; CSV preparation runs in AWS.', flush=True)
         deadline = time.monotonic() + min(720, created['expires_at'] - time.time() - 60)
         previous_state, last_notice = None, time.monotonic()
         while time.monotonic() < deadline:
@@ -124,11 +125,12 @@ def main():
     parser.add_argument('--actor-email', required=True)
     parser.add_argument('--instrument', choices=['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'], default='NO2-CAPS')
     parser.add_argument('--include-flagged', action='store_true')
+    parser.add_argument('--job-id', help='Resume a prepared full-history job owned by this account')
     args = parser.parse_args()
     aws = session(args.aws_creds_file)
     if aws.client('sts').get_caller_identity()['Account'] != args.expected_account:
         raise RuntimeError('Account mismatch; no test key created')
-    run(aws, args.email, args.actor_email, args.instrument, args.include_flagged)
+    run(aws, args.email, args.actor_email, args.instrument, args.include_flagged, args.job_id)
 
 
 if __name__ == '__main__':
