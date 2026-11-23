@@ -130,8 +130,10 @@ def main():
     ]}
     s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps(bucket_policy))
     s3.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={'Rules': [
-        {'ID': 'expire-generated-exports', 'Status': 'Enabled', 'Filter': {'Prefix': ''},
-         'Expiration': {'Days': 1}, 'AbortIncompleteMultipartUpload': {'DaysAfterInitiation': 1}}]})
+        {'ID': 'expire-' + prefix.rstrip('/'), 'Status': 'Enabled', 'Filter': {'Prefix': prefix},
+         'Expiration': {'Days': days}, 'AbortIncompleteMultipartUpload': {'DaysAfterInitiation': 1}}
+        for prefix, days in [('exports/', 1), ('requests/', 1), ('state/', 1), ('audit/', 365)]
+    ]})
     cognito = aws.client('cognito-idp')
     try:
         cognito.get_group(UserPoolId=POOL, GroupName='ResearchExporter')

@@ -2,12 +2,38 @@
 import argparse
 import json
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from scripts.aws.deploy_research_exports import session, POOL
 import lambda_api as api
+
+
+def change_membership(cognito, s3, bucket, user, actor, email, revoke=False):
+    """Record intent before mutation and retain an independent final result."""
+    audit_id = str(uuid.uuid4())
+    prefix = f'audit/research-access/{audit_id}/'
+    event = {'audit_id': audit_id, 'actor': actor, 'email': email,
+        'action': 'REVOKE_RESEARCH_ACCESS' if revoke else 'GRANT_RESEARCH_ACCESS',
+        'role': 'ResearchExporter', 'user_pool': POOL,
+        'created_at': datetime.now(timezone.utc).isoformat()}
+    def record(name, result):
+        s3.put_object(Bucket=bucket, Key=prefix + name + '.json',
+            Body=json.dumps({**event, 'result': result,
+                'recorded_at': datetime.now(timezone.utc).isoformat()}).encode(),
+            ContentType='application/json', CacheControl='no-store', IfNoneMatch='*')
+    record('requested', 'PENDING')  # Fail closed if durable audit is unavailable.
+    try:
+        operation = cognito.admin_remove_user_from_group if revoke else cognito.admin_add_user_to_group
+        operation(UserPoolId=POOL, Username=user['Username'], GroupName='ResearchExporter')
+    except Exception:
+        record('completed', 'FAILED')
+        raise
+    record('completed', 'SUCCEEDED')
+    return audit_id
 
 
 def main():
@@ -37,19 +63,10 @@ def main():
                       'apply': args.apply, 'messages_sent': False}), flush=True)
     if not args.apply:
         return
-    api.dynamodb_client = aws.client('dynamodb')
-    audit = api.begin_audit_event({'subject': caller['Arn'], 'email': actor_email}, action, email,
-                                  {'role': 'ResearchExporter', 'user_pool': POOL})
-    if not audit:
-        raise RuntimeError('Audit could not be recorded; access was not changed')
-    try:
-        operation = cognito.admin_remove_user_from_group if args.revoke else cognito.admin_add_user_to_group
-        operation(UserPoolId=POOL, Username=user['Username'], GroupName='ResearchExporter')
-        api.finish_audit_event(audit, 'SUCCEEDED')
-    except Exception:
-        api.finish_audit_event(audit, 'FAILED', 'Research membership update failed')
-        raise
-    print(json.dumps({'updated': True, 'email': email, 'messages_sent': False}), flush=True)
+    bucket = f'des-moines-research-{caller["Account"]}-us-west-2'
+    audit_id = change_membership(cognito, aws.client('s3'), bucket, user,
+        {'arn': caller['Arn'], 'email': actor_email}, email, args.revoke)
+    print(json.dumps({'updated': True, 'email': email, 'audit_id': audit_id, 'messages_sent': False}), flush=True)
 
 
 if __name__ == '__main__':
