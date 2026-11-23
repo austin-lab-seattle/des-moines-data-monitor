@@ -1,4 +1,4 @@
-"""Download an approved research export with team sign-in; no public API key.
+"""Download a research export using an approved API key or team sign-in.
 
 Uses the existing public OAuth client with PKCE and its registered loopback
 callback. Tokens stay in memory. Run this helper yourself to complete MFA.
@@ -22,6 +22,7 @@ AUTHORITY = 'https://cognito-idp.us-west-2.amazonaws.com/us-west-2_oR7CIzxQG'
 HOSTED = 'https://des-moines-air-team-213598695875.auth.us-west-2.amazoncognito.com'
 CALLBACK = 'http://127.0.0.1:5173/team'
 BASE = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/internal/v1/research'
+KEY_BASE = 'https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/keyed/research'
 
 
 def url64(value):
@@ -80,11 +81,17 @@ def sign_in():
     return token
 
 
-def request(token, path, body=None):
+class NoApiRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RuntimeError('Authenticated API requests must not redirect.')
+
+
+def request(token, path, body=None, *, api_key=False):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data,
-        headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=30) as response:
+    headers = {'x-api-key': token} if api_key else {'Authorization': f'Bearer {token}'}
+    req = urllib.request.Request((KEY_BASE if api_key else BASE) + path, data=data,
+        headers={**headers, 'Content-Type': 'application/json'})
+    with urllib.request.build_opener(NoApiRedirect).open(req, timeout=30) as response:
         return json.load(response)
 
 
@@ -114,6 +121,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--instrument', required=True, choices=['BC-MA200', 'CO2-LICOR', 'NEPH-PM25', 'NO2-CAPS', 'SMPS'])
     parser.add_argument('--include-flagged', action='store_true')
+    parser.add_argument('--auth', choices=['auto', 'api-key', 'team'], default='auto',
+                        help='auto uses AQ_API_KEY when set; api-key never opens a browser')
     parser.add_argument('--start')
     parser.add_argument('--end')
     parser.add_argument('--output', type=Path)
@@ -122,18 +131,22 @@ def main():
     destination = args.output or Path(f'{args.instrument}_research.csv.gz')
     if destination.exists() and not args.overwrite:
         parser.error('Output already exists. Choose another filename or explicitly use --overwrite.')
-    token = os.environ.get('AQ_TEAM_ID_TOKEN') or sign_in()
+    key = os.environ.get('AQ_API_KEY', '').strip()
+    use_key = args.auth != 'team' and bool(key)
+    if args.auth == 'api-key' and not use_key:
+        parser.error('Set AQ_API_KEY to your approved research key. Do not pass the key on the command line.')
+    token = key if use_key else os.environ.get('AQ_TEAM_ID_TOKEN') or sign_in()
     body = {'instrument': args.instrument, 'include_flagged': args.include_flagged}
     if args.start:
         body['start'] = args.start
     if args.end:
         body['end'] = args.end
-    job = request(token, '/exports', body)
+    job = request(token, '/exports', body, api_key=use_key)
     deadline = time.monotonic() + 1200
     while time.monotonic() < deadline:
-        status = request(token, f'/exports/{job["job_id"]}')
+        status = request(token, f'/exports/{job["job_id"]}', api_key=use_key)
         if status['state'] == 'READY':
-            result = request(token, f'/exports/{job["job_id"]}/download')
+            result = request(token, f'/exports/{job["job_id"]}/download', api_key=use_key)
             if result.get('state') != 'READY' or not result.get('url'):
                 raise RuntimeError('The research snapshot changed. Prepare a new export.')
             save_download(result, destination)

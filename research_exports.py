@@ -23,6 +23,7 @@ from botocore.config import Config
 
 import lambda_api as api
 import observation_index as index
+import research_keys
 from research_state import ResearchState, Conflict, RateExceeded
 
 ROOT = '/air-quality/internal/v1/research'
@@ -48,7 +49,7 @@ def utc_now():
 def reply(status, body):
     body = json.loads(json.dumps(body, default=lambda value: int(value) if isinstance(value, Decimal) else str(value)))
     result = api.response(status, body, {'Cache-Control': 'private, no-store'})
-    # A bearer token is required, regardless of browser origin.
+    # A verified credential is required, regardless of browser origin.
     result['headers'].pop('Access-Control-Allow-Origin', None)
     return result
 
@@ -60,9 +61,14 @@ def identity(event):
     if not subject or not email or str(claims.get('email_verified')).lower() != 'true':
         return None, reply(401, {'error': 'Sign in with your verified team account.'})
     username = claims.get('cognito:username') or subject
+    groups = groups_for(username)
+    if not groups.intersection(TEAM_GROUPS):
+        return None, reply(403, {'error': 'An invited team account is required.'})
+    return {'subject': subject, 'email': email, 'roles': sorted(groups & TEAM_GROUPS)}, None
+
+
+def groups_for(username):
     groups, token = set(), None
-    # Check live membership so granting or revoking access takes effect without
-    # trusting an old token's groups or requiring an awkward re-login.
     while True:
         args = {'UserPoolId': POOL, 'Username': username, 'Limit': 60}
         if token:
@@ -71,10 +77,7 @@ def identity(event):
         groups.update(group['GroupName'] for group in result.get('Groups', []))
         token = result.get('NextToken')
         if not token:
-            break
-    if not groups.intersection(TEAM_GROUPS):
-        return None, reply(403, {'error': 'An invited team account is required.'})
-    return {'subject': subject, 'email': email, 'roles': sorted(groups & TEAM_GROUPS)}, None
+            return groups
 
 
 def review_snapshot(instrument):
@@ -179,6 +182,8 @@ def create_export(event, user):
     job = {'job_id': job_id, 'kind': 'request', 'owner': user['subject'], 'requested_by': user['email'],
            'dataset_id': dataset_id, 'created_at': utc_now(), 'expires_at': int(dataset['expires_at']),
            'spec': spec}
+    if user.get('key_id'):
+        job['requested_via_key'] = user['key_id']
     store.add_job(job)
     return reply(202, {**job_result(job), 'instrument': instrument,
                       'include_flagged': spec['include_flagged'], 'created_at': job['created_at'],
@@ -221,12 +226,15 @@ def job_result(job, download=False):
     return payload
 
 
-def lambda_handler(event, context):
+def _dispatch(event, context):
     try:
-        user, denied = identity(event)
+        method, path = api.get_route(event)
+        keyed = path == research_keys.ROOT or path.startswith(research_keys.ROOT + '/')
+        user, denied = research_keys.authenticate(event, cognito, groups_for) if keyed else identity(event)
         if denied:
             return denied
-        method, path = api.get_route(event)
+        if keyed:
+            path = ROOT + path[len(research_keys.ROOT):]
         enabled = ROLE in user['roles']
         if path == f'{ROOT}/access' and method == 'GET':
             return reply(200, {'enabled': enabled, 'role': ROLE, 'contact_email': CONTACT,
@@ -248,6 +256,23 @@ def lambda_handler(event, context):
         # Neither provider errors nor signed URLs belong in public error text.
         print(json.dumps({'event': 'research_request_failed', 'type': type(exc).__name__}))
         return reply(503, {'error': 'Research exports are temporarily unavailable. Please retry.'})
+
+
+def lambda_handler(event, context):
+    result = _dispatch(event, context)
+    usage = event.pop('_api_usage', None)
+    if usage:
+        try:
+            payload = json.loads(result.get('body') or '{}')
+            generated = {'bytes': payload['bytes'], 'rows': payload['rows']} if payload.get('url') else None
+            request_id = event.get('requestContext', {}).get('requestId') or getattr(context, 'aws_request_id', None) or str(uuid.uuid4())
+            api.api_usage.record_usage(api.dynamodb_client, api.RATE_LIMITS_TABLE, usage, request_id,
+                result['statusCode'], export=generated, at=datetime.fromisoformat(usage['at']))
+            result['headers']['X-API-Usage-Recorded'] = 'yes'
+        except Exception:
+            print(json.dumps({'event': 'research_usage_accounting_failed'}))
+            return reply(503, {'error': 'Research usage accounting is temporarily unavailable. Please retry.'})
+    return result
 
 
 def clean_annotations(items):

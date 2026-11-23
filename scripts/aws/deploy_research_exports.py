@@ -16,6 +16,8 @@ from botocore.exceptions import ClientError
 ROOT = Path(__file__).resolve().parents[2]
 REGION = 'us-west-2'
 ROLE = 'AQResearchExportRole'
+ADMIN_ROLE = 'AQResearchKeyAdminRole'
+ADMIN_FUNCTION = 'aq-research-key-admin'
 API_FUNCTION = 'aq-research-export-api'
 WORKER = 'aq-research-export-worker'
 POOL = 'us-west-2_oR7CIzxQG'
@@ -26,6 +28,7 @@ ROUTES = ['GET /air-quality/internal/v1/research/access',
           'POST /air-quality/internal/v1/research/exports',
           'GET /air-quality/internal/v1/research/exports/{job_id}',
           'GET /air-quality/internal/v1/research/exports/{job_id}/download']
+KEY_ROUTES = [route.replace('/air-quality/internal/v1/research', '/air-quality/v1/keyed/research') for route in ROUTES]
 
 
 def session(path):
@@ -37,7 +40,7 @@ def session(path):
 def package():
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ['lambda_api.py', 'api_usage.py', 'observation_index.py', 'public_data_policy.py', 'research_exports.py', 'research_state.py']:
+        for name in ['lambda_api.py', 'api_usage.py', 'observation_index.py', 'public_data_policy.py', 'research_exports.py', 'research_state.py', 'research_keys.py', 'research_key_admin.py']:
             bundle.write(ROOT / name, name)
     return out.getvalue()
 
@@ -69,6 +72,15 @@ def main():
     account = caller['Account']
     bucket = f'des-moines-research-{account}-{REGION}'
     role_arn = f'arn:aws:iam::{account}:role/{ROLE}'
+    admin_role_arn = f'arn:aws:iam::{account}:role/{ADMIN_ROLE}'
+    lam = aws.client('lambda')
+    key_config = lam.get_function(FunctionName='aq-dashboard-api')['Configuration'].get('Environment', {}).get('Variables', {})
+    if not key_config.get('API_KEY_HASH_PEPPER'):
+        raise RuntimeError('Existing API key validation must be configured')
+    key_table = key_config.get('API_KEYS_TABLE', 'AQApiKeys')
+    rate_table = key_config.get('RATE_LIMITS_TABLE', 'AQApiRateLimits')
+    key_arn = f'arn:aws:dynamodb:{REGION}:{account}:table/{key_table}'
+    rate_arn = f'arn:aws:dynamodb:{REGION}:{account}:table/{rate_table}'
     gateway = aws.client('apigatewayv2')
     authorizer = next((item for item in gateway.get_authorizers(ApiId=args.api_id).get('Items', [])
                        if item['Name'] == 'UWTeamJwt'), None)
@@ -76,8 +88,8 @@ def main():
         raise RuntimeError('The verified team JWT authorizer is required')
     if authorizer['JwtConfiguration']['Issuer'] != f'https://cognito-idp.{REGION}.amazonaws.com/{POOL}':
         raise RuntimeError('Unexpected team issuer')
-    print(json.dumps({'apply': args.apply, 'bucket': bucket, 'role': ROLE, 'functions': [API_FUNCTION, WORKER],
-                      'routes': ROUTES, 'membership_changes': False, 'messages_sent': False}), flush=True)
+    print(json.dumps({'apply': args.apply, 'bucket': bucket, 'role': ROLE, 'functions': [API_FUNCTION, WORKER, ADMIN_FUNCTION],
+                      'routes': ROUTES + KEY_ROUTES, 'membership_changes': False, 'messages_sent': False}), flush=True)
     if not args.apply:
         return
     iam = aws.client('iam')
@@ -99,11 +111,32 @@ def main():
          'Condition': {'StringLike': {'s3:prefix': [f'{instrument}/{kind}/*' for instrument in INSTRUMENTS for kind in ['flags', 'corrections']]}}},
         {'Effect': 'Allow', 'Action': ['s3:GetObject', 's3:PutObject', 's3:AbortMultipartUpload', 's3:ListMultipartUploadParts'],
          'Resource': [f'arn:aws:s3:::{bucket}/exports/*', f'arn:aws:s3:::{bucket}/requests/*', f'arn:aws:s3:::{bucket}/state/*']},
-        {'Effect': 'Allow', 'Action': ['cognito-idp:AdminListGroupsForUser'],
+        {'Effect': 'Allow', 'Action': ['cognito-idp:AdminListGroupsForUser', 'cognito-idp:AdminGetUser'],
          'Resource': f'arn:aws:cognito-idp:{REGION}:{account}:userpool/{POOL}'},
         {'Effect': 'Allow', 'Action': ['lambda:InvokeFunction'],
          'Resource': f'arn:aws:lambda:{REGION}:{account}:function:{WORKER}'},
     ]}
+    policy['Statement'].extend([
+        {'Effect': 'Allow', 'Action': ['dynamodb:GetItem'], 'Resource': key_arn},
+        {'Effect': 'Allow', 'Action': ['dynamodb:UpdateItem'], 'Resource': key_arn,
+         'Condition': {'ForAllValues:StringEquals': {'dynamodb:Attributes': ['key_id', 'last_used_at', 'last_used_at_epoch']}}},
+        {'Effect': 'Allow', 'Action': ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'], 'Resource': rate_arn},
+    ])
+    try:
+        iam.create_role(RoleName=ADMIN_ROLE, AssumeRolePolicyDocument=json.dumps(trust))
+    except iam.exceptions.EntityAlreadyExistsException:
+        if iam.get_role(RoleName=ADMIN_ROLE)['Role']['AssumeRolePolicyDocument'] != trust:
+            raise RuntimeError('Unexpected operator role trust')
+    admin_policy = {'Version': '2012-10-17', 'Statement': [
+        {'Effect': 'Allow', 'Action': ['dynamodb:Query'], 'Resource': [key_arn, key_arn + '/index/status-created-at-index']},
+        {'Effect': 'Allow', 'Action': ['dynamodb:UpdateItem'], 'Resource': key_arn,
+         'Condition': {'ForAllValues:StringEquals': {'dynamodb:Attributes': ['key_id', 'status', 'email', 'research_subject', 'scopes']}}},
+        {'Effect': 'Allow', 'Action': ['cognito-idp:AdminGetUser', 'cognito-idp:AdminListGroupsForUser'],
+         'Resource': f'arn:aws:cognito-idp:{REGION}:{account}:userpool/{POOL}'},
+        {'Effect': 'Allow', 'Action': ['s3:PutObject'], 'Resource': f'arn:aws:s3:::{bucket}/audit/research-key-access/*'},
+    ]}
+    iam.put_role_policy(RoleName=ADMIN_ROLE, PolicyName='ResearchKeyApprovalOnly', PolicyDocument=json.dumps(admin_policy))
+    iam.attach_role_policy(RoleName=ADMIN_ROLE, PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole')
     iam.put_role_policy(RoleName=ROLE, PolicyName='ResearchExportsOnly', PolicyDocument=json.dumps(policy))
     iam.attach_role_policy(RoleName=ROLE, PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole')
     s3 = aws.client('s3')
@@ -123,7 +156,7 @@ def main():
     bucket_policy = {'Version': '2012-10-17', 'Statement': [
         {'Sid': 'DenyOtherPrincipals', 'Effect': 'Deny', 'Principal': '*', 'Action': 's3:*',
          'Resource': [f'arn:aws:s3:::{bucket}', f'arn:aws:s3:::{bucket}/*'],
-         'Condition': {'ArnNotEquals': {'aws:PrincipalArn': [role_arn, operator, f'arn:aws:iam::{account}:root']}}},
+         'Condition': {'ArnNotEquals': {'aws:PrincipalArn': [role_arn, admin_role_arn, operator, f'arn:aws:iam::{account}:root']}}},
         {'Sid': 'RequireTLS', 'Effect': 'Deny', 'Principal': '*', 'Action': 's3:*',
          'Resource': [f'arn:aws:s3:::{bucket}', f'arn:aws:s3:::{bucket}/*'],
          'Condition': {'Bool': {'aws:SecureTransport': 'false'}}},
@@ -145,25 +178,30 @@ def main():
     environment = {'RESEARCH_EXPORT_BUCKET': bucket,
         'RESEARCH_EXPORT_WORKER': WORKER, 'TEAM_USER_POOL_ID': POOL, 'S3_BUCKET': SOURCE_BUCKET,
         'DATA_TIMEZONE': 'America/Los_Angeles', 'RESEARCH_CONTACT_EMAIL': 'pavands@uw.edu'}
+    api_environment = {**environment, 'API_KEY_HASH_PEPPER': key_config['API_KEY_HASH_PEPPER'],
+                       'API_KEYS_TABLE': key_table, 'RATE_LIMITS_TABLE': rate_table}
     for name, handler, memory, timeout in [(WORKER, 'research_exports.worker_handler', 2048, 900),
-                                          (API_FUNCTION, 'research_exports.lambda_handler', 512, 20)]:
+                                          (API_FUNCTION, 'research_exports.lambda_handler', 512, 20),
+                                          (ADMIN_FUNCTION, 'research_key_admin.lambda_handler', 256, 30)]:
+        function_role = admin_role_arn if name == ADMIN_FUNCTION else role_arn
+        function_environment = api_environment if name == API_FUNCTION else {**environment, 'API_KEYS_TABLE': key_table}
         try:
             current = lam.get_function(FunctionName=name)['Configuration']
         except lam.exceptions.ResourceNotFoundException:
             current = None
         if current:
-            if current['Role'] != role_arn:
+            if current['Role'] != function_role:
                 raise RuntimeError('Existing function uses an unexpected role')
             lam.update_function_code(FunctionName=name, ZipFile=code, RevisionId=current['RevisionId'])
             wait_function(lam, name)
             lam.update_function_configuration(FunctionName=name, Handler=handler, MemorySize=memory,
-                Timeout=timeout, Environment={'Variables': environment})
+                Timeout=timeout, Environment={'Variables': function_environment})
         else:
             for attempt in range(12):
                 try:
-                    lam.create_function(FunctionName=name, Runtime='python3.11', Role=role_arn, Handler=handler,
+                    lam.create_function(FunctionName=name, Runtime='python3.11', Role=function_role, Handler=handler,
                         Code={'ZipFile': code}, Timeout=timeout, MemorySize=memory,
-                        Environment={'Variables': environment})
+                        Environment={'Variables': function_environment})
                     break
                 except lam.exceptions.InvalidParameterValueException:
                     if attempt == 11:
@@ -192,17 +230,29 @@ def main():
         integration = gateway.create_integration(ApiId=args.api_id, IntegrationType='AWS_PROXY',
             IntegrationUri=function_arn, PayloadFormatVersion='2.0', TimeoutInMillis=25000)
     routes = gateway.get_routes(ApiId=args.api_id).get('Items', [])
-    for route in ROUTES:
+    for route in ROUTES + KEY_ROUTES:
         existing = next((item for item in routes if item['RouteKey'] == route), None)
         kwargs = {'ApiId': args.api_id, 'Target': f'integrations/{integration["IntegrationId"]}',
                   'AuthorizationType': 'JWT', 'AuthorizerId': authorizer['AuthorizerId']}
+        if route in KEY_ROUTES:
+            kwargs.update(AuthorizationType='NONE')
+            kwargs.pop('AuthorizerId')
+            if existing and existing.get('AuthorizationType') not in {None, 'NONE'}:
+                raise RuntimeError('Unexpected authorizer on a keyed research route')
         if existing:
             gateway.update_route(RouteId=existing['RouteId'], **kwargs)
         else:
+            if route in KEY_ROUTES:
+                kwargs.pop('AuthorizerId', None)
             gateway.create_route(RouteKey=route, **kwargs)
     try:
         lam.add_permission(FunctionName=API_FUNCTION, StatementId='ResearchGateway', Action='lambda:InvokeFunction',
             Principal='apigateway.amazonaws.com', SourceArn=f'arn:aws:execute-api:{REGION}:{account}:{args.api_id}/*/*/air-quality/internal/v1/research/*')
+    except lam.exceptions.ResourceConflictException:
+        pass
+    try:
+        lam.add_permission(FunctionName=API_FUNCTION, StatementId='ResearchKeyGateway', Action='lambda:InvokeFunction',
+            Principal='apigateway.amazonaws.com', SourceArn=f'arn:aws:execute-api:{REGION}:{account}:{args.api_id}/*/*/air-quality/v1/keyed/research/*')
     except lam.exceptions.ResourceConflictException:
         pass
     print(json.dumps({'research_service_ready': True, 'membership_changes': False, 'messages_sent': False}), flush=True)
