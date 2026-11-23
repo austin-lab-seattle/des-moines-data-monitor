@@ -155,3 +155,17 @@ only its research permission while retaining ordinary public read access. Key
 revocation, scope removal, account disablement, loss of verified identity, and
 ResearchExporter removal all block new export requests and new download links.
 Already issued five-minute links keep their original expiry.
+
+## Live gateway smoke test
+
+Multiple active keys per account are supported. Scopes are granted separately
+per key, and revoking one key leaves the others active.
+
+The IAM operator can run `scripts/aws/smoke_research_gateway.py --help` for a live
+end-to-end check. It creates an audited temporary key for an already-approved
+researcher, requests full history through API Gateway, downloads and verifies the
+CSV, then revokes the test key in `finally` and verifies a 403 response. Existing
+keys are checked before and after. The raw test secret stays in process memory;
+it is never printed, saved or emailed. A fifteen-minute expiry also blocks the
+key if the operator process is interrupted before cleanup. Temporary keys have
+only the research export scope and use a separate key-ID namespace.

@@ -194,6 +194,31 @@ class ResearchExportsTests(unittest.TestCase):
         self.groups.admin_get_user.side_effect = ClientError({'Error': {'Code': 'UserNotFoundException'}}, 'AdminGetUser')
         self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
 
+    def test_multiple_keys_remain_active_while_temporary_key_is_created_expired_and_revoked(self):
+        ddb = self.key_setup()
+        event = {'operation': 'create-test-key', 'email': self.email,
+                 'actor': {'email': 'operator@example.org', 'arn': 'operator-arn'}}
+        created = key_admin.command(event, self.admin_context)
+        self.assertNotEqual(self.key_id, created['key_id'])
+        self.assertTrue(created['key_id'].startswith('smok'))
+        self.assertEqual(2, len(key_admin.active_keys(self.email)))
+        original = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertEqual(self.key_item, original)
+        self.key = created['api_key']
+        self.assertEqual(200, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        ddb.update_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': created['key_id']}},
+            UpdateExpression='SET expires_at = :past', ExpressionAttributeValues={':past': {'N': '1'}})
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.groups.admin_get_user.side_effect = RuntimeError('account no longer accessible')
+        revoked = key_admin.command({**event, 'operation': 'revoke-test-key', 'key_id': created['key_id']}, self.admin_context)
+        self.assertFalse(revoked['active'])
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.assertEqual(1, len(key_admin.active_keys(self.email)))
+        original = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertEqual(self.key_item, original)
+        with self.assertRaises(ValueError):
+            key_admin.command({**event, 'operation': 'revoke-test-key', 'key_id': self.key_id}, self.admin_context)
+
     def test_operator_grants_only_selected_active_key_and_audits_before_mutation(self):
         ddb = self.key_setup()
         event = {'operation': 'plan', 'email': self.email}

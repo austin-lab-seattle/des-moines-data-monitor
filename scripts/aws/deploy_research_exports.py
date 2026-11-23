@@ -135,6 +135,13 @@ def main():
          'Resource': f'arn:aws:cognito-idp:{REGION}:{account}:userpool/{POOL}'},
         {'Effect': 'Allow', 'Action': ['s3:PutObject'], 'Resource': f'arn:aws:s3:::{bucket}/audit/research-key-access/*'},
     ]}
+    admin_policy['Statement'].extend([
+        {'Effect': 'Allow', 'Action': ['dynamodb:PutItem'], 'Resource': key_arn,
+         'Condition': {'ForAllValues:StringLike': {'dynamodb:LeadingKeys': ['smok*']}}},
+        {'Effect': 'Allow', 'Action': ['dynamodb:UpdateItem'], 'Resource': key_arn,
+         'Condition': {'ForAllValues:StringLike': {'dynamodb:LeadingKeys': ['smok*']},
+                       'ForAllValues:StringEquals': {'dynamodb:Attributes': ['key_id', 'status', 'email', 'purpose']}}},
+    ])
     iam.put_role_policy(RoleName=ADMIN_ROLE, PolicyName='ResearchKeyApprovalOnly', PolicyDocument=json.dumps(admin_policy))
     iam.attach_role_policy(RoleName=ADMIN_ROLE, PolicyArn='arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole')
     iam.put_role_policy(RoleName=ROLE, PolicyName='ResearchExportsOnly', PolicyDocument=json.dumps(policy))
@@ -185,6 +192,8 @@ def main():
                                           (ADMIN_FUNCTION, 'research_key_admin.lambda_handler', 256, 30)]:
         function_role = admin_role_arn if name == ADMIN_FUNCTION else role_arn
         function_environment = api_environment if name == API_FUNCTION else {**environment, 'API_KEYS_TABLE': key_table}
+        if name == ADMIN_FUNCTION:
+            function_environment['API_KEY_HASH_PEPPER'] = key_config['API_KEY_HASH_PEPPER']
         try:
             current = lam.get_function(FunctionName=name)['Configuration']
         except lam.exceptions.ResourceNotFoundException:
