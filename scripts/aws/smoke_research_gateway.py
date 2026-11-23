@@ -105,7 +105,9 @@ def run(aws, email, actor_email, instrument, include_flagged=False):
             try:
                 request(raw, '/access', api_key=True)
             except urllib.error.HTTPError as failure:
-                if failure.code != 403:
+                code = failure.code
+                failure.close()
+                if code != 403:
                     raise
             else:
                 raise RuntimeError('Revoked temporary key was unexpectedly accepted')

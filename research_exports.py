@@ -254,7 +254,9 @@ def _dispatch(event, context):
         return reply(404, {'error': 'Route not found.'})
     except Exception as exc:
         # Neither provider errors nor signed URLs belong in public error text.
-        print(json.dumps({'event': 'research_request_failed', 'type': type(exc).__name__}))
+        print(json.dumps({'event': 'research_request_failed', 'type': type(exc).__name__,
+                          'provider_code': getattr(exc, 'response', {}).get('Error', {}).get('Code'),
+                          'operation': getattr(exc, 'operation_name', None)}))
         return reply(503, {'error': 'Research exports are temporarily unavailable. Please retry.'})
 
 

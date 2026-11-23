@@ -109,6 +109,9 @@ def main():
         {'Effect': 'Allow', 'Action': ['s3:GetObject'], 'Resource': resources},
         {'Effect': 'Allow', 'Action': ['s3:ListBucket'], 'Resource': f'arn:aws:s3:::{SOURCE_BUCKET}',
          'Condition': {'StringLike': {'s3:prefix': [f'{instrument}/{kind}/*' for instrument in INSTRUMENTS for kind in ['flags', 'corrections']]}}},
+        # S3 returns 404 for absent job state only when the role can list this bucket.
+        # The service still authorizes every job by account; audit-object reads remain denied.
+        {'Effect': 'Allow', 'Action': ['s3:ListBucket'], 'Resource': f'arn:aws:s3:::{bucket}'},
         {'Effect': 'Allow', 'Action': ['s3:GetObject', 's3:PutObject', 's3:AbortMultipartUpload', 's3:ListMultipartUploadParts'],
          'Resource': [f'arn:aws:s3:::{bucket}/exports/*', f'arn:aws:s3:::{bucket}/requests/*', f'arn:aws:s3:::{bucket}/state/*']},
         {'Effect': 'Allow', 'Action': ['cognito-idp:AdminListGroupsForUser', 'cognito-idp:AdminGetUser'],

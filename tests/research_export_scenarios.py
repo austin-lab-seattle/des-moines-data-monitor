@@ -194,6 +194,18 @@ class ResearchExportsTests(unittest.TestCase):
         self.groups.admin_get_user.side_effect = ClientError({'Error': {'Code': 'UserNotFoundException'}}, 'AdminGetUser')
         self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
 
+    def test_private_state_access_denial_is_not_treated_as_a_missing_record(self):
+        self.key_setup()
+        original = self.s3.get_object
+        def get_object(**options):
+            if options['Key'].startswith('state/'):
+                raise ClientError({'Error': {'Code': 'AccessDenied'}}, 'GetObject')
+            return original(**options)
+        with mock.patch.object(self.s3, 'get_object', side_effect=get_object):
+            result = research.lambda_handler(self.key_event(method='POST', body={'instrument': 'NO2-CAPS'}), None)
+        self.assertEqual(503, result['statusCode'])
+        self.worker.invoke.assert_not_called()
+
     def test_multiple_keys_remain_active_while_temporary_key_is_created_expired_and_revoked(self):
         ddb = self.key_setup()
         event = {'operation': 'create-test-key', 'email': self.email,
