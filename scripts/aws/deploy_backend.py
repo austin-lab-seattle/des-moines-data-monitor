@@ -548,7 +548,8 @@ def create_or_update_lambda(function_name, handler, runtime, zip_bytes, timeout)
 print("\nPackaging the dashboard API Lambda...")
 api_zip_bytes = build_zip_bytes(
     [(REPO_ROOT / "lambda_api.py", "lambda_api.py"), (REPO_ROOT / "api_usage.py", "api_usage.py"),
-     (REPO_ROOT / "observation_index.py", "observation_index.py")],
+     (REPO_ROOT / "observation_index.py", "observation_index.py"),
+     (REPO_ROOT / "public_data_policy.py", "public_data_policy.py")],
 )
 
 api_lambda_arn = create_or_update_lambda(
@@ -562,7 +563,8 @@ api_lambda_arn = create_or_update_lambda(
 silver_zip_bytes = build_zip_bytes(
     [(REPO_ROOT / "lambda" / "silver_builder.py", "silver_builder.py"),
      (REPO_ROOT / "lambda_api.py", "lambda_api.py"), (REPO_ROOT / "api_usage.py", "api_usage.py"),
-     (REPO_ROOT / "observation_index.py", "observation_index.py")],
+     (REPO_ROOT / "observation_index.py", "observation_index.py"),
+     (REPO_ROOT / "public_data_policy.py", "public_data_policy.py")],
 )
 silver_lambda_arn = create_or_update_lambda(
     SILVER_LAMBDA_NAME,

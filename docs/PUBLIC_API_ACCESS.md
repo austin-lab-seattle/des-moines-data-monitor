@@ -11,8 +11,10 @@ https://yvhb48sthk.execute-api.us-west-2.amazonaws.com
 
 ## Access Model
 
-The researcher API is read-only. Each verified user receives a personal API key
-for programmatic access.
+The public researcher API is read-only and limited to the latest 14 days.
+The same history limit applies to dashboard requests without a key and to keyed
+programmatic requests. Public API keys do not grant archive access. Full-history
+research exports require an explicitly approved Team Console account.
 
 To request a key:
 
@@ -105,7 +107,8 @@ GET /air-quality/v1/keyed/timeseries
 
 Returns hourly sample means for one measurement from the cleaned Silver records.
 These are arithmetic means of the finite readings in each UTC bucket, not
-time-weighted averages and not a separately stored Gold dataset. Zero and
+time-weighted averages. Prepared Gold views serve supported measurements and
+resolutions while retaining the same arithmetic. Zero and
 negative readings are retained; blank/non-finite values, malformed rows and
 invalid timestamps are excluded. Empty hours are omitted, never filled with
 made-up readings. Each point includes `n` (its sample count); `v` is rounded to
@@ -135,6 +138,7 @@ Example:
 import os
 import requests
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 API_BASE_URL = "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com"
 HEADERS = {"x-api-key": os.environ["AQ_API_KEY"]}
@@ -223,9 +227,11 @@ GET /air-quality/v1/keyed/observations/export
 ```
 
 Builds a bounded, date-filtered cleaned observation CSV and returns metadata
-plus a short-lived download URL. With no dates it exports the latest 14 days of
-available data. A request can span at most 31 days and contain at most 250,000
-rows. Narrower ranges are required when a high-frequency instrument exceeds
+plus a short-lived download URL. With no dates it exports the current public 14-day window. The window starts
+at the next UTC hour minus 14 days and ends at the current server time; this
+rounding never releases older samples and keeps prepared chart buckets exact.
+Requests for earlier dates are rejected, including requests made with a public
+API key. An export can contain at most 250,000 rows. Narrower ranges are required when a high-frequency instrument exceeds
 the row limit. New CSVs exclude records covered by active review flags, whether
 the flag targets a specific record or a time range. The row count refers to
 rows included in the file. `excluded_flagged` reports how many records in the
@@ -245,6 +251,7 @@ Example:
 import os
 import requests
 import pandas as pd
+from datetime import datetime, timedelta, timezone
 
 API_BASE_URL = "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com"
 HEADERS = {"x-api-key": os.environ["AQ_API_KEY"]}
@@ -253,8 +260,8 @@ response = requests.get(
     f"{API_BASE_URL}/air-quality/v1/keyed/observations/export",
     params={
         "instrument": "SMPS",
-        "start": "2026-09-01T00:00:00-07:00",
-        "end": "2026-09-14T23:59:59-07:00",
+        "start": (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
+        "end": datetime.now(timezone.utc).isoformat(),
     },
     headers=HEADERS,
     timeout=30,

@@ -37,6 +37,7 @@ def prepare(lam, function, source_path, expected_ref, include_api=False):
             raise RuntimeError(f'{function} source differs from the reviewed baseline. Inspect before deploying.')
         replacements = {name: current}
         replacements['observation_index.py'] = (ROOT / 'observation_index.py').read_bytes()
+        replacements['public_data_policy.py'] = (ROOT / 'public_data_policy.py').read_bytes()
         # Both Lambda packages import the same small usage helper through the
         # API reader. No new table, role or environment setting is required.
         usage = ROOT / 'api_usage.py'

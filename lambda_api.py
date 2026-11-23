@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import boto3
 import api_usage
 import observation_index
+import public_data_policy
 import sys
 
 s3_client = boto3.client("s3")
@@ -2892,15 +2893,24 @@ def _dispatch_request(event, context):
 
     if route_matches(path, KEYED_API_ROUTES["timeseries"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"], force=True)
-        return auth_response or get_cached_silver_view(event, "series")
+        if auth_response:
+            return auth_response
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or get_cached_silver_view(bounded, "series")
 
     if route_matches(path, KEYED_API_ROUTES["observations_export"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations_export"], force=True)
-        return auth_response or get_observations_export(event)
+        if auth_response:
+            return auth_response
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or public_data_policy.export_response(sys.modules[__name__], get_observations_export(bounded))
 
     if route_matches(path, KEYED_API_ROUTES["observations"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations"], force=True)
-        return auth_response or get_observation_page(event)
+        if auth_response:
+            return auth_response
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or get_observation_page(bounded)
 
     if route_matches(path, KEYED_API_ROUTES["summary"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["summary"], force=True)
@@ -2921,19 +2931,22 @@ def _dispatch_request(event, context):
         auth_response = require_public_api_access(event, READ_SCOPES["timeseries"])
         if auth_response:
             return auth_response
-        return get_cached_silver_view(event, "series")
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or get_cached_silver_view(bounded, "series")
 
     if route_matches(path, API_ROUTES["observations_export"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations_export"])
         if auth_response:
             return auth_response
-        return get_observations_export(event)
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or public_data_policy.export_response(sys.modules[__name__], get_observations_export(bounded))
 
     if route_matches(path, API_ROUTES["observations"]) and method == "GET":
         auth_response = require_public_api_access(event, READ_SCOPES["observations"])
         if auth_response:
             return auth_response
-        return get_observation_page(event)
+        bounded, denied = public_data_policy.restrict(sys.modules[__name__], event)
+        return denied or get_observation_page(bounded)
 
     if route_matches(path, API_ROUTES["flights"]) and method == "GET":
         return get_flights(event)

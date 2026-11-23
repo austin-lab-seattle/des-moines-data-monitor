@@ -818,8 +818,8 @@ const PUBLIC_ENDPOINTS = [
     apiCall: `curl --fail-with-body -sS -H "x-api-key: $AQ_API_KEY" "${documentedApiUrl(RESEARCH_API_PATHS.observationsExport)}?instrument=SMPS"`,
     params: [
       { name: 'instrument', required: 'Yes', description: 'Instrument ID.' },
-      { name: 'start', required: 'No', description: 'ISO timestamp. Defaults to 14 days before end.' },
-      { name: 'end', required: 'No', description: 'ISO timestamp. Defaults to the latest available observation.' },
+      { name: 'start', required: 'No', description: 'ISO timestamp within the latest 14 days. Defaults to the public window start.' },
+      { name: 'end', required: 'No', description: 'ISO timestamp within the public window. Defaults to now.' },
     ],
     responseFields: ['instrument_id', 'filename', 'rows', 'start', 'end', 'bytes', 'url'],
   },
@@ -851,7 +851,7 @@ response <- GET("${base}${RESEARCH_API_PATHS.observationsExport}?instrument=${in
 stop_for_status(response)
 meta <- fromJSON(content(response, "text", encoding = "UTF-8"))
 
-# 2. Download the cleaned CSV (latest 14 days by default; 31-day maximum)
+# 2. Download the cleaned CSV (public access covers the latest 14 days)
 download.file(meta$url, "${instrument}_observations.csv", mode = "wb")
 df <- read.csv("${instrument}_observations.csv", check.names = FALSE)
 

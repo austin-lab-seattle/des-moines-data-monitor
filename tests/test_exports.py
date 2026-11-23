@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 import unittest
 from unittest import mock
 
@@ -103,6 +104,7 @@ class ExportTests(unittest.TestCase):
         ]
         expected = ("Timestamp,Concentration\n2026-10-28 00:00:00,10.123456789\n2026-10-28 00:30:00,-1.25\n").encode()
         with (mock.patch.object(lambda_api, "get_silver_text", return_value=silver),
+              mock.patch.object(lambda_api.public_data_policy, 'now_utc', return_value=datetime(2026, 10, 29, 12, tzinfo=timezone.utc)),
               mock.patch.object(lambda_api, "require_public_api_access", return_value=None)):
             for path in (lambda_api.API_ROUTES["observations_export"], lambda_api.KEYED_API_ROUTES["observations_export"]):
                 result = lambda_api._dispatch_request({"rawPath": path, "requestContext": {"http": {"method": "GET"}},
@@ -110,6 +112,7 @@ class ExportTests(unittest.TestCase):
                 self.assertEqual(200, result["statusCode"])
                 self.assertEqual(expected, self.s3.puts[-1]["Body"])
                 self.assertEqual(2, json.loads(result["body"])["excluded_flagged"])
+                self.assertEqual(14, json.loads(result['body'])['max_days'])
         self.flags.assert_called_with("NO2-CAPS", "flags", strict=True)
 
     def test_export_does_not_issue_a_link_when_flags_fail_or_change(self):

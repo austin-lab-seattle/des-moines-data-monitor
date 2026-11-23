@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
-import { Activity, ArrowLeft, ArrowRight, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, UsersRound, Wind, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, Download, Flag, KeyRound, LockKeyhole, LogOut, RefreshCw, ShieldCheck, UsersRound, Wind, X } from 'lucide-react';
 import './AccessApproval.css';
 import './TeamLogin.css';
 import './TeamConsole.css';
 import TeamEmailVerification from './TeamEmailVerification.jsx';
 import ApiUsagePanel from './ApiUsagePanel.jsx';
+import ResearchData from './ResearchData.jsx';
 import { formatReadingValue } from './dataPresentation.js';
 import { TEAM_LOGIN_SCOPE, teamEmailVerified } from './teamEmailVerification.js';
 
@@ -36,7 +37,7 @@ export default function TeamConsole() {
     userStore: new WebStorageStateStore({ store: window.sessionStorage }),
   }) : null, []);
   const [user, setUser] = useState(null);
-  const [tab, setTab] = useState('requests');
+  const [tab, setTab] = useState(() => new URLSearchParams(window.location.search).get('view') === 'research' ? 'research' : 'requests');
   const [targetRequest, setTargetRequest] = useState(() => {
     const value = new URLSearchParams(window.location.search).get('request_id');
     return /^[0-9a-f-]{36}$/.test(value || '') ? value : '';
@@ -52,6 +53,7 @@ export default function TeamConsole() {
   const [loading, setLoading] = useState(false);
   const [flagRow, setFlagRow] = useState(null);
   const activeLoad = useRef(null);
+  const navigationTouched = useRef(false);
 
   useEffect(() => {
     if (!manager) return;
@@ -63,7 +65,9 @@ export default function TeamConsole() {
           const target = current?.state?.request_id;
           const valid = /^[0-9a-f-]{36}$/.test(target || '') ? target : '';
           setTargetRequest(valid);
-          window.history.replaceState({}, '', valid ? `/team?request_id=${valid}` : '/team');
+          const researchView = current?.state?.view === 'research';
+          if (researchView) setTab('research');
+          window.history.replaceState({}, '', researchView ? '/team?view=research' : valid ? `/team?request_id=${valid}` : '/team');
         }
         setUser(current && !current.expired ? current : null);
       } catch { setError('Sign-in could not be completed.'); }
@@ -90,8 +94,21 @@ export default function TeamConsole() {
     return payload;
   }, [user]);
 
+  useEffect(() => {
+    if (!user || !teamEmailVerified(user) || targetRequest) return;
+    const controller = new AbortController();
+    apiRequest('/air-quality/internal/v1/research/access', { signal: controller.signal }).then(access => {
+      if (!controller.signal.aborted && !navigationTouched.current && access.enabled) {
+        setTab('research'); setError(''); setLoading(false);
+        window.history.replaceState({}, '', '/team?view=research');
+      }
+    }).catch(() => {}); // Research availability must not block existing team tools.
+    return () => controller.abort();
+  }, [apiRequest, user, targetRequest]);
+
   const load = useCallback(async () => {
     if (!user || !teamEmailVerified(user)) return;
+    if (tab === 'research') return;
     activeLoad.current?.abort();
     const request = new AbortController();
     activeLoad.current = request;
@@ -195,7 +212,7 @@ export default function TeamConsole() {
   };
 
   if (!configured()) return <TeamSetup />;
-  if (!user) return <TeamLogin onLogin={() => manager.signinRedirect({ state: { request_id: targetRequest } })} error={error} />;
+  if (!user) return <TeamLogin onLogin={() => manager.signinRedirect({ state: { request_id: targetRequest, view: tab === 'research' ? 'research' : undefined } })} error={error} />;
   if (!teamEmailVerified(user)) return <TeamEmailVerification authority={AUTHORITY} user={user}
     onSignInAgain={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}
     onSignOut={() => manager.signoutRedirect()}/>;
@@ -219,13 +236,17 @@ export default function TeamConsole() {
           ['requests', KeyRound, 'Access requests', true],
           ['users', UsersRound, 'API users', canManageKeys],
           ['review', Flag, 'Record review', canReview || roles.has('Viewer')],
+          ['research', Download, 'Research data', true],
           ['audit', Activity, 'Audit log', canManageKeys || canReview],
         ].filter(([, , , visible]) => visible).map(([id, Icon, label]) => (
           <button key={id} className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined}
             onClick={() => {
               if (tab === id) return;
+              navigationTouched.current = true;
               setTab(id);
               setData(null);
+              setLoading(false); setError(''); setNotice(''); setAuthDenied(false);
+              window.history.replaceState({}, '', id === 'research' ? '/team?view=research' : targetRequest ? `/team?request_id=${targetRequest}` : '/team');
             }}>
             <Icon size={16} aria-hidden="true"/>{label}
           </button>
@@ -234,15 +255,16 @@ export default function TeamConsole() {
       <main>
         <div className="team-title">
           <div>
-            <h1>{tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1>
+            <h1>{tab === 'research' ? 'Research data' : tab === 'requests' ? 'Access requests' : tab === 'users' ? 'API users' : tab === 'review' ? 'Record review' : 'Audit log'}</h1>
           </div>
           <div className="team-title-actions">
             {tab === 'review' && <select aria-label="Instrument" value={instrument} onChange={(event) => setInstrument(event.target.value)}>{INSTRUMENTS.map(value => <option key={value}>{value}</option>)}</select>}
-            <button onClick={load} disabled={loading} aria-busy={loading}><RefreshCw size={15} className={loading ? 'refresh-spinner' : ''} aria-hidden="true"/> {loading ? 'Refreshing…' : 'Refresh'}</button>
+            {tab !== 'research' && <button onClick={load} disabled={loading} aria-busy={loading}><RefreshCw size={15} className={loading ? 'refresh-spinner' : ''} aria-hidden="true"/> {loading ? 'Refreshing…' : 'Refresh'}</button>}
           </div>
         </div>
         {error && <div role="alert" className="team-message team-error">{error}{tab === 'review' && rows.length > 0 && ' Showing previously loaded records.'}{authDenied && <div className="team-auth-retry"><p>If your roles were recently assigned, refresh your sign-in to obtain current permissions.</p><button onClick={() => manager.signinRedirect({ prompt: 'login', state: { request_id: targetRequest } })}>Refresh sign-in</button></div>}</div>}
         {notice && <div className="team-message team-success">{notice}</div>}
+        {tab === 'research' && <ResearchData apiRequest={apiRequest} onSignInAgain={() => manager.signinRedirect({ prompt: 'login', state: { view: 'research' } })}/>}
         {tab === 'requests' && !error && <section className="team-card"><div className="team-card-intro"><p>Verified requests awaiting a human decision. Keys are issued only after approval and accepted email delivery.</p>{targetRequest && <button className="team-row-button" onClick={() => { setTargetRequest(''); window.history.replaceState({}, '', '/team'); }}>Show all pending requests</button>}</div>
           <div className="team-table-wrap"><table><thead><tr><th>Requester</th><th>Intended use</th><th>Status</th><th>Expires</th><th>Decision</th></tr></thead><tbody>{requests.map(request => <tr key={request.request_id}>
             <td><strong>{request.name}</strong><small>{request.email}</small><small>{request.organization || 'Not provided'}</small></td>
