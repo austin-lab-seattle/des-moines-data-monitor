@@ -91,8 +91,9 @@ downloaded retain their original snapshot content.
 ## Grant or revoke access
 
 The operator script defaults to a read-only plan. It requires the expected AWS
-account, an existing verified account and a recorded audit event before applying
-a membership change. It never sends an email or creates a new login. Use
+account, an existing verified account and a durable private audit record before
+applying a membership change. Access-change audit records are retained for one
+year, separately from the one-day generated exports. It never sends an email or creates a new login. Use
 `scripts/aws/manage_research_access.py --help` for the explicit grant/revoke
 options. Revocation stops new download links immediately; an already issued
 five-minute link retains its original expiry.
