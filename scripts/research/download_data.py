@@ -74,7 +74,8 @@ def sign_in():
     # nonce ties this response to this particular browser login.
     encoded = token.split('.')[1]
     claims = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
-    if claims.get('nonce') != nonce or claims.get('iss') != AUTHORITY or claims.get('aud') != CLIENT:
+    if (claims.get('nonce') != nonce or claims.get('iss') != AUTHORITY or claims.get('aud') != CLIENT
+            or claims.get('token_use') != 'id' or claims.get('exp', 0) <= time.time()):
         raise RuntimeError('The sign-in response does not match this request.')
     return token
 

@@ -16,10 +16,12 @@ import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from botocore.config import Config
 
 import lambda_api as api
 import observation_index as index
@@ -31,12 +33,14 @@ POOL = os.environ.get('TEAM_USER_POOL_ID', 'us-west-2_oR7CIzxQG')
 WORKER = os.environ.get('RESEARCH_EXPORT_WORKER', 'aq-research-export-worker')
 CONTACT = os.environ.get('RESEARCH_CONTACT_EMAIL', 'pavands@uw.edu')
 ROLE = 'ResearchExporter'
+EXPORT_VERSION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 TEAM_GROUPS = api.TEAM_ROLES | {ROLE}
 ANNOTATIONS = ['_research_row_key', '_research_timestamp_utc', '_research_status',
                '_research_flags', '_research_corrections']
 db = boto3.resource('dynamodb').Table(TABLE)
 cognito = boto3.client('cognito-idp')
 lambda_client = boto3.client('lambda')
+api.s3_client = boto3.client('s3', config=Config(signature_version='s3v4'))
 
 
 def utc_now():
@@ -148,7 +152,8 @@ def create_export(event, user):
             or manifest.get('instrument_id') != instrument):
         return reply(409, {'error': 'New readings are being prepared. Please retry shortly.'})
     reviews, revision = review_snapshot(instrument)
-    spec.update(source_etag=etag, reader_version=api.SILVER_VIEW_CODE_VERSION, review_revision=revision)
+    spec.update(source_etag=etag, reader_version=api.SILVER_VIEW_CODE_VERSION,
+                export_version=EXPORT_VERSION, review_revision=revision)
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
     dataset_id = f'dataset#{digest}'
     dataset = get_item(dataset_id)
@@ -284,7 +289,8 @@ def worker_handler(event, context):
         source = private_json(dataset['request_key'])
         spec, manifest = source['spec'], source['manifest']
         instrument = spec['instrument']
-        if (spec != dataset['spec'] or manifest['silver_etag'] != spec['source_etag']
+        if (spec != dataset['spec'] or spec.get('export_version') != EXPORT_VERSION
+                or manifest['silver_etag'] != spec['source_etag']
                 or manifest['version'] != spec['reader_version'] or manifest['instrument_id'] != instrument):
             raise ValueError('Snapshot identity does not match')
         if hashlib.sha256(json.dumps(source['reviews'], sort_keys=True).encode()).hexdigest() != spec['review_revision']:
@@ -351,7 +357,8 @@ def worker_handler(event, context):
                   'columns': len(columns) + len(ANNOTATIONS), 'excluded_flagged': excluded,
                   'included_flagged': included_flagged, 'start': first, 'end': last,
                   'prepared_at': utc_now(), 'review_revision': spec['review_revision'],
-                  'source_etag': spec['source_etag'], 'reader_version': spec['reader_version']}
+                  'source_etag': spec['source_etag'], 'reader_version': spec['reader_version'],
+                  'export_version': spec['export_version']}
         result['sha256'] = checksum.hexdigest()
         db.update_item(Key={'job_id': dataset_id}, UpdateExpression='SET #state = :ready, #result = :result',
             ConditionExpression='#state = :processing', ExpressionAttributeNames={'#state': 'state', '#result': 'result'},
