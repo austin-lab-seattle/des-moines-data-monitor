@@ -42,6 +42,23 @@
 
 .team-brand svg { color: var(--team-accent); }
 .team-brand small { display: block; color: var(--team-muted); font-size: .75rem; font-weight: 400; }
+
+.research-data { display: grid; gap: 20px; }
+.research-access { padding: 20px; display: flex; gap: 16px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.research-access > div { display: flex; align-items: center; gap: 10px; }
+.research-access svg { color: var(--team-accent); }
+.research-access p { flex-basis: 100%; margin: 0; color: var(--team-muted); }
+.research-access a { color: var(--team-accent); }
+.research-form { padding: 24px; }
+.research-form > p { margin: 0 0 20px; color: var(--team-muted); }
+.research-controls { display: flex; gap: 16px; flex-wrap: wrap; }
+.research-controls label { display: grid; gap: 8px; flex: 1 1 180px; }
+.research-controls select, .research-controls input { width: 100%; min-width: 0; border: 1px solid var(--team-control-border); border-radius: 7px; padding: 9px 12px; background: var(--team-panel); color: var(--team-text); }
+.research-flag-option { display: flex; align-items: flex-start; gap: 10px; margin: 22px 0; cursor: pointer; }
+.research-flag-option input { accent-color: var(--team-accent); margin-top: 3px; }
+.research-flag-option small { display: block; margin-top: 4px; color: var(--team-muted); }
+.research-export-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 24px; }
+.research-export-heading h2 { margin: 0; font-size: 1rem; }
 .team-header > div { color: var(--team-muted); font-size: .8125rem; }
 
 .team-layout {
