@@ -69,7 +69,6 @@ export default function TeamConsole() {
           if (researchView) setTab('research');
           window.history.replaceState({}, '', researchView ? '/team?view=research' : valid ? `/team?request_id=${valid}` : '/team');
         }
-        if (!params.has('request_id') && current?.profile?.['cognito:groups']?.includes('ResearchExporter')) setTab('research');
         setUser(current && !current.expired ? current : null);
       } catch { setError('Sign-in could not be completed.'); }
     };
