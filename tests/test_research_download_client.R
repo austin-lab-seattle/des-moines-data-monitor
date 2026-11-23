@@ -16,7 +16,8 @@ test_research_download <- function() {
     invisible(0)
   }
   transport <- function(req) {
-    stopifnot(identical(req$headers[["x-api-key"]], "CI-only-research-key"),
+    stopifnot("x-api-key" %in% names(req$headers),
+              !any(grepl("CI-only-research-key", capture.output(print(req)), fixed = TRUE)),
               startsWith(req$url, "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/keyed/research/"),
               identical(req$options$followlocation, FALSE))
     calls[[length(calls) + 1L]] <<- req

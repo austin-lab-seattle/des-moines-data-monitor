@@ -24,7 +24,7 @@ jobs:
         with:
           use-public-rspm: true
       - name: Install research client dependencies
-        run: Rscript -e 'install.packages(c("httr2", "openssl"))'
+        run: Rscript -e 'install.packages(c("httr2", "openssl", "jsonlite"))'
       - name: Check key-only exports without external requests
         run: Rscript tests/test_research_download_client.R
 

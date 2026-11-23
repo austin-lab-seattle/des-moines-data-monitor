@@ -1,6 +1,6 @@
 # source("scripts/research/download_data.R")
 # Set AQ_API_KEY in your environment, then call download_research_data().
-# Requires httr2 and openssl; never sends the API key to the download host.
+# Requires httr2, openssl and jsonlite; never sends the API key to the download host.
 download_research_data <- function(instrument, include_flagged = FALSE,
                                    start = NULL, end = NULL,
                                    output = paste0(instrument, "_research.csv.gz"),
@@ -14,7 +14,7 @@ download_research_data <- function(instrument, include_flagged = FALSE,
   base <- "https://yvhb48sthk.execute-api.us-west-2.amazonaws.com/air-quality/v1/keyed/research"
   api_request <- function(path, body = NULL) {
     req <- httr2::request(paste0(base, path)) |>
-      httr2::req_headers("x-api-key" = key) |>
+      httr2::req_headers("x-api-key" = key, .redact = "x-api-key") |>
       httr2::req_options(followlocation = FALSE) |>
       httr2::req_timeout(30)
     if (!is.null(body)) req <- httr2::req_body_json(req, body, auto_unbox = TRUE)

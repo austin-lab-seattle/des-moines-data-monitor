@@ -59,7 +59,7 @@ python3 scripts/research/download_data.py --auth api-key --instrument BC-MA200 -
 
 These commands use the key without opening a browser. Both flag settings preserve
 original source values and annotation columns; the default excludes active flags.
-For R, install `httr2` and `openssl` once, then:
+For R, install `httr2`, `openssl`, and `jsonlite` once, then:
 
 ```r
 source("scripts/research/download_data.R")
