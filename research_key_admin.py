@@ -2,6 +2,8 @@
 import json
 import os
 import re
+import secrets
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -48,6 +50,57 @@ def active_keys(email):
             return result
 
 
+def test_key(event, context, email, subject, approved):
+    operation = event['operation']
+    actor = event.get('actor', {})
+    if not api.normalize_email(actor.get('email')) or not actor.get('arn'):
+        raise ValueError('Operator identity is required for the audit')
+    create = operation == 'create-test-key'
+    if create:
+        if not approved or not api.API_KEY_HASH_PEPPER:
+            raise ValueError('Current research approval and key validation are required')
+        key_id = 'smok' + secrets.token_hex(6)
+        raw = f'aqk_{key_id}_{secrets.token_urlsafe(32)}'
+    else:
+        key_id = event.get('key_id', '')
+        if not re.fullmatch('smok[a-f0-9]{12}', key_id):
+            raise ValueError('Only a temporary smoke-test key can be revoked here')
+    audit_id = str(uuid.uuid4())
+    details = {'audit_id': audit_id, 'email': email, 'key_id': key_id,
+        'operation': operation, 'actor': actor, 'scope': SCOPE,
+        'request_id': getattr(context, 'aws_request_id', ''),
+        'created_at': datetime.now(timezone.utc).isoformat()}
+    def audit(suffix, result):
+        s3.put_object(Bucket=os.environ['RESEARCH_EXPORT_BUCKET'],
+            Key=f'audit/research-key-access/{audit_id}/{suffix}.json',
+            Body=json.dumps({**details, 'result': result}).encode(),
+            ContentType='application/json', CacheControl='no-store', IfNoneMatch='*')
+    audit('requested', 'PENDING')
+    try:
+        if create:
+            expires = int(time.time()) + 900
+            api.dynamodb_client.put_item(TableName=api.API_KEYS_TABLE, ConditionExpression='attribute_not_exists(key_id)', Item={
+                'key_id': {'S': key_id}, 'key_hash': {'S': api.key_hash(raw)}, 'status': {'S': 'ACTIVE'},
+                'email': {'S': email}, 'research_subject': {'S': subject}, 'scopes': {'SS': [SCOPE]},
+                'purpose': {'S': 'research-smoke-test'}, 'expires_at': {'N': str(expires)},
+                'created_at': {'S': details['created_at']}, 'created_at_epoch': {'N': str(int(time.time()))}})
+        else:
+            api.dynamodb_client.update_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': key_id}},
+                UpdateExpression='SET #status = :revoked',
+                ConditionExpression='email = :email AND purpose = :purpose',
+                ExpressionAttributeNames={'#status': 'status'}, ExpressionAttributeValues={
+                    ':revoked': {'S': 'REVOKED'}, ':email': {'S': email}, ':purpose': {'S': 'research-smoke-test'}})
+    except Exception:
+        audit('completed', 'FAILED')
+        raise
+    audit('completed', 'SUCCEEDED')
+    result = {'key_id': key_id, 'email': email, 'audit_id': audit_id,
+              'active': create, 'messages_sent': False}
+    if create:
+        result.update(api_key=raw, expires_at=expires)
+    return result
+
+
 def command(event, context):
     # API Gateway proxy events cannot enter the operator command. AWS IAM
     # InvokeFunction permission on this separate, un-routed function is required.
@@ -57,11 +110,13 @@ def command(event, context):
         raise ValueError('Use the authenticated IAM operator command')
     operation = event.get('operation')
     email = api.normalize_email(event.get('email'))
-    if operation not in {'plan', 'grant', 'revoke'} or not email:
+    if operation not in {'plan', 'grant', 'revoke', 'create-test-key', 'revoke-test-key'} or not email:
         raise ValueError('A valid operation and email are required')
-    subject, approved = approved_user(email)
+    subject, approved = ('', False) if operation == 'revoke-test-key' else approved_user(email)
     if operation == 'grant' and not approved:
         raise ValueError('ResearchExporter approval is required before granting key access')
+    if operation in {'create-test-key', 'revoke-test-key'}:
+        return test_key(event, context, email, subject, approved)
     keys = active_keys(email)
     if event.get('key_id'):
         keys = [item for item in keys if api.ddb_string(item, 'key_id') == event['key_id']]

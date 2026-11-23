@@ -7,6 +7,7 @@ import os
 import sys
 import base64
 import contextlib
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -193,6 +194,54 @@ class ResearchExportsTests(unittest.TestCase):
             self.assertEqual(429, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
         self.groups.admin_get_user.side_effect = ClientError({'Error': {'Code': 'UserNotFoundException'}}, 'AdminGetUser')
         self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+
+    def test_signed_storage_urls_use_the_regional_host_without_redirect(self):
+        client = research.create_s3_client()
+        url = client.generate_presigned_url('get_object', Params={
+            'Bucket': 'research-test-private', 'Key': 'exports/snapshot.csv.gz'}, ExpiresIn=300)
+        parsed = urllib.parse.urlsplit(url)
+        self.assertEqual('research-test-private.s3.us-west-2.amazonaws.com', parsed.hostname)
+        params = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(['300'], params['X-Amz-Expires'])
+        self.assertEqual(['AWS4-HMAC-SHA256'], params['X-Amz-Algorithm'])
+        self.assertIn('/us-west-2/s3/', params['X-Amz-Credential'][0])
+
+    def test_private_state_access_denial_is_not_treated_as_a_missing_record(self):
+        self.key_setup()
+        original = self.s3.get_object
+        def get_object(**options):
+            if options['Key'].startswith('state/'):
+                raise ClientError({'Error': {'Code': 'AccessDenied'}}, 'GetObject')
+            return original(**options)
+        with mock.patch.object(self.s3, 'get_object', side_effect=get_object):
+            result = research.lambda_handler(self.key_event(method='POST', body={'instrument': 'NO2-CAPS'}), None)
+        self.assertEqual(503, result['statusCode'])
+        self.worker.invoke.assert_not_called()
+
+    def test_multiple_keys_remain_active_while_temporary_key_is_created_expired_and_revoked(self):
+        ddb = self.key_setup()
+        event = {'operation': 'create-test-key', 'email': self.email,
+                 'actor': {'email': 'operator@example.org', 'arn': 'operator-arn'}}
+        created = key_admin.command(event, self.admin_context)
+        self.assertNotEqual(self.key_id, created['key_id'])
+        self.assertTrue(created['key_id'].startswith('smok'))
+        self.assertEqual(2, len(key_admin.active_keys(self.email)))
+        original = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertEqual(self.key_item, original)
+        self.key = created['api_key']
+        self.assertEqual(200, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        ddb.update_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': created['key_id']}},
+            UpdateExpression='SET expires_at = :past', ExpressionAttributeValues={':past': {'N': '1'}})
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.groups.admin_get_user.side_effect = RuntimeError('account no longer accessible')
+        revoked = key_admin.command({**event, 'operation': 'revoke-test-key', 'key_id': created['key_id']}, self.admin_context)
+        self.assertFalse(revoked['active'])
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.assertEqual(1, len(key_admin.active_keys(self.email)))
+        original = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertEqual(self.key_item, original)
+        with self.assertRaises(ValueError):
+            key_admin.command({**event, 'operation': 'revoke-test-key', 'key_id': self.key_id}, self.admin_context)
 
     def test_operator_grants_only_selected_active_key_and_audits_before_mutation(self):
         ddb = self.key_setup()

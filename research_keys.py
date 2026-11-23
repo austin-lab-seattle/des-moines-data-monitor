@@ -1,6 +1,7 @@
 """Explicit API-key authorization for the private research export service."""
 import hmac
 import os
+import time
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 
@@ -28,7 +29,8 @@ def authenticate(event, cognito, groups_for):
     subject = api.ddb_string(item, 'research_subject')
     if (not expected or not hmac.compare_digest(api.key_hash(raw), expected)
             or api.ddb_string(item, 'status') != 'ACTIVE'
-            or SCOPE not in api.ddb_string_list(item, 'scopes') or not email or not subject):
+            or SCOPE not in api.ddb_string_list(item, 'scopes') or not email or not subject
+            or ('expires_at' in item and (api.ddb_number(item, 'expires_at', 0) or 0) <= time.time())):
         return None, api.response(403, {'error': 'Research API access denied.'})
     try:
         user = cognito.admin_get_user(UserPoolId=api_research_pool(), Username=email)
