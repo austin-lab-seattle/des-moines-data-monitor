@@ -13,8 +13,9 @@ https://yvhb48sthk.execute-api.us-west-2.amazonaws.com
 
 The public researcher API is read-only and limited to the latest 14 days.
 The same history limit applies to dashboard requests without a key and to keyed
-programmatic requests. Public API keys do not grant archive access. Full-history
-research exports require an explicitly approved Team Console account.
+programmatic requests. Ordinary API keys do not grant archive access. Full-history research exports
+use separate endpoints and require explicit account approval plus a separately
+granted research permission on the key, or approved Team Console sign-in.
 
 To request a key:
 

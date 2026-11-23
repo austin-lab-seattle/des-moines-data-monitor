@@ -2,7 +2,10 @@
 
 Full-history exports are available at the [Team Console](https://deohs-des-moines-air.vercel.app/team?view=research)
 to existing, verified team accounts explicitly assigned `ResearchExporter`.
-Public API keys do not grant this permission. The portal checks current group
+Ordinary API keys do not grant this permission. An existing key can receive an
+explicit `research:export` scope after its verified owner has ResearchExporter
+approval. The key is bound to that account, and both permissions are checked
+on every request. The portal checks current group
 membership and shows **Full-history access enabled** or **Full-history access
 not enabled**. Administrators do not automatically receive export access.
 
@@ -42,7 +45,43 @@ row counts, date bounds, file size and SHA-256 checksum. Identical requests reus
 prepared results. Source values and annotation versions are pinned at request
 time. If review decisions change, a new download link requires a new export.
 
-## Download for R or other local analysis
+## Download using an approved API key (R/Python)
+
+Yeon's selected existing key receives the additional `research:export` scope;
+other keys, including future replacement keys, do not inherit it. No new secret
+is created or emailed. Keep the existing key in the `AQ_API_KEY` environment
+variable; do not put it in a script, command argument or URL.
+
+```sh
+python3 scripts/research/download_data.py --auth api-key --instrument NO2-CAPS
+python3 scripts/research/download_data.py --auth api-key --instrument BC-MA200 --include-flagged
+```
+
+These commands use the key without opening a browser. Both flag settings preserve
+original source values and annotation columns; the default excludes active flags.
+For R, install `httr2`, `openssl`, and `jsonlite` once, then:
+
+```r
+source("scripts/research/download_data.R")
+path <- download_research_data("NO2-CAPS", include_flagged = TRUE)
+data <- read.csv(gzfile(path), check.names = FALSE, colClasses = "character")
+```
+
+Both clients verify the downloaded file's SHA-256 checksum and send the key only
+to the API, never to the signed storage URL. Character columns preserve exact
+source strings; convert selected measurements to numeric for analysis as needed.
+Key requests share existing per-key quotas and named-user usage tracking. There
+is also a shared limit of ten preparations per approved account per hour across
+portal sessions and keys. Keys cannot access another account's export jobs.
+
+The keyed research API uses the same methods and suffixes as the team endpoints
+below, under `/air-quality/v1/keyed/research`, with `x-api-key` instead of the team
+Bearer token. Example: `POST /air-quality/v1/keyed/research/exports` with JSON
+`{"instrument":"NO2-CAPS","include_flagged":false}`. Poll the returned job ID,
+then request its `/download` suffix when Ready. Ordinary dashboard/keyed data
+routes remain limited to 14 days even for a research-approved key.
+
+## Download using team sign-in
 
 The standard-library Python helper completes the existing team OAuth sign-in
 with PKCE, including MFA, and keeps tokens in memory. It uses the existing
@@ -67,7 +106,7 @@ data <- read.csv(gzfile("NO2-CAPS_research.csv.gz"), check.names = FALSE)
 
 Use the team sign-in ID token in the Authorization Bearer header. Only API
 Gateway-verified team identities are accepted, and current membership is checked
-before creating, listing, inspecting or downloading exports. Public API keys,
+before creating, listing, inspecting or downloading exports. Ordinary API keys,
 unverified identities, revoked memberships and another member's job IDs cannot
 authorize a download.
 
@@ -97,3 +136,22 @@ year, separately from the one-day generated exports. It never sends an email or 
 `scripts/aws/manage_research_access.py --help` for the explicit grant/revoke
 options. Revocation stops new download links immediately; an already issued
 five-minute link retains its original expiry.
+
+
+## Grant or revoke a key's research scope
+
+`scripts/aws/manage_research_key.py` defaults to a read-only plan. It invokes the
+separate IAM-only operator service, which has no HTTP routes. Select exactly one
+existing active key belonging to the requested verified account. Granting also
+requires current ResearchExporter membership; revoking a scope does not require
+continued membership. Both changes are recorded in the private access audit.
+
+```sh
+python3 scripts/aws/manage_research_key.py --aws-creds-file /private/operator-creds.json --expected-account 213598695875 --email yscheong@uw.edu --actor-email pavands@uw.edu
+```
+
+Add `--key-id <existing-id> --apply` to grant that key. Add `--revoke` to remove
+only its research permission while retaining ordinary public read access. Key
+revocation, scope removal, account disablement, loss of verified identity, and
+ResearchExporter removal all block new export requests and new download links.
+Already issued five-minute links keep their original expiry.

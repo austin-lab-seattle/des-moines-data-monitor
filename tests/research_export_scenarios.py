@@ -20,6 +20,11 @@ from botocore.exceptions import ClientError
 
 import lambda_api as api
 import research_exports as research
+import research_keys
+import research_key_admin as key_admin
+import boto3
+from moto import mock_aws
+from types import SimpleNamespace
 from test_pipeline_snapshots import MemoryS3
 
 
@@ -79,6 +84,145 @@ class ResearchExportsTests(unittest.TestCase):
         dataset = research.get_item(job['dataset_id'])
         raw = self.s3.objects[dataset['result']['object_key']]['Body']
         return list(csv.DictReader(io.StringIO(gzip.decompress(raw).decode())))
+
+    def key_setup(self):
+        self.enterContext(mock_aws())
+        ddb = boto3.client('dynamodb', region_name='us-west-2')
+        ddb.create_table(TableName=api.API_KEYS_TABLE, BillingMode='PAY_PER_REQUEST',
+            KeySchema=[{'AttributeName': 'key_id', 'KeyType': 'HASH'}],
+            AttributeDefinitions=[{'AttributeName': name, 'AttributeType': kind} for name, kind in
+                [('key_id', 'S'), ('status', 'S'), ('created_at_epoch', 'N')]],
+            GlobalSecondaryIndexes=[{'IndexName': 'status-created-at-index',
+                'KeySchema': [{'AttributeName': 'status', 'KeyType': 'HASH'}, {'AttributeName': 'created_at_epoch', 'KeyType': 'RANGE'}],
+                'Projection': {'ProjectionType': 'ALL'}}])
+        ddb.create_table(TableName=api.RATE_LIMITS_TABLE, BillingMode='PAY_PER_REQUEST',
+            KeySchema=[{'AttributeName': 'counter_id', 'KeyType': 'HASH'}],
+            AttributeDefinitions=[{'AttributeName': 'counter_id', 'AttributeType': 'S'}])
+        self.enterContext(mock.patch.object(api, 'dynamodb_client', ddb))
+        self.enterContext(mock.patch.object(api, 'API_KEY_HASH_PEPPER', 'CI-only-research-pepper'))
+        self.key = 'aqk_0123456789abcdef_' + 'C' * 43
+        self.key_id = '0123456789abcdef'
+        self.email = 'researcher-one@example.org'
+        self.key_item = {'key_id': {'S': self.key_id}, 'key_hash': {'S': api.key_hash(self.key)},
+            'email': {'S': self.email}, 'status': {'S': 'ACTIVE'}, 'created_at_epoch': {'N': '1'},
+            'scopes': {'SS': [*api.READ_SCOPES.values(), research_keys.SCOPE]},
+            'research_subject': {'S': 'researcher-one'}}
+        ddb.put_item(TableName=api.API_KEYS_TABLE, Item=self.key_item)
+        self.groups.admin_get_user.return_value = {'Username': 'researcher-one', 'Enabled': True,
+            'UserAttributes': [{'Name': 'sub', 'Value': 'researcher-one'}, {'Name': 'email', 'Value': self.email},
+                               {'Name': 'email_verified', 'Value': 'true'}]}
+        self.enterContext(mock.patch.object(key_admin, 'cognito', self.groups))
+        self.enterContext(mock.patch.object(key_admin, 's3', self.s3))
+        self.enterContext(mock.patch.dict(os.environ, {'RESEARCH_EXPORT_BUCKET': research.EXPORT_BUCKET}))
+        self.admin_context = SimpleNamespace(invoked_function_arn='arn:aws:lambda:us-west-2:123456789012:function:aq-research-key-admin', aws_request_id='ci-admin-call')
+        return ddb
+
+    def key_event(self, path='/exports', method='GET', body=None):
+        event = self.event(path, method, body, authenticated=False)
+        event['rawPath'] = research_keys.ROOT + path
+        event['headers'] = {'x-api-key': self.key}
+        return event
+
+    def test_key_exports_use_live_approval_precise_values_toggle_and_existing_usage_tracking(self):
+        self.key_setup()
+        for include, expected in [(False, 1), (True, 2)]:
+            result = research.lambda_handler(self.key_event(method='POST', body={'instrument': 'NO2-CAPS', 'include_flagged': include}), None)
+            self.assertEqual(202, result['statusCode'], result)
+            job_id = json.loads(result['body'])['job_id'];job = research.get_item(job_id)
+            self.assertEqual(self.key_id, job['requested_via_key'])
+            rows = self.finish(job);self.assertEqual(expected, len(rows))
+            download = research.lambda_handler(self.key_event('/exports/' + job_id + '/download'), None)
+            self.assertEqual(200, download['statusCode'], download)
+            self.assertIn('url', json.loads(download['body']))
+            self.assertEqual('yes', download['headers']['X-API-Usage-Recorded'])
+        stats = api.api_usage.read_usage(api.dynamodb_client, api.RATE_LIMITS_TABLE, 'key', self.key_id, '2026-01-01')['lifetime']
+        self.assertEqual(4, stats['requests']);self.assertEqual(2, stats['exports_prepared'])
+        self.assertEqual(3, stats['export_rows'])
+        self.assertEqual('-1.234567891', rows[0]['Concentration'])
+
+    def test_keys_need_valid_hash_explicit_scope_and_stable_verified_account_binding(self):
+        ddb = self.key_setup()
+        for field, value in [('key_hash', {'S': 'bad'}), ('status', {'S': 'REVOKED'}),
+                             ('scopes', {'SS': list(api.READ_SCOPES.values())}), ('research_subject', {'S': 'another-account'})]:
+            ddb.put_item(TableName=api.API_KEYS_TABLE, Item={**self.key_item, field: value})
+            result = research.lambda_handler(self.key_event('/access'), None)
+            self.assertEqual(403, result['statusCode'], field)
+        ddb.put_item(TableName=api.API_KEYS_TABLE, Item=self.key_item)
+        for change in [('Enabled', False), ('email_verified', 'false'), ('sub', 'reassigned-email-owner')]:
+            user = self.groups.admin_get_user.return_value
+            original = json.loads(json.dumps(user))
+            if change[0] == 'Enabled':user['Enabled'] = False
+            else:
+                next(item for item in user['UserAttributes'] if item['Name'] == change[0])['Value'] = change[1]
+            self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+            self.groups.admin_get_user.return_value = original
+        self.assertNotIn(research_keys.SCOPE, api.READ_SCOPES.values())
+
+    def test_missing_key_or_token_claims_cannot_authorize_keyed_routes_or_cross_users(self):
+        self.key_setup()
+        forged = self.event('/access');forged['rawPath'] = research_keys.ROOT + '/access'
+        self.assertEqual(401, research.lambda_handler(forged, None)['statusCode'])
+        job_id, _ = self.create()
+        self.groups.admin_get_user.return_value['UserAttributes'][0]['Value'] = 'different-owner'
+        api.dynamodb_client.put_item(TableName=api.API_KEYS_TABLE, Item={**self.key_item, 'research_subject': {'S': 'different-owner'}})
+        self.assertEqual(404, research.lambda_handler(self.key_event('/exports/' + job_id + '/download'), None)['statusCode'])
+        wrong_path = self.key_event('/access');wrong_path['rawPath'] = research.ROOT + '/access'
+        self.assertEqual(401, research.lambda_handler(wrong_path, None)['statusCode'])
+
+    def test_key_or_group_revocation_blocks_status_and_download_with_same_original_key(self):
+        ddb = self.key_setup()
+        job_id, job = self.create();self.finish(job)
+        self.groups.admin_list_groups_for_user.return_value = {'Groups': [{'GroupName': 'Viewer'}]}
+        for path in ('/exports', '/exports/' + job_id, '/exports/' + job_id + '/download'):
+            self.assertEqual(403, research.lambda_handler(self.key_event(path), None)['statusCode'])
+        self.groups.admin_list_groups_for_user.return_value = {'Groups': [{'GroupName': research.ROLE}]}
+        ddb.put_item(TableName=api.API_KEYS_TABLE, Item={**self.key_item, 'status': {'S': 'REVOKED'}})
+        self.assertEqual(403, research.lambda_handler(self.key_event('/exports/' + job_id + '/download'), None)['statusCode'])
+
+    def test_accounting_failure_and_key_lookup_failure_do_not_issue_a_download(self):
+        self.key_setup()
+        with mock.patch.object(api.api_usage, 'record_usage', side_effect=RuntimeError('offline')):
+            self.assertEqual(503, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        with mock.patch.object(api.dynamodb_client, 'get_item', side_effect=RuntimeError('offline')):
+            self.assertEqual(503, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+
+    def test_key_rate_limits_and_deleted_accounts_fail_closed(self):
+        self.key_setup()
+        with mock.patch.object(api, 'PER_MINUTE_LIMIT', 1):
+            self.assertEqual(200, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+            self.assertEqual(429, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.groups.admin_get_user.side_effect = ClientError({'Error': {'Code': 'UserNotFoundException'}}, 'AdminGetUser')
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+
+    def test_operator_grants_only_selected_active_key_and_audits_before_mutation(self):
+        ddb = self.key_setup()
+        event = {'operation': 'plan', 'email': self.email}
+        result = key_admin.command(event, self.admin_context)
+        self.assertEqual([self.key_id], [key['key_id'] for key in result['keys']])
+        self.assertNotIn('key_hash', json.dumps(result));self.assertNotIn(self.key, json.dumps(result))
+        grant = {**event, 'operation': 'grant', 'actor': {'email': 'operator@example.org', 'arn': 'operator-arn'}}
+        ddb.put_item(TableName=api.API_KEYS_TABLE, Item={**self.key_item, 'scopes': {'SS': list(api.READ_SCOPES.values())}})
+        result = key_admin.command(grant, self.admin_context)
+        self.assertTrue(result['enabled'])
+        current = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertIn(research_keys.SCOPE, current['scopes']['SS'])
+        self.assertEqual('researcher-one', current['research_subject']['S'])
+        self.assertEqual(200, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        key_admin.command({**grant, 'operation': 'revoke'}, self.admin_context)
+        self.assertEqual(403, research.lambda_handler(self.key_event('/access'), None)['statusCode'])
+        self.assertEqual(4, len([key for key in self.s3.objects if key.startswith('audit/research-key-access/')]))
+
+    def test_operator_never_accepts_http_events_unapproved_accounts_or_audit_failure(self):
+        ddb = self.key_setup()
+        event = {'operation': 'grant', 'email': self.email, 'actor': {'email': 'operator@example.org', 'arn': 'operator-arn'}}
+        with self.assertRaises(ValueError): key_admin.command({**event, 'requestContext': {}}, self.admin_context)
+        self.groups.admin_list_groups_for_user.return_value = {'Groups': [{'GroupName': 'Viewer'}]}
+        with self.assertRaises(ValueError): key_admin.command(event, self.admin_context)
+        self.groups.admin_list_groups_for_user.return_value = {'Groups': [{'GroupName': research.ROLE}]}
+        with mock.patch.object(self.s3, 'put_object', side_effect=RuntimeError('offline')):
+            with self.assertRaises(RuntimeError):key_admin.command(event, self.admin_context)
+        current = ddb.get_item(TableName=api.API_KEYS_TABLE, Key={'key_id': {'S': self.key_id}})['Item']
+        self.assertEqual(self.key_item, current)
 
     def test_duplicate_workers_and_conditional_update_conflicts_are_safe(self):
         job_id, job = self.create()
