@@ -16,8 +16,7 @@ os.environ['AWS_SECRET_ACCESS_KEY'] = 'testing'
 os.environ['AWS_DEFAULT_REGION'] = 'us-west-2'
 os.environ['AWS_EC2_METADATA_DISABLED'] = 'true'
 
-import boto3
-from moto import mock_aws
+from botocore.exceptions import ClientError
 
 import lambda_api as api
 import research_exports as research
@@ -25,6 +24,13 @@ from test_pipeline_snapshots import MemoryS3
 
 
 class ExportS3(MemoryS3):
+    def put_object(self, Bucket, Key, Body, **kwargs):
+        exists = self.objects.get(Key)
+        if (kwargs.get('IfNoneMatch') == '*' and exists
+                or kwargs.get('IfMatch') and (not exists or exists['ETag'] != kwargs['IfMatch'])):
+            raise ClientError({'Error': {'Code': 'PreconditionFailed'}}, 'PutObject')
+        return super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kwargs)
+
     def upload_fileobj(self, stream, bucket, key, ExtraArgs):
         self.put_object(Bucket=bucket, Key=key, Body=stream.read(), **ExtraArgs)
 
@@ -34,16 +40,6 @@ class ExportS3(MemoryS3):
 
 class ResearchExportsTests(unittest.TestCase):
     def setUp(self):
-        self.aws = mock_aws()
-        self.aws.start()
-        self.addCleanup(self.aws.stop)
-        table = boto3.resource('dynamodb', region_name='us-west-2').create_table(
-            TableName=research.TABLE, KeySchema=[{'AttributeName': 'job_id', 'KeyType': 'HASH'}],
-            AttributeDefinitions=[{'AttributeName': name, 'AttributeType': 'S'} for name in ('job_id', 'owner', 'created_at')],
-            BillingMode='PAY_PER_REQUEST', GlobalSecondaryIndexes=[{'IndexName': 'owner-created-index',
-                'KeySchema': [{'AttributeName': 'owner', 'KeyType': 'HASH'}, {'AttributeName': 'created_at', 'KeyType': 'RANGE'}],
-                'Projection': {'ProjectionType': 'ALL'}}])
-        self.enterContext(mock.patch.object(research, 'db', table))
         self.enterContext(mock.patch.object(research, 'EXPORT_BUCKET', 'private-research-test'))
         self.s3 = ExportS3()
         self.enterContext(mock.patch.object(api, 's3_client', self.s3))
@@ -83,6 +79,25 @@ class ResearchExportsTests(unittest.TestCase):
         dataset = research.get_item(job['dataset_id'])
         raw = self.s3.objects[dataset['result']['object_key']]['Body']
         return list(csv.DictReader(io.StringIO(gzip.decompress(raw).decode())))
+
+    def test_duplicate_workers_and_conditional_update_conflicts_are_safe(self):
+        job_id, job = self.create()
+        self.finish(job)
+        self.assertEqual({'state': 'ALREADY_STARTED'}, research.worker_handler({'dataset_id': job['dataset_id']}, None))
+        original_write = research.store.write
+        calls = []
+        def collide_once(item, etag=None):
+            calls.append(item)
+            if len(calls) == 1:
+                current, latest = research.store.read(job_id)
+                original_write({**current, 'concurrent_field': 'retained'}, latest)
+                raise research.Conflict()
+            return original_write(item, etag)
+        with mock.patch.object(research.store, 'write', side_effect=collide_once):
+            research.store.update(job_id, {'last_link_at': 'new'})
+        saved = research.get_item(job_id)
+        self.assertEqual('retained', saved['concurrent_field'])
+        self.assertEqual('new', saved['last_link_at'])
 
     def test_no_token_api_key_or_unverified_email_can_retrieve_access_or_exports(self):
         for path in ('/access', '/exports', '/' + 'a' * 36):
@@ -192,7 +207,7 @@ class ResearchExportsTests(unittest.TestCase):
         self.s3.gets.clear()
         denied = research.lambda_handler(self.event(method='POST', body={'instrument': 'NO2-CAPS'}), None)
         self.assertEqual(429, denied['statusCode'])
-        self.assertEqual([], self.s3.gets)
+        self.assertTrue(all(key.startswith('state/') for key in self.s3.gets))
 
 def browser_contract():
     case = ResearchExportsTests('test_default_excludes_flags_and_include_toggle_preserves_full_history_and_annotations')

@@ -39,8 +39,8 @@ export default function ResearchData({ apiRequest, onSignInAgain }) {
       if (!nextAccess.enabled) { setJobs([]); return; }
       const result = await apiRequest(`${ROOT}/exports`, { signal: controller.signal });
       const next = result.exports || [];
-      // The jobs list uses an eventually consistent index. Newly submitted
-      // jobs are checked directly until the index includes them.
+      // A list refresh may have started before a new submission completed.
+      // Keep new jobs visible and check their status directly in that case.
       for (const job of jobsRef.current.filter(pending)) {
         if (!next.some(item => item.job_id === job.job_id)) {
           next.push(await apiRequest(`${ROOT}/exports/${job.job_id}`, { signal: controller.signal }));

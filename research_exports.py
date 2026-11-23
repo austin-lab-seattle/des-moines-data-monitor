@@ -19,15 +19,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import boto3
-from boto3.dynamodb.conditions import Key
-from botocore.exceptions import ClientError
 from botocore.config import Config
 
 import lambda_api as api
 import observation_index as index
+from research_state import ResearchState, Conflict, RateExceeded
 
 ROOT = '/air-quality/internal/v1/research'
-TABLE = os.environ.get('RESEARCH_EXPORT_TABLE', 'AQResearchExports')
 EXPORT_BUCKET = os.environ.get('RESEARCH_EXPORT_BUCKET', '')
 POOL = os.environ.get('TEAM_USER_POOL_ID', 'us-west-2_oR7CIzxQG')
 WORKER = os.environ.get('RESEARCH_EXPORT_WORKER', 'aq-research-export-worker')
@@ -37,10 +35,10 @@ EXPORT_VERSION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 TEAM_GROUPS = api.TEAM_ROLES | {ROLE}
 ANNOTATIONS = ['_research_row_key', '_research_timestamp_utc', '_research_status',
                '_research_flags', '_research_corrections']
-db = boto3.resource('dynamodb').Table(TABLE)
 cognito = boto3.client('cognito-idp')
 lambda_client = boto3.client('lambda')
 api.s3_client = boto3.client('s3', config=Config(signature_version='s3v4'))
+store = ResearchState(lambda: api.s3_client, lambda: EXPORT_BUCKET)
 
 
 def utc_now():
@@ -88,7 +86,7 @@ def review_snapshot(instrument):
 
 
 def get_item(pk):
-    return db.get_item(Key={'job_id': pk}, ConsistentRead=True).get('Item')
+    return store.get(pk)
 
 
 def private_json(key):
@@ -126,12 +124,7 @@ def export_spec(event):
 
 
 def check_rate(subject):
-    now = int(time.time())
-    db.update_item(Key={'job_id': f'rate#{subject}#{now // 3600}'},
-        UpdateExpression='SET expires_at = :ttl ADD #requests :one',
-        ConditionExpression='attribute_not_exists(#requests) OR #requests < :limit',
-        ExpressionAttributeNames={'#requests': 'requests'},
-        ExpressionAttributeValues={':ttl': now + 7200, ':one': 1, ':limit': 10})
+    store.rate(subject)
 
 
 def create_export(event, user):
@@ -141,10 +134,8 @@ def create_export(event, user):
         return reply(400, {'error': 'Choose a valid instrument, date range and Include flagged records setting.'})
     try:
         check_rate(user['subject'])
-    except ClientError as exc:
-        if exc.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            return reply(429, {'error': 'You can prepare up to 10 research exports per hour.'})
-        raise
+    except RateExceeded:
+        return reply(429, {'error': 'You can prepare up to 10 research exports per hour.'})
     instrument = spec['instrument']
     etag = api.s3_client.head_object(Bucket=api.BUCKET, Key=f'{instrument}/silver/{instrument}_data.csv')['ETag']
     manifest = index.read_json(api, index.manifest_key(instrument, api.SILVER_VIEW_CODE_VERSION), index.MAX_MANIFEST_BYTES)
@@ -174,15 +165,12 @@ def create_export(event, user):
         dataset = {'job_id': dataset_id, 'kind': 'dataset', 'state': 'PENDING',
                    'spec': spec, 'request_key': request_key, 'created_at': utc_now(), 'expires_at': now + 86400}
         try:
-            db.put_item(Item=dataset, ConditionExpression='attribute_not_exists(job_id)')
+            store.write(dataset)
             result = lambda_client.invoke(FunctionName=WORKER, InvocationType='Event',
                                            Payload=json.dumps({'dataset_id': dataset_id}).encode())
             if result.get('StatusCode') != 202:
                 raise RuntimeError('Worker did not accept the export')
-        except ClientError as exc:
-            if exc.response['Error']['Code'] != 'ConditionalCheckFailedException':
-                fail_dataset(dataset_id)
-                raise
+        except Conflict:
             dataset = get_item(dataset_id)
         except Exception:
             fail_dataset(dataset_id)
@@ -191,15 +179,14 @@ def create_export(event, user):
     job = {'job_id': job_id, 'kind': 'request', 'owner': user['subject'], 'requested_by': user['email'],
            'dataset_id': dataset_id, 'created_at': utc_now(), 'expires_at': int(dataset['expires_at']),
            'spec': spec}
-    db.put_item(Item=job, ConditionExpression='attribute_not_exists(job_id)')
+    store.add_job(job)
     return reply(202, {**job_result(job), 'instrument': instrument,
                       'include_flagged': spec['include_flagged'], 'created_at': job['created_at'],
                       'spec': spec, 'requested_by': user['email']})
 
 
 def fail_dataset(dataset_id):
-    db.update_item(Key={'job_id': dataset_id}, UpdateExpression='SET #state = :state',
-                   ExpressionAttributeNames={'#state': 'state'}, ExpressionAttributeValues={':state': 'FAILED'})
+    store.update(dataset_id, {'state': 'FAILED'})
 
 
 def safe_job(job):
@@ -229,8 +216,7 @@ def job_result(job, download=False):
             'Bucket': EXPORT_BUCKET, 'Key': dataset['result']['object_key'],
             'ResponseContentDisposition': f'attachment; filename="{dataset["result"]["filename"]}"'}, ExpiresIn=300)
         payload['expires_in_seconds'] = 300
-        db.update_item(Key={'job_id': job['job_id']}, UpdateExpression='SET last_link_at = :now',
-                       ExpressionAttributeValues={':now': utc_now()})
+        store.update(job['job_id'], {'last_link_at': utc_now()})
     payload.pop('object_key', None)
     return payload
 
@@ -250,9 +236,7 @@ def lambda_handler(event, context):
         if path == f'{ROOT}/exports' and method == 'POST':
             return create_export(event, user)
         if path == f'{ROOT}/exports' and method == 'GET':
-            result = db.query(IndexName='owner-created-index', KeyConditionExpression=Key('owner').eq(user['subject']),
-                              ScanIndexForward=False, Limit=20)
-            return reply(200, {'exports': [job_result(item) for item in result.get('Items', [])]})
+            return reply(200, {'exports': [job_result(item) for item in store.history(user['subject'])]})
         match = re.fullmatch(re.escape(ROOT) + r'/exports/([a-f0-9-]{36})(/download)?', path)
         if match and method == 'GET':
             job = get_item(match.group(1))
@@ -278,13 +262,9 @@ def worker_handler(event, context):
     if not dataset or dataset.get('kind') != 'dataset' or int(dataset['expires_at']) <= time.time():
         return {'state': 'EXPIRED'}
     try:
-        db.update_item(Key={'job_id': dataset_id}, UpdateExpression='SET #state = :processing, started_epoch = :now',
-            ConditionExpression='#state = :pending', ExpressionAttributeNames={'#state': 'state'},
-            ExpressionAttributeValues={':processing': 'PROCESSING', ':pending': 'PENDING', ':now': int(time.time())})
-    except ClientError as exc:
-        if exc.response['Error']['Code'] == 'ConditionalCheckFailedException':
-            return {'state': 'ALREADY_STARTED'}
-        raise
+        store.update(dataset_id, {'state': 'PROCESSING', 'started_epoch': int(time.time())}, expected_state='PENDING')
+    except Conflict:
+        return {'state': 'ALREADY_STARTED'}
     try:
         source = private_json(dataset['request_key'])
         spec, manifest = source['spec'], source['manifest']
@@ -360,9 +340,7 @@ def worker_handler(event, context):
                   'source_etag': spec['source_etag'], 'reader_version': spec['reader_version'],
                   'export_version': spec['export_version']}
         result['sha256'] = checksum.hexdigest()
-        db.update_item(Key={'job_id': dataset_id}, UpdateExpression='SET #state = :ready, #result = :result',
-            ConditionExpression='#state = :processing', ExpressionAttributeNames={'#state': 'state', '#result': 'result'},
-            ExpressionAttributeValues={':ready': 'READY', ':processing': 'PROCESSING', ':result': result})
+        store.update(dataset_id, {'state': 'READY', 'result': result}, expected_state='PROCESSING')
         print(json.dumps({'event': 'research_export_ready', 'dataset_id': dataset_id, 'rows': rows, 'bytes': size}))
         return {'state': 'READY', 'rows': rows}
     except Exception as exc:

@@ -16,7 +16,6 @@ from botocore.exceptions import ClientError
 ROOT = Path(__file__).resolve().parents[2]
 REGION = 'us-west-2'
 ROLE = 'AQResearchExportRole'
-TABLE = 'AQResearchExports'
 API_FUNCTION = 'aq-research-export-api'
 WORKER = 'aq-research-export-worker'
 POOL = 'us-west-2_oR7CIzxQG'
@@ -38,9 +37,22 @@ def session(path):
 def package():
     out = io.BytesIO()
     with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ['lambda_api.py', 'api_usage.py', 'observation_index.py', 'public_data_policy.py', 'research_exports.py']:
+        for name in ['lambda_api.py', 'api_usage.py', 'observation_index.py', 'public_data_policy.py', 'research_exports.py', 'research_state.py']:
             bundle.write(ROOT / name, name)
     return out.getvalue()
+
+
+def wait_function(client, name):
+    # The operator policy permits GetFunction, which includes configuration,
+    # but does not require the separate GetFunctionConfiguration action.
+    for _ in range(60):
+        config = client.get_function(FunctionName=name)['Configuration']
+        if config.get('State') == 'Failed' or config.get('LastUpdateStatus') == 'Failed':
+            raise RuntimeError(f'{name} deployment failed')
+        if config.get('State') == 'Active' and config.get('LastUpdateStatus', 'Successful') == 'Successful':
+            return
+        time.sleep(2)
+    raise RuntimeError(f'{name} deployment did not become ready')
 
 
 def main():
@@ -86,10 +98,7 @@ def main():
         {'Effect': 'Allow', 'Action': ['s3:ListBucket'], 'Resource': f'arn:aws:s3:::{SOURCE_BUCKET}',
          'Condition': {'StringLike': {'s3:prefix': [f'{instrument}/{kind}/*' for instrument in INSTRUMENTS for kind in ['flags', 'corrections']]}}},
         {'Effect': 'Allow', 'Action': ['s3:GetObject', 's3:PutObject', 's3:AbortMultipartUpload', 's3:ListMultipartUploadParts'],
-         'Resource': [f'arn:aws:s3:::{bucket}/exports/*', f'arn:aws:s3:::{bucket}/requests/*']},
-        {'Effect': 'Allow', 'Action': ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem', 'dynamodb:Query'],
-         'Resource': [f'arn:aws:dynamodb:{REGION}:{account}:table/{TABLE}',
-                      f'arn:aws:dynamodb:{REGION}:{account}:table/{TABLE}/index/owner-created-index']},
+         'Resource': [f'arn:aws:s3:::{bucket}/exports/*', f'arn:aws:s3:::{bucket}/requests/*', f'arn:aws:s3:::{bucket}/state/*']},
         {'Effect': 'Allow', 'Action': ['cognito-idp:AdminListGroupsForUser'],
          'Resource': f'arn:aws:cognito-idp:{REGION}:{account}:userpool/{POOL}'},
         {'Effect': 'Allow', 'Action': ['lambda:InvokeFunction'],
@@ -123,20 +132,6 @@ def main():
     s3.put_bucket_lifecycle_configuration(Bucket=bucket, LifecycleConfiguration={'Rules': [
         {'ID': 'expire-generated-exports', 'Status': 'Enabled', 'Filter': {'Prefix': ''},
          'Expiration': {'Days': 1}, 'AbortIncompleteMultipartUpload': {'DaysAfterInitiation': 1}}]})
-    ddb = aws.client('dynamodb')
-    try:
-        ddb.describe_table(TableName=TABLE)
-    except ddb.exceptions.ResourceNotFoundException:
-        ddb.create_table(TableName=TABLE, BillingMode='PAY_PER_REQUEST',
-            KeySchema=[{'AttributeName': 'job_id', 'KeyType': 'HASH'}],
-            AttributeDefinitions=[{'AttributeName': name, 'AttributeType': 'S'} for name in ['job_id', 'owner', 'created_at']],
-            GlobalSecondaryIndexes=[{'IndexName': 'owner-created-index',
-                'KeySchema': [{'AttributeName': 'owner', 'KeyType': 'HASH'}, {'AttributeName': 'created_at', 'KeyType': 'RANGE'}],
-                'Projection': {'ProjectionType': 'ALL'}}])
-        ddb.get_waiter('table_exists').wait(TableName=TABLE)
-    ttl = ddb.describe_time_to_live(TableName=TABLE)['TimeToLiveDescription'].get('TimeToLiveStatus')
-    if ttl == 'DISABLED':
-        ddb.update_time_to_live(TableName=TABLE, TimeToLiveSpecification={'Enabled': True, 'AttributeName': 'expires_at'})
     cognito = aws.client('cognito-idp')
     try:
         cognito.get_group(UserPoolId=POOL, GroupName='ResearchExporter')
@@ -145,20 +140,20 @@ def main():
                              Description='Explicitly approved full-history research exports', Precedence=35)
     lam = aws.client('lambda')
     code = package()
-    environment = {'RESEARCH_EXPORT_BUCKET': bucket, 'RESEARCH_EXPORT_TABLE': TABLE,
+    environment = {'RESEARCH_EXPORT_BUCKET': bucket,
         'RESEARCH_EXPORT_WORKER': WORKER, 'TEAM_USER_POOL_ID': POOL, 'S3_BUCKET': SOURCE_BUCKET,
         'DATA_TIMEZONE': 'America/Los_Angeles', 'RESEARCH_CONTACT_EMAIL': 'pavands@uw.edu'}
     for name, handler, memory, timeout in [(WORKER, 'research_exports.worker_handler', 2048, 900),
                                           (API_FUNCTION, 'research_exports.lambda_handler', 512, 20)]:
         try:
-            current = lam.get_function_configuration(FunctionName=name)
+            current = lam.get_function(FunctionName=name)['Configuration']
         except lam.exceptions.ResourceNotFoundException:
             current = None
         if current:
             if current['Role'] != role_arn:
                 raise RuntimeError('Existing function uses an unexpected role')
             lam.update_function_code(FunctionName=name, ZipFile=code, RevisionId=current['RevisionId'])
-            lam.get_waiter('function_updated_v2').wait(FunctionName=name)
+            wait_function(lam, name)
             lam.update_function_configuration(FunctionName=name, Handler=handler, MemorySize=memory,
                 Timeout=timeout, Environment={'Variables': environment})
         else:
@@ -172,11 +167,22 @@ def main():
                     if attempt == 11:
                         raise
                     time.sleep(3)
-            lam.get_waiter('function_active_v2').wait(FunctionName=name)
-        lam.get_waiter('function_updated_v2').wait(FunctionName=name)
+            wait_function(lam, name)
+        wait_function(lam, name)
         print(json.dumps({'function': name, 'ready': True}), flush=True)
-    lam.put_function_concurrency(FunctionName=WORKER, ReservedConcurrentExecutions=2)
-    lam.put_function_event_invoke_config(FunctionName=WORKER, MaximumRetryAttempts=0, MaximumEventAgeInSeconds=3600)
+    # Conditional state claims prevent duplicate execution even when Lambda's
+    # default async retry policy is used. These operator-level tuning actions
+    # are optional and must not require widening deployment permissions.
+    for action, options in [
+        (lam.put_function_concurrency, {'ReservedConcurrentExecutions': 2}),
+        (lam.put_function_event_invoke_config, {'MaximumRetryAttempts': 0, 'MaximumEventAgeInSeconds': 3600}),
+    ]:
+        try:
+            action(FunctionName=WORKER, **options)
+        except ClientError as exc:
+            if exc.response['Error']['Code'] not in {'AccessDeniedException', 'AccessDenied'}:
+                raise
+            print(json.dumps({'optional_tuning': action.__name__, 'applied': False}), flush=True)
     function_arn = f'arn:aws:lambda:{REGION}:{account}:function:{API_FUNCTION}'
     integrations = gateway.get_integrations(ApiId=args.api_id).get('Items', [])
     integration = next((item for item in integrations if item.get('IntegrationUri') == function_arn), None)

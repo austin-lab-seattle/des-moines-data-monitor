@@ -106,7 +106,7 @@ test('revocation prevents downloading even when an old session still shows a pre
   await expect(page.getByRole('alert')).toContainText('revoked');
 });
 
-test('a newly queued export remains visible before the jobs index catches up', async ({ page }) => {
+test('a newly queued export remains visible while a list refresh catches up', async ({ page }) => {
   await setup(page, { delayedList: true });
   await page.getByRole('button', { name: 'Prepare CSV (.gz)', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Download CSV', exact: true })).toBeVisible({ timeout: 10000 });
