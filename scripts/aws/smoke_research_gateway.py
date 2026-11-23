@@ -34,13 +34,22 @@ def run(aws, email, actor_email, instrument, include_flagged=False):
         return data['result']
     def active_ids():
         return {item['key_id'] for item in admin('plan')['keys']}
+    def wait_for_key(identifier, present):
+        deadline = time.monotonic() + 10
+        while True:
+            active = active_ids()
+            if (identifier in active) is present:
+                return active
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Key metadata index did not converge')
+            time.sleep(.5)
     before = active_ids()
     created, raw, identifier = None, None, None
     try:
         created = admin('create-test-key')
         raw, identifier = created['api_key'], created['key_id']
         print('Temporary key created; raw secret will not be printed or saved.', flush=True)
-        active = active_ids()
+        active = wait_for_key(identifier, True)
         assert before.issubset(active) and identifier in active, 'Existing keys changed unexpectedly'
         access = request(raw, '/access', api_key=True)
         assert access.get('enabled') is True
@@ -100,7 +109,7 @@ def run(aws, email, actor_email, instrument, include_flagged=False):
                     raise
             else:
                 raise RuntimeError('Revoked temporary key was unexpectedly accepted')
-            active = active_ids()
+            active = wait_for_key(identifier, False)
             assert identifier not in active and before.issubset(active)
             print('Temporary key revoked; gateway returned 403; existing active keys preserved.', flush=True)
 
